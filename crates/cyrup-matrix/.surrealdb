@@ -1,0 +1,16 @@
+{
+  "connection": {
+    "url": "file://data/matrix.db",
+    "ns": "cyrum",
+    "db": "matrix",
+    "username": "root",
+    "password": "root"
+  },
+  "paths": {
+    "migrations": "migrations",
+    "outputs": "outputs"
+  },
+  "templates": {
+    "version": 1
+  }
+}

@@ -1,0 +1,25 @@
+# Justfile for cyrup-matrix
+
+# Run database migrations
+migrate:
+    cargo run -- migrate
+
+# Run all tests with nextest
+test:
+    cargo nextest run
+
+# Run database integration tests with nextest using the db profile
+test-db:
+    cargo nextest run --profile db "db_operations::"
+
+# Run database integration tests with coverage
+test-db-coverage:
+    cargo llvm-cov nextest --profile db "db_operations::"
+
+# Run all integration tests
+test-integration:
+    cargo nextest run --test integration
+
+# Run with tracing enabled
+test-db-trace:
+    RUST_LOG=debug cargo nextest run --profile db "db_operations::"

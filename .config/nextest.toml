@@ -1,0 +1,25 @@
+# nextest configuration file
+# See https://nexte.st/book/configuration.html for more information
+
+[profile.default]
+# Show output for failing tests as soon as they fail, and also at the end of the run
+failure-output = "immediate-final"
+# Show skipped tests in the output
+status-level = "skip"
+# Retry failed tests up to 2 times
+retries = 2
+# Default test timeout is 60 seconds
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Custom profile for database tests
+[profile.db]
+# Database tests need extra time because they perform migrations
+slow-timeout = { period = "120s", terminate-after = 3 }
+# Show output for all tests
+success-output = "immediate"
+failure-output = "immediate-final"
+
+# Profile for running all tests
+[profile.all]
+# Set concurrency to 16 for faster tests
+test-threads = 16

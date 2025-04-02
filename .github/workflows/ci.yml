@@ -1,0 +1,47 @@
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+name: CI
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Install Rust (1.76 w/ clippy)
+      uses: dtolnay/rust-toolchain@1.76
+      with:
+          components: clippy
+    - name: Install Rust (nightly w/ rustfmt)
+      run: rustup toolchain install nightly --component rustfmt
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run sccache-cache
+      uses: mozilla-actions/sccache-action@v0.0.3
+    - name: Check formatting
+      run: cargo +nightly fmt --all -- --check
+    - name: Check Clippy
+      if: matrix.platform == 'ubuntu-latest'
+      uses: giraffate/clippy-action@v1
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        reporter: 'github-check'
+    - name: Run tests
+      run: cargo test --locked
