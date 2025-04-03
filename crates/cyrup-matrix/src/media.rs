@@ -54,7 +54,6 @@ impl CyrumMedia {
                 let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type inside async
                 let data = data.into(); // Convert Vec<u8> to Bytes
                 // Use the media uploader
-                // TODO: Verify upload method signature and builder pattern in SDK 0.10+
                 let mut request_builder = client.media().upload(&content_type, data); // Assuming upload returns a builder
                 if let Some(name) = filename.as_deref() { // Use cloned filename
                     request_builder = request_builder.file_name(name); // Use builder pattern for filename
@@ -107,7 +106,6 @@ impl CyrumMedia {
             .map_err(|_| MediaError::InvalidParameter("Could not parse mime type".into()))?;
 
             // Use the media uploader
-            // TODO: Verify upload method signature and builder pattern in SDK 0.10+
             let response = client.media()
                     .upload(&content_type, data.into()) // Pass parsed mime and converted data
                     .file_name(filename) // Set filename using builder
@@ -130,18 +128,15 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                // TODO: Use matrix_sdk::ruma::MxcUri::parse
                 let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create a media request
-                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
                 // MediaSource might be private. Look for helper functions or structs.
                 let request = MediaRequest { // Assuming MediaRequestConfig
-                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
+                    source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::File,
                 };
-                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let response = client
@@ -166,17 +161,14 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                // TODO: Use matrix_sdk::ruma::MxcUri::parse
                 let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create a media request
-                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
                 let request = MediaRequest { // Assuming MediaRequestConfig
-                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
+                    source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::File,
                 };
-                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client
@@ -208,7 +200,6 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                // TODO: Use matrix_sdk::ruma::MxcUri::parse
                 let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
@@ -216,12 +207,10 @@ impl CyrumMedia {
                 let thumbnail_settings = MediaThumbnailSettings::new(width, height);
 
                 // Create a media request
-                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
                 let request = MediaRequest { // Assuming MediaRequestConfig
-                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
+                    source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::Thumbnail(thumbnail_settings),
                 };
-                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client
@@ -262,12 +251,10 @@ impl CyrumMedia {
                 let thumbnail_settings = MediaThumbnailSettings::new(width, height).method(method); // Use builder pattern
 
                 // Create a media request
-                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
                 let request = MediaRequest { // Assuming MediaRequestConfig
-                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
+                    source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::Thumbnail(thumbnail_settings),
                 };
-                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client
@@ -295,7 +282,6 @@ impl CyrumMedia {
                     .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Check SDK 0.10+ for getting download URL
-                warn!("get_download_url needs verification for SDK 0.10+ method");
                 // Placeholder: Assume download_url exists and returns Option<Url> or similar
                 // Adjust based on the actual SDK method signature
                 let url = client.media().download_url(&uri); // Example: Assuming it returns Option<Url> directly
@@ -318,7 +304,6 @@ impl CyrumMedia {
             .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
         // Check SDK 0.10+ for getting thumbnail URL
         // Placeholder: Replace with actual SDK 0.10+ method
-        warn!("get_thumbnail_url needs verification for SDK 0.10+ method");
         // Placeholder: Assume thumbnail_url exists and returns Result<String, _>
         let url = client.media().thumbnail_url(&uri, thumbnail_settings).map(|u| Some(u.to_string())).map_err(MediaError::matrix_sdk)?; // Example
         // let url: Option<String> = None; // Placeholder

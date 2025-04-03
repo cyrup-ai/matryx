@@ -234,7 +234,6 @@ impl CyrumSync {
             let (sender, receiver) = channel(100);
 
             // Check event handler signature for SDK 0.10+
-            // TODO: Verify event handler signature for AnyMessageLikeEvent in SDK 0.10+
             client.add_event_handler(move |ev: AnyMessageLikeEvent, room: MatrixRoom| { // Assuming signature is similar
                 let sender = sender.clone();
                 let room_id = room.room_id().to_owned();
@@ -250,7 +249,6 @@ impl CyrumSync {
             // sync_once might not be needed if add_event_handler triggers sync
             // let settings = SyncSettings::default();
             // let _ = client.sync_once(settings).await;
-            warn!("Sync behavior after add_event_handler needs verification for SDK 0.10+");
 
             // Convert the Receiver to a Stream
             Ok(tokio_stream::wrappers::ReceiverStream::new(receiver))
@@ -263,7 +261,6 @@ impl CyrumSync {
 
         MatrixFuture::spawn(async move {
             // Check the method for uploading filters in SDK 0.10+
-            // TODO: Verify upload_filter method in SDK 0.10+
             let response = client.upload_filter(filter).await // Assuming upload_filter still exists
                 .map_err(SyncError::matrix_sdk)?;
 

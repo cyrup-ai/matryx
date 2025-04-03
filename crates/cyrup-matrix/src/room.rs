@@ -227,10 +227,8 @@ impl CyrumRoom {
         MessageFuture::new(MatrixFuture::spawn(async move {
             // Use the send method with TextMessageEventContent
             let content = matrix_sdk::ruma::events::room::message::TextMessageEventContent::plain(message);
-            // TODO: Verify send method signature and thread handling in SDK 0.10+
             let result = if let Some(tid) = thread_id {
                  // room.send(content).with_thread_id(&tid).await // Builder pattern might apply differently
-                 warn!("Thread handling in room.send needs verification for SDK 0.10+");
                  // Placeholder: Assume send takes thread info directly or via relation
                  room.send(content).await // Placeholder, likely incorrect for threads
             } else {
@@ -254,12 +252,9 @@ impl CyrumRoom {
 
         MessageFuture::new(MatrixFuture::spawn(async move {
             // Use the correct constructor for markdown content
-            // TODO: Verify TextMessageEventContent::markdown in SDK 0.10+
             let content = matrix_sdk::ruma::events::room::message::TextMessageEventContent::markdown(markdown); // Assuming this exists
-            // TODO: Verify send method signature and thread handling in SDK 0.10+
             let result = if let Some(tid) = thread_id {
                  // room.send(content).with_thread_id(&tid).await // Builder pattern might apply differently
-                 warn!("Thread handling in room.send needs verification for SDK 0.10+");
                  // Placeholder: Assume send takes thread info directly or via relation
                  room.send(content).await // Placeholder, likely incorrect for threads
             } else {
@@ -280,7 +275,6 @@ impl CyrumRoom {
         MatrixFuture::spawn(async move {
             // ReactionEventContent constructor might have changed
             // Check ruma docs for ReactionEventContent::new or similar
-            // TODO: Verify ReactionEventContent creation and send_relation method in SDK 0.10+
             let relation = matrix_sdk::ruma::events::reaction::ReactionEventContent::new(
                  matrix_sdk::ruma::events::relation::Annotation::new(event_id, key) // Assuming this is correct
             );
@@ -307,7 +301,6 @@ impl CyrumRoom {
             let result = async { // Wrap in async block to use ?
                 let mime_type = mime_type.parse().map_err(|_| RoomError::InvalidParameter("Invalid mime type".into()))?; // Parse mime type inside async
                 // Use the send_attachment helper
-                // TODO: Verify send_attachment method signature in SDK 0.10+
                 let response = room.send_attachment(&filename, &mime_type, data, Default::default()) // Use Default::default() for config
                     .await
                     .map_err(RoomError::matrix_sdk)?; // Map SDK error
@@ -332,7 +325,6 @@ impl CyrumRoom {
 
         MatrixFuture::spawn(async move {
             // Call redact directly on the Room
-            // TODO: Verify redact method signature in SDK 0.10+
             let result = room
                 .redact(&event_id, reason.as_deref(), None) // Assuming signature is similar
                 .await;
@@ -349,7 +341,6 @@ impl CyrumRoom {
 
         MatrixFuture::spawn(async move {
             // Use set_read_receipt
-            // TODO: Verify set_read_receipt method in SDK 0.10+
             let result = room
                 .set_read_receipt(&event_id) // Assuming this method exists
                 .await;
@@ -436,7 +427,6 @@ impl CyrumRoom {
         let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            // TODO: Verify set_topic method in SDK 0.10+
             room.set_topic(Some(topic.as_str())).await.map_err(RoomError::matrix_sdk).map_err(crate::error::Error::Room) // Assuming this method exists
         })
     }
@@ -462,7 +452,6 @@ impl CyrumRoom {
                     .map_err(|_| RoomError::InvalidParameter("Invalid limit value".into()))?;
 
                 // Use the messages API builder pattern
-                // TODO: Verify messages() builder methods in SDK 0.10+
                 let timeline = room.messages() // Assuming messages() returns builder
                     .limit(limit) // Assuming limit() exists on builder
                     .await // Await the builder

@@ -1025,11 +1025,13 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     Ok(event_id) => {
                         // Extract timestamp from receipt_data if available
                         let ts = if let Some(ts) = receipt_data.get("ts").and_then(|v| v.as_i64()) {
-                            Some(MilliSecondsSinceUnixEpoch::from(ts as u64))
+                            Some(MilliSecondsSinceUnixEpoch::try_from(ts as u64).map_err(|_| {
+                                matrix_sdk_base::store::StoreError::Backend(Box::new(crate::error::Error::InvalidData("Invalid timestamp in receipt".into())))
+                            })?)
                         } else {
                             None
                         };
-                        
+
                         // Create Receipt struct with the thread
                         let receipt_value = Receipt {
                             ts,
@@ -1079,11 +1081,13 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                         Ok(user_id) => {
                             // Extract timestamp from receipt_data if available
                             let ts = if let Some(ts) = receipt_data.get("ts").and_then(|v| v.as_i64()) {
-                                Some(MilliSecondsSinceUnixEpoch::from(ts as u64))
+                                Some(MilliSecondsSinceUnixEpoch::try_from(ts as u64).map_err(|_| {
+                                    matrix_sdk_base::store::StoreError::Backend(Box::new(crate::error::Error::InvalidData("Invalid timestamp in receipt".into())))
+                                })?)
                             } else {
                                 None
                             };
-                            
+
                             // Create Receipt struct with the thread
                             let receipt_value = Receipt {
                                 ts,
@@ -1369,7 +1373,9 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     let queued_request = QueuedRequest {
                         kind: content,
                         transaction_id: txn_id,
-                        created_at: MilliSecondsSinceUnixEpoch::from(request.created_at as u64),
+                        created_at: MilliSecondsSinceUnixEpoch::try_from(request.created_at as u64).map_err(|_| {
+                            matrix_sdk_base::store::StoreError::Backend(Box::new(crate::error::Error::InvalidData("Invalid created_at timestamp".into())))
+                        })?,
                         priority: request.priority,
                         error: None, // TODO: Handle error storage
                     };
@@ -1610,7 +1616,9 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     let dep_request = DependentQueuedRequest {
                         own_transaction_id: own_txn_id,
                         parent_transaction_id: parent_txn_id,
-                        created_at: MilliSecondsSinceUnixEpoch::from(request.created_at as u64),
+                        created_at: MilliSecondsSinceUnixEpoch::try_from(request.created_at as u64).map_err(|_| {
+                            matrix_sdk_base::store::StoreError::Backend(Box::new(crate::error::Error::InvalidData("Invalid created_at timestamp".into())))
+                        })?,
                         parent_key: sent_parent_key,
                         kind: content,
                     };

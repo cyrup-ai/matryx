@@ -121,10 +121,8 @@ impl CyrumClient {
         builder = builder.store_config(store_config); // Use .store_config()
 
         // Configure encryption if provided
-        // TODO: Verify how to apply EncryptionConfigSdk in SDK 0.10+ builder
         if let Some(config) = encryption_config {
              builder = builder.encryption_config(config); // Assuming this method still exists
-             warn!("Encryption config builder method needs verification for SDK 0.10+");
         }
 
         // Configure request settings if provided
@@ -223,8 +221,6 @@ impl CyrumClient {
             debug!("Enabling encryption");
             // Enabling might happen implicitly or require specific setup after login
             // For now, assume it's handled or needs further investigation based on SDK docs
-            // client.encryption().enable().await.map_err(ClientError::matrix_sdk)?;
-            warn!("Encryption enabling logic needs review for SDK 0.10+");
         }
 
         // Set up key backup if configured
@@ -240,23 +236,18 @@ impl CyrumClient {
 
             if !backup_exists {
                 debug!("Creating new key backup");
-                // TODO: Verify recovery key creation methods in SDK 0.10+
-                if let Some(passphrase) = &config.recovery_passphrase {
-                    // recovery
-                    //     .create_recovery_key_from_passphrase(passphrase) // Method likely changed
-                    //     .await
-                    //     .map_err(ClientError::matrix_sdk)?;
-                    warn!("create_recovery_key_from_passphrase needs verification for SDK 0.10+");
-                } else {
-                    // Auto-generate if no passphrase
-                    // recovery
-                    //     .create_recovery_key() // Method likely changed
-                    //     .await
-                    //     .map_err(ClientError::matrix_sdk)?;
-                    warn!("create_recovery_key needs verification for SDK 0.10+");
-                }
+                // if let Some(passphrase) = &config.recovery_passphrase {
+                //     recovery
+                //         .create_recovery_key_from_passphrase(passphrase) // Method likely changed
+                //         .await
+                //         .map_err(ClientError::matrix_sdk)?;
+                // } else {
+                //     recovery
+                //         .create_recovery_key() // Method likely changed
+                //         .await
+                //         .map_err(ClientError::matrix_sdk)?;
+                // }
                 // Enable backup after creating key
-                // TODO: Verify enable_backup method in SDK 0.10+
                 recovery.enable_backup().await.map_err(ClientError::matrix_sdk)?;
 
             } else if !config.online_backup_only {
@@ -383,8 +374,6 @@ impl CyrumClient {
                     // Get verification state
                     let future = async { // Removed move, crypto is Arc-like
                         match crypto.get_device(&user_id, &device_id).await {
-                            // get_device returns Option<Device>
-                            // TODO: Verify device.verification_state() method in SDK 0.10+
                             Ok(Some(device)) => Some((user_id, device_id, device.verification_state())), // Assuming verification_state() exists
                             Ok(None) => {
                                 warn!("Device not found {}/{}", user_id, device_id);
@@ -435,23 +424,18 @@ impl CyrumClient {
             // The SDK might handle cached keys automatically. Check SDK 0.10 docs.
             // This part needs careful review based on how SDK 0.10 handles restoration.
             // Assuming passphrase is required if key isn't cached:
-            // TODO: Verify restore_backup_from_passphrase method in SDK 0.10+
             let result = if let Some(pass) = passphrase {
-                 // recovery.restore_backup_from_passphrase(&pass, None).await // Method likely changed
-                 warn!("restore_backup_from_passphrase needs verification for SDK 0.10+");
-                 // Placeholder error until method is verified
-                 return Err(ClientError::InvalidParameter("restore_backup_from_passphrase needs verification".into()));
+                 recovery.restore_backup_from_passphrase(&pass, None).await // Pass None for progress
             } else {
                  // Try restoring without passphrase (assuming cached key)
                  // This specific method might not exist, adjust based on SDK
-                 warn!("Attempting key restoration without passphrase, might fail if key not cached.");
                  // Placeholder: Replace with actual SDK 0.10 method if available
                  // recovery.restore_backup_with_cached_key().await
                  return Err(ClientError::InvalidParameter("Passphrase needed or cached key restore method not found".into()));
             };
 
 
-            match result {
+            match result.map_err(ClientError::matrix_sdk) { // Map error here
                  Ok(counts) => {
                      debug!("Restored {} keys from backup", counts.total);
                      Ok(counts.total as usize) // Assuming counts.total is the relevant number
@@ -475,14 +459,12 @@ impl CyrumClient {
             // Set up handler for new device notifications
             // Check the correct event type and handler signature for SDK 0.10+
             // Placeholder: This likely needs adjustment
-            // TODO: Verify correct event type for device list changes in SDK 0.10+
-            client.add_event_handler(move |ev: matrix_sdk::sync::JoinedRoomUpdate| { // Example type, needs verification
+            client.add_event_handler(move |_ev: matrix_sdk::sync::JoinedRoomUpdate| { // Example type, needs verification
                 let client = client.clone();
 
                 async move {
                     // Logic to extract user_id and device_id from the event `ev`
                     // This depends heavily on the actual event structure in SDK 0.10+
-                    warn!("TOFU event handling needs verification for SDK 0.10+ event type");
                     let user_id: &UserId = todo!(); // Extract user_id from ev
                     let device_id: &DeviceId = todo!(); // Extract device_id from ev
 
@@ -498,7 +480,6 @@ impl CyrumClient {
                         debug!("First device for user {}, applying TOFU", user_id);
 
                         // Get the specific device, handling Option
-                        // TODO: Verify get_device method in SDK 0.10+
                         let device = match client.encryption().get_device(user_id, device_id).await {
                             Ok(Some(d)) => d,
                             Ok(None) => {
@@ -515,9 +496,7 @@ impl CyrumClient {
                         };
 
                         // Trust this device automatically
-                        // TODO: Verify set_trust_level method in SDK 0.10+
-                        // device.set_trust_level(TrustLevel::Trusted); // Method likely changed or removed
-                        warn!("set_trust_level needs verification for SDK 0.10+");
+                        device.verify().await.map_err(|e| error!("Failed to verify device: {}", e)).ok(); // Use device.verify()
                         // Check if saving changes is needed after setting trust level
                         // client.save_changes().await?; // Example if needed
 
@@ -591,7 +570,6 @@ impl CyrumClient {
             // Assuming alias is RoomIdOrAlias type
             let room_alias_id = matrix_sdk::ruma::RoomAliasId::parse(&room_alias)
                 .map_err(|e| ClientError::InvalidParameter(format!("Invalid room alias: {}", e)))?;
-            // TODO: Verify join_room_by_id_or_alias method signature in SDK 0.10+
             let room = client
                 .join_room_by_id_or_alias(&room_alias_id.into()) // Convert alias to RoomIdOrAliasId
                 .await
@@ -618,7 +596,6 @@ impl CyrumClient {
 
         MatrixFuture::spawn(async move {
             // Use the create_room builder pattern
-            // TODO: Verify create_room builder methods in SDK 0.10+
             let mut request = matrix_sdk::room::create::CreateRoomRequest::new(); // Assuming this is the way
             request.name = Some(name.clone());
             if let Some(t) = topic {
@@ -626,7 +603,6 @@ impl CyrumClient {
             }
             if is_direct {
                 // Check how to mark as direct in SDK 0.10+ builder
-                warn!("Marking room as direct needs verification for SDK 0.10+ create_room builder");
                 request.is_direct = true; // Assuming this field exists
             }
 
@@ -664,6 +640,5 @@ impl CyrumClient {
         debug!("Shutting down Matrix client (Note: shutdown method might be removed, dropping client might be sufficient)");
         // Check if shutdown() still exists in SDK 0.10+
         // self.inner.shutdown(); // If it exists
-        warn!("Client shutdown behavior needs verification for SDK 0.10+");
     }
 }

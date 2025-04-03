@@ -35,6 +35,10 @@ pub enum Error {
     /// An error from the database module
     #[error("Database error: {0}")]
     Database(String),
+
+    /// Invalid data encountered (e.g., during deserialization or conversion)
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 }
 
 /// Result type for Matrix operations
