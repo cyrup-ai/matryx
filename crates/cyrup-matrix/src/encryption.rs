@@ -62,27 +62,27 @@ impl CyrumSasVerification {
     pub fn accept(&self) -> MatrixFuture<()> {
         let inner = self.inner.clone();
 
-        MatrixFuture::spawn(
-            async move { inner.accept().await.map_err(EncryptionError::matrix_sdk) },
-        )
+        MatrixFuture::spawn(async move {
+            inner.accept().await.map_err(EncryptionError::matrix_sdk).map_err(crate::error::Error::Encryption)
+        })
     }
 
     /// Cancel the verification
     pub fn cancel(&self) -> MatrixFuture<()> {
         let inner = self.inner.clone();
 
-        MatrixFuture::spawn(
-            async move { inner.cancel().await.map_err(EncryptionError::matrix_sdk) },
-        )
+        MatrixFuture::spawn(async move {
+            inner.cancel().await.map_err(EncryptionError::matrix_sdk).map_err(crate::error::Error::Encryption)
+        })
     }
 
     /// Confirm the verification (emoji match)
     pub fn confirm(&self) -> MatrixFuture<()> {
         let inner = self.inner.clone();
 
-        MatrixFuture::spawn(
-            async move { inner.confirm().await.map_err(EncryptionError::matrix_sdk) },
-        )
+        MatrixFuture::spawn(async move {
+            inner.confirm().await.map_err(EncryptionError::matrix_sdk).map_err(crate::error::Error::Encryption)
+        })
     }
 
     /// Get the user ID being verified
@@ -116,7 +116,7 @@ impl CyrumVerificationRequest {
         let inner = self.inner.clone();
 
         MatrixFuture::spawn(async move {
-            match &*inner { // Match on the dereferenced Arc
+            let result = match &*inner { // Match on the dereferenced Arc
                 Verification::SasV1(sas) => {
                     sas.accept().await.map_err(EncryptionError::matrix_sdk)?;
                     // Pass the existing Arc<SasVerification>
@@ -134,7 +134,8 @@ impl CyrumVerificationRequest {
                         "This verification is not SAS or QR".into(),
                     ))
                 },
-            }
+            };
+            result.map_err(crate::error::Error::Encryption)
         })
     }
 
@@ -143,7 +144,7 @@ impl CyrumVerificationRequest {
         let inner = self.inner.clone();
 
         MatrixFuture::spawn(async move {
-            match &*inner { // Match on the dereferenced Arc
+            let result = match &*inner { // Match on the dereferenced Arc
                 Verification::SasV1(sas) => sas.cancel().await.map_err(EncryptionError::matrix_sdk),
                 Verification::QrCodeV1(qr) => { // Handle QrCodeV1
                     qr.cancel().await.map_err(EncryptionError::matrix_sdk) // Assuming cancel exists
@@ -155,7 +156,8 @@ impl CyrumVerificationRequest {
                         "Unknown verification type for cancel".into(),
                     ))
                 },
-            }
+            };
+            result.map_err(crate::error::Error::Encryption)
         })
     }
 

@@ -1513,7 +1513,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                 },
                 Err(err) => {
                     error!(request_id = %request_id, error = %err, "Failed to mark media upload as started");
-                    Err(CyrumStoreError::database(err))
+                    Err(crate::error::StoreError::StorageCommunication(format!("DB Error: {}", err)))
                 },
             }
         })
@@ -1538,7 +1538,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                 }
                 Err(err) => {
                     error!(error = %err, "Failed to get pending media uploads");
-                    yield Err(CyrumStoreError::database(err));
+                    yield Err(crate::error::StoreError::StorageCommunication(format!("DB Error: {}", err)));
                 }
             }
         })
@@ -1561,7 +1561,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                 },
                 Err(err) => {
                     error!(request_id = %request_id, error = %err, "Failed to remove media upload");
-                    Err(CyrumStoreError::database(err))
+                    Err(crate::error::StoreError::StorageCommunication(format!("DB Error: {}", err)))
                 },
             }
         })
@@ -1578,7 +1578,7 @@ impl CyrumStateStore for SurrealStateStore {
             // Use fully qualified syntax to call the StateStore trait method
             <Self as matrix_sdk_base::store::StateStore>::get_kv_data(self, key)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1591,7 +1591,7 @@ impl CyrumStateStore for SurrealStateStore {
             // Use fully qualified syntax to call the StateStore trait method
             <Self as matrix_sdk_base::store::StateStore>::set_kv_data(self, key, value)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1600,7 +1600,7 @@ impl CyrumStateStore for SurrealStateStore {
             // Use fully qualified syntax to call the StateStore trait method
             <Self as matrix_sdk_base::store::StateStore>::remove_kv_data(self, key)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1609,7 +1609,7 @@ impl CyrumStateStore for SurrealStateStore {
         StateChangesFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::save_changes(self, &changes)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1618,7 +1618,7 @@ impl CyrumStateStore for SurrealStateStore {
         PresenceFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_presence_event(self, &user_id)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1635,7 +1635,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1654,7 +1654,7 @@ impl CyrumStateStore for SurrealStateStore {
                 self, &room_id, event_type, &state_key,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1668,7 +1668,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1692,7 +1692,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1708,7 +1708,7 @@ impl CyrumStateStore for SurrealStateStore {
         ProfileFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_profile(self, &room_id, &user_id)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1785,7 +1785,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1800,7 +1800,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1820,7 +1820,7 @@ impl CyrumStateStore for SurrealStateStore {
                 &display_name,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1881,7 +1881,7 @@ impl CyrumStateStore for SurrealStateStore {
         AccountDataFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_account_data_event(self, event_type)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1896,7 +1896,7 @@ impl CyrumStateStore for SurrealStateStore {
                 self, &room_id, event_type,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1918,7 +1918,7 @@ impl CyrumStateStore for SurrealStateStore {
                 &user_id,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1939,7 +1939,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1950,7 +1950,7 @@ impl CyrumStateStore for SurrealStateStore {
         CustomValueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_custom_value(self, &key)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1959,7 +1959,7 @@ impl CyrumStateStore for SurrealStateStore {
         CustomValueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::set_custom_value(self, &key, value)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1968,7 +1968,7 @@ impl CyrumStateStore for SurrealStateStore {
         CustomValueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::remove_custom_value(self, &key)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1977,7 +1977,7 @@ impl CyrumStateStore for SurrealStateStore {
         RoomFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::remove_room(self, &room_id)
                 .await
-                .map_err(|e| CyrumStoreError::matrix_sdk(e))
+                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2000,7 +2000,7 @@ impl CyrumStateStore for SurrealStateStore {
                 priority,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2020,7 +2020,7 @@ impl CyrumStateStore for SurrealStateStore {
                 content,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2038,7 +2038,7 @@ impl CyrumStateStore for SurrealStateStore {
                 &transaction_id,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2052,7 +2052,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -2074,7 +2074,7 @@ impl CyrumStateStore for SurrealStateStore {
                 error,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2087,7 +2087,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -2113,7 +2113,7 @@ impl CyrumStateStore for SurrealStateStore {
                 content,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2133,7 +2133,7 @@ impl CyrumStateStore for SurrealStateStore {
                 sent_parent_key,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2153,7 +2153,7 @@ impl CyrumStateStore for SurrealStateStore {
                 new_content,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2171,7 +2171,7 @@ impl CyrumStateStore for SurrealStateStore {
                 &own_txn_id,
             )
             .await
-            .map_err(|e| CyrumStoreError::matrix_sdk(e))
+            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2185,7 +2185,7 @@ impl CyrumStateStore for SurrealStateStore {
                     }
                 },
                 Err(e) => {
-                    yield Err(CyrumStoreError::matrix_sdk(e));
+                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })

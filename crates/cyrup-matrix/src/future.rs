@@ -60,7 +60,7 @@ impl<T, E> DomainStream<T, E> {
     /// Create a new DomainStream that wraps an async stream
     pub fn new<S, F>(stream_provider: F) -> Self
     where
-        S: Stream<Item = std::result::Result<T, E>> + Send + 'static,
+        S: Stream<Item = std::result::Result<T, E>> + Send + Unpin + 'static, // Add Unpin bound
         F: Future<Output = std::result::Result<S, E>> + Send + 'static,
         T: Send + 'static,
         E: Send + 'static,
@@ -114,15 +114,16 @@ impl<T> MatrixFuture<T> {
 }
 
 impl<T> Future for MatrixFuture<T> {
-    type Output = Result<T>;
+    type Output = crate::error::Result<T>; // Use crate's Result type alias
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.receiver).poll(cx) {
             Poll::Ready(Ok(result)) => Poll::Ready(result),
             Poll::Ready(Err(_)) => {
-                Poll::Ready(Err(StoreError::StorageCommunication(
-                    "Channel closed unexpectedly".into(),
-                )))
+                // Map StoreError to the crate's Error type using From trait
+                Poll::Ready(Err(crate::error::Error::from(StoreError::StorageCommunication(
+                   "Channel closed unexpectedly".into(),
+                ))))
             },
             Poll::Pending => Poll::Pending,
         }

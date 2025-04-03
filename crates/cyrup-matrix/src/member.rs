@@ -3,7 +3,7 @@
 //! This module provides a clean wrapper around Matrix SDK's RoomMember class.
 
 use matrix_sdk::room::RoomMember as MatrixRoomMember;
-use matrix_sdk::ruma::UserId;
+use matrix_sdk::ruma::{self, events::{StateEventType, room::message::MessageType}, MxcUri, UserId}; // Add imports
 use std::sync::Arc;
 
 /// A synchronous wrapper around the Matrix SDK RoomMember.
@@ -35,8 +35,8 @@ impl CyrumRoomMember {
     }
 
     /// Get the avatar URL of this member.
-    pub fn avatar_url(&self) -> Option<&str> {
-        self.inner.avatar_url().map(|uri| uri.as_str()) // Convert Option<&MxcUri> to Option<&str>
+    pub fn avatar_url(&self) -> Option<&MxcUri> { // Return Option<&MxcUri>
+        self.inner.avatar_url()
     }
 
     /// Check if this member is a room administrator.
@@ -51,7 +51,8 @@ impl CyrumRoomMember {
 
     /// Check if this member can send messages.
     pub fn can_send_messages(&self) -> bool {
-        self.inner.can_send_message()
+        // Check for a specific message type, e.g., Text
+        self.inner.can_send_message(MessageType::Text)
     }
 
     /// Check if this member can redact messages.
@@ -72,7 +73,8 @@ impl CyrumRoomMember {
 
     /// Check if this member can send state events.
     pub fn can_send_state_events(&self) -> bool {
-        self.inner.can_send_state()
+        // Check for a specific state event type, e.g., RoomName
+        self.inner.can_send_state(StateEventType::RoomName) // Or a more general check if possible
     }
 
     /// Get the power level of this member.
