@@ -529,11 +529,6 @@ impl CyrumClient {
                     Ok(()) // Assuming Ok(()) is compatible
                 }
             });
-                    }
-
-                    Ok(())
-                }
-            });
 
             Ok(())
         })
