@@ -29,6 +29,8 @@ use matrix_sdk::{
 };
 
 use crate::error::RoomError;
+use futures_util::StreamExt; // Import StreamExt for receiver into_stream
+use crate::error::Result as CyrumResult; // Use crate's Result type
 use crate::future::{MatrixFuture, MatrixStream};
 use crate::member::CyrumRoomMember;
 
@@ -163,12 +165,12 @@ impl CyrumRoom {
 
     /// Get the list of room members.
     pub fn members(&self) -> RoomMembersFuture {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         RoomMembersFuture::new(MatrixFuture::spawn(async move {
-            // RoomMemberships::JOIN returns only joined members
+            // Call members directly on the Room
             let members =
-                inner.members(RoomMemberships::JOIN).await.map_err(RoomError::matrix_sdk)?;
+                room.members(RoomMemberships::JOIN).await.map_err(RoomError::matrix_sdk)?;
 
             Ok(members.into_iter().map(CyrumRoomMember::new).collect())
         }))
@@ -181,7 +183,7 @@ impl CyrumRoom {
         invited: bool,
         left: bool,
     ) -> RoomMembersFuture {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         RoomMembersFuture::new(MatrixFuture::spawn(async move {
             // Build membership filter based on parameters
@@ -199,7 +201,8 @@ impl CyrumRoom {
                 memberships = memberships.union(RoomMemberships::LEAVE);
             }
 
-            let members = inner.members(memberships).await.map_err(RoomError::matrix_sdk)?;
+            // Call members directly on the Room
+            let members = room.members(memberships).await.map_err(RoomError::matrix_sdk)?;
 
             Ok(members.into_iter().map(CyrumRoomMember::new).collect())
         }))
@@ -208,14 +211,17 @@ impl CyrumRoom {
     /// Send a text message to the room.
     pub fn send_text_message(&self, message: &str, thread_id: Option<&EventId>) -> MessageFuture {
         let message = message.to_owned();
-        let thread_id = thread_id.cloned();
-        let inner = self.inner.clone();
+        let thread_id = thread_id.map(|id| id.to_owned()); // Use map + to_owned
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MessageFuture::new(MatrixFuture::spawn(async move {
-            let response = inner
-                .send_text_message(&message, thread_id)
-                .await
-                .map_err(RoomError::matrix_sdk)?;
+            // Use the send method with TextMessageEventContent
+            let content = matrix_sdk::ruma::events::room::message::TextMessageEventContent::plain(message);
+            let response = if let Some(tid) = thread_id {
+                 room.send(content).with_thread_id(&tid).await // Use builder pattern for thread
+            } else {
+                 room.send(content).await
+            }.map_err(RoomError::matrix_sdk)?;
 
             Ok(response.event_id)
         }))
@@ -228,12 +234,17 @@ impl CyrumRoom {
         thread_id: Option<&EventId>,
     ) -> MessageFuture {
         let markdown = markdown.to_owned();
-        let thread_id = thread_id.cloned();
-        let inner = self.inner.clone();
+        let thread_id = thread_id.map(|id| id.to_owned()); // Use map + to_owned
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MessageFuture::new(MatrixFuture::spawn(async move {
-            let content = RoomMessageEventContent::text_markdown(markdown);
-            let response = inner.send(content, thread_id).await.map_err(RoomError::matrix_sdk)?;
+            // Use the correct constructor for markdown content
+            let content = matrix_sdk::ruma::events::room::message::TextMessageEventContent::markdown(markdown);
+            let response = if let Some(tid) = thread_id {
+                 room.send(content).with_thread_id(&tid).await // Use builder pattern for thread
+            } else {
+                 room.send(content).await
+            }.map_err(RoomError::matrix_sdk)?;
 
             Ok(response.event_id)
         }))
@@ -243,11 +254,16 @@ impl CyrumRoom {
     pub fn send_reaction(&self, event_id: &EventId, key: &str) -> MatrixFuture<OwnedEventId> {
         let event_id = event_id.to_owned();
         let key = key.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            let content = ReactionEventContent::new(event_id, key);
-            let response = inner.send(content, None).await.map_err(RoomError::matrix_sdk)?;
+            // ReactionEventContent constructor might have changed
+            // Check ruma docs for ReactionEventContent::new or similar
+            let relation = matrix_sdk::ruma::events::reaction::ReactionEventContent::new(
+                 matrix_sdk::ruma::events::relation::Annotation::new(event_id, key)
+            );
+            // Send the reaction relation directly
+            let response = room.send_relation(relation).await.map_err(RoomError::matrix_sdk)?;
 
             Ok(response.event_id)
         })
@@ -257,24 +273,19 @@ impl CyrumRoom {
     pub fn send_file(
         &self,
         data: Vec<u8>,
+        data: Vec<u8>,
         filename: &str,
         mime_type: &str,
     ) -> MatrixFuture<OwnedEventId> {
         let filename = filename.to_owned();
-        let mime_type = mime_type.to_owned();
-        let inner = self.inner.clone();
+        let mime_type = mime_type.parse().map_err(|_| RoomError::InvalidParameter("Invalid mime type".into()))?; // Parse mime type
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            // Create a new attachment config (without any special settings)
-            let config = matrix_sdk::attachment::AttachmentConfig::new();
-
-            // Create the content event without parsing mime type
-            let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::file(
-                data, &mime_type, filename, None,
-            );
-
-            // Send the message as a regular event
-            let response = inner.send(content, None).await.map_err(RoomError::matrix_sdk)?;
+            // Use the send_attachment helper
+            let response = room.send_attachment(&filename, &mime_type, data, Default::default()) // Use Default::default() for config
+                .await
+                .map_err(RoomError::matrix_sdk)?;
 
             Ok(response.event_id)
         })
@@ -288,11 +299,12 @@ impl CyrumRoom {
     ) -> MatrixFuture<OwnedEventId> {
         let event_id = event_id.to_owned();
         let reason = reason.map(|s| s.to_owned());
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            let response = inner
-                .redact(&event_id, reason.as_deref(), None)
+            // Call redact directly on the Room
+            let response = room
+                .redact(&event_id, reason.as_deref(), None) // Check if None for txn_id is still correct
                 .await
                 .map_err(RoomError::matrix_sdk)?;
 
@@ -303,12 +315,12 @@ impl CyrumRoom {
     /// Mark a message as read.
     pub fn mark_as_read(&self, event_id: &EventId) -> MatrixFuture<()> {
         let event_id = event_id.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner
-                .read_marker()
-                .set_marker(&event_id)
+            // Use set_read_receipt
+            room
+                .set_read_receipt(&event_id)
                 .await
                 .map_err(RoomError::matrix_sdk)
         })
@@ -316,18 +328,18 @@ impl CyrumRoom {
 
     /// Leave the room.
     pub fn leave(&self) -> MatrixFuture<()> {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
-        MatrixFuture::spawn(async move { inner.leave().await.map_err(RoomError::matrix_sdk) })
+        MatrixFuture::spawn(async move { room.leave().await.map_err(RoomError::matrix_sdk) })
     }
 
     /// Invite a user to the room.
     pub fn invite_user(&self, user_id: &UserId) -> MatrixFuture<()> {
         let user_id = user_id.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.invite_user_by_id(&user_id).await.map_err(RoomError::matrix_sdk)
+            room.invite_user_by_id(&user_id).await.map_err(RoomError::matrix_sdk)
         })
     }
 
@@ -335,10 +347,10 @@ impl CyrumRoom {
     pub fn kick_user(&self, user_id: &UserId, reason: Option<&str>) -> MatrixFuture<()> {
         let user_id = user_id.to_owned();
         let reason = reason.map(|s| s.to_owned());
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner
+            room
                 .kick_user(&user_id, reason.as_deref())
                 .await
                 .map_err(RoomError::matrix_sdk)
@@ -349,10 +361,10 @@ impl CyrumRoom {
     pub fn ban_user(&self, user_id: &UserId, reason: Option<&str>) -> MatrixFuture<()> {
         let user_id = user_id.to_owned();
         let reason = reason.map(|s| s.to_owned());
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner
+            room
                 .ban_user(&user_id, reason.as_deref())
                 .await
                 .map_err(RoomError::matrix_sdk)
@@ -363,10 +375,10 @@ impl CyrumRoom {
     pub fn unban_user(&self, user_id: &UserId, reason: Option<&str>) -> MatrixFuture<()> {
         let user_id = user_id.to_owned();
         let reason = reason.map(|s| s.to_owned());
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner
+            room
                 .unban_user(&user_id, reason.as_deref())
                 .await
                 .map_err(RoomError::matrix_sdk)
@@ -376,43 +388,46 @@ impl CyrumRoom {
     /// Set the room name.
     pub fn set_name(&self, name: &str) -> MatrixFuture<()> {
         let name = name.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.set_name(Some(&name)).await.map_err(RoomError::matrix_sdk)
+            room.set_name(Some(name.as_str())).await.map_err(RoomError::matrix_sdk) // Pass Some<&str>
         })
     }
 
     /// Set the room topic.
     pub fn set_topic(&self, topic: &str) -> MatrixFuture<()> {
         let topic = topic.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.set_topic(Some(&topic)).await.map_err(RoomError::matrix_sdk)
+            room.set_topic(Some(topic.as_str())).await.map_err(RoomError::matrix_sdk) // Pass Some<&str>
         })
     }
 
     /// Set whether this room is a direct message room.
     pub fn set_is_direct(&self, is_direct: bool) -> MatrixFuture<()> {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.set_is_direct(is_direct).await.map_err(RoomError::matrix_sdk)
+            room.set_is_direct(is_direct).await.map_err(RoomError::matrix_sdk)
         })
     }
 
     /// Get the room's timeline events.
     pub fn timeline(&self, limit: u32) -> TimelineFuture {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         TimelineFuture::new(MatrixFuture::spawn(async move {
             // Convert u32 to UInt (ruma's unsigned integer type)
             let limit = UInt::try_from(limit)
                 .map_err(|_| RoomError::InvalidParameter("Invalid limit value".into()))?;
 
-            // Use the messages API instead of timeline_batch
-            let timeline = inner.messages().limit(limit).await.map_err(RoomError::matrix_sdk)?;
+            // Use the messages API builder pattern
+            let timeline = room.messages() // Returns builder
+                .limit(limit) // Set limit on builder
+                .await // Await the builder
+                .map_err(RoomError::matrix_sdk)?;
 
             // Convert to the expected return type
             let events = timeline.chunk;
@@ -423,10 +438,10 @@ impl CyrumRoom {
 
     /// Enable encryption in the room.
     pub fn enable_encryption(&self) -> MatrixFuture<()> {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.enable_encryption().await.map_err(RoomError::matrix_sdk)
+            room.enable_encryption().await.map_err(RoomError::matrix_sdk)
         })
     }
 
@@ -435,14 +450,15 @@ impl CyrumRoom {
         &self,
         event_type: &str,
         state_key: &str,
-    ) -> MatrixFuture<Option<AnyStateEvent>> {
-        let event_type = event_type.to_owned();
+    ) -> MatrixFuture<Option<Raw<AnyStateEvent>>> { // Return Raw event
+        let event_type = matrix_sdk::ruma::events::StateEventType::try_from(event_type) // Convert to StateEventType
+            .map_err(|_| RoomError::InvalidParameter("Invalid state event type".into()))?;
         let state_key = state_key.to_owned();
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner
-                .get_state_event(&event_type, &state_key)
+            room
+                .get_state_event(event_type, &state_key) // Pass StateEventType
                 .await
                 .map_err(RoomError::matrix_sdk)
         })
@@ -450,34 +466,39 @@ impl CyrumRoom {
 
     /// Send a typing notification.
     pub fn typing_notice(&self, typing: bool) -> MatrixFuture<()> {
-        let inner = self.inner.clone();
+        let room = self.inner.clone(); // Clone the Arc<Room>
 
         MatrixFuture::spawn(async move {
-            inner.typing_notice(typing).await.map_err(RoomError::matrix_sdk)
+            room.typing_notice(typing).await.map_err(RoomError::matrix_sdk)
         })
     }
 
     /// Subscribe to new messages in this room.
     pub fn subscribe_to_messages(&self) -> MessageStream {
-        let inner = self.inner.clone();
-        let room_id = inner.room_id().to_owned();
+        let room = self.inner.clone(); // Clone the Arc<Room>
+        let room_id = room.room_id().to_owned();
 
         MessageStream::new(MatrixStream::spawn(async move {
             let (tx, rx) = tokio::sync::mpsc::channel(100);
 
-            let client = inner.client();
-            client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: MatrixRoom| {
-                if room.room_id() != &room_id {
+            // Register event handler on the client associated with the room
+            let client = room.client();
+            client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, current_room: MatrixRoom| {
+                // Check if the event is for the target room
+                if current_room.room_id() != &room_id {
                     return async { /* Different room, ignore */ };
                 }
 
                 let tx = tx.clone();
                 async move {
-                    let _ = tx.send(Ok(ev)).await;
+                    // Map potential SDK errors to our RoomError
+                    let result: CyrumResult<OriginalSyncRoomMessageEvent, RoomError> = Ok(ev);
+                    let _ = tx.send(result).await;
                 }
             });
 
-            Ok(rx.into_stream())
+            // Convert receiver to stream
+            Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
         }))
     }
 }

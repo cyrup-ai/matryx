@@ -36,7 +36,7 @@ impl CyrumRoomMember {
 
     /// Get the avatar URL of this member.
     pub fn avatar_url(&self) -> Option<&str> {
-        self.inner.avatar_url()
+        self.inner.avatar_url().map(|uri| uri.as_str()) // Convert Option<&MxcUri> to Option<&str>
     }
 
     /// Check if this member is a room administrator.

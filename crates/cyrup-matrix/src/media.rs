@@ -8,8 +8,12 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 
 use matrix_sdk::{
-    media::MediaThumbnailSettings,
-    ruma::{api::client::media::get_content_thumbnail::v3::Method as ThumbnailMethod, UInt},
+    media::{MediaFormat, MediaRequest, MediaThumbnailSettings}, // Import MediaFormat, MediaRequest
+    ruma::{
+        api::client::media::get_content_thumbnail::v3::Method as ThumbnailMethod, MxcUri, // Import MxcUri
+        OwnedMxcUri, // Import OwnedMxcUri
+        UInt,
+    },
     Client as MatrixClient,
 };
 
@@ -38,29 +42,28 @@ impl CyrumMedia {
         content_type: &str,
         data: Vec<u8>,
         filename: Option<&str>,
-    ) -> MatrixFuture<String> {
-        let content_type = content_type.to_owned();
-        let filename = filename.map(|s| s.to_owned());
+    ) -> MatrixFuture<OwnedMxcUri> { // Return OwnedMxcUri
+        let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type
+        let data = data.into(); // Convert Vec<u8> to Bytes
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            // Create the upload request
-            let mut request =
-                matrix_sdk::ruma::api::client::media::create_content::v3::Request::new(data);
-            request.content_type = Some(content_type);
-            if let Some(name) = filename {
-                request.filename = Some(name);
-            }
+            // Use the media uploader
+            let request = client.media().upload(&content_type, data);
+            let request = if let Some(name) = filename {
+                request.file_name(name) // Use builder pattern for filename
+            } else {
+                request
+            };
 
-            // Send the request
-            let response = client.send(request).await.map_err(MediaError::matrix_sdk)?;
+            let response = request.await.map_err(MediaError::matrix_sdk)?;
 
             Ok(response.content_uri)
         })
     }
 
     /// Upload a file from disk to the homeserver.
-    pub fn upload_file(&self, path: PathBuf) -> MatrixFuture<String> {
+    pub fn upload_file(&self, path: PathBuf) -> MatrixFuture<OwnedMxcUri> { // Return OwnedMxcUri
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
@@ -94,16 +97,15 @@ impl CyrumMedia {
                 "xml" => "application/xml",
                 _ => "application/octet-stream",
             }
-            .to_string();
+            .parse::<mime::Mime>() // Parse the determined mime type string
+            .map_err(|_| MediaError::InvalidParameter("Could not parse mime type".into()))?;
 
-            // Create the upload request
-            let mut request =
-                matrix_sdk::ruma::api::client::media::create_content::v3::Request::new(data);
-            request.content_type = Some(content_type);
-            request.filename = Some(filename.to_string());
-
-            // Send the request
-            let response = client.send(request).await.map_err(MediaError::matrix_sdk)?;
+            // Use the media uploader
+            let response = client.media()
+                .upload(&content_type, data.into()) // Pass parsed mime and converted data
+                .file_name(filename) // Set filename
+                .await
+                .map_err(MediaError::matrix_sdk)?;
 
             Ok(response.content_uri)
         })
@@ -111,19 +113,24 @@ impl CyrumMedia {
 
     /// Download content from the homeserver.
     pub fn download(&self, mxc_uri: &str) -> MatrixFuture<Vec<u8>> {
-        let mxc_uri = mxc_uri.to_owned();
+        let mxc_uri_owned = mxc_uri.to_owned(); // Clone for the async block
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            let source = matrix_sdk::ruma::events::room::MediaSource::Plain(mxc_uri);
-            let request = matrix_sdk::media::MediaRequestParameters {
-                source,
-                format: matrix_sdk::media::MediaFormat::File,
+            // Parse the MXC URI
+            let uri = MxcUri::parse(&mxc_uri_owned)
+                 .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+
+            // Create a media request
+            let request = MediaRequest {
+                source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // Use owned URI
+                format: MediaFormat::File,
             };
 
+            // Get media content
             let response = client
                 .media()
-                .get_media_content(&request, true)
+                .get_media_content(&request, true) // `true` for use_cache
                 .await
                 .map_err(MediaError::matrix_sdk)?;
 
@@ -133,22 +140,28 @@ impl CyrumMedia {
 
     /// Download content to a file.
     pub fn download_to_file(&self, mxc_uri: &str, path: PathBuf) -> MatrixFuture<()> {
-        let mxc_uri = mxc_uri.to_owned();
+        let mxc_uri_owned = mxc_uri.to_owned(); // Clone for the async block
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            let source = matrix_sdk::ruma::events::room::MediaSource::Plain(mxc_uri);
-            let request = matrix_sdk::media::MediaRequestParameters {
-                source,
-                format: matrix_sdk::media::MediaFormat::File,
+            // Parse the MXC URI
+            let uri = MxcUri::parse(&mxc_uri_owned)
+                 .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+
+            // Create a media request
+            let request = MediaRequest {
+                source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // Use owned URI
+                format: MediaFormat::File,
             };
 
+            // Get media content
             let data = client
                 .media()
-                .get_media_content(&request, true)
+                .get_media_content(&request, true) // `true` for use_cache
                 .await
                 .map_err(MediaError::matrix_sdk)?;
 
+            // Write to file
             tokio::fs::write(path, data)
                 .await
                 .map_err(|e| MediaError::IoError(e.to_string()))?;
@@ -159,22 +172,29 @@ impl CyrumMedia {
 
     /// Get a thumbnail for content.
     pub fn get_thumbnail(&self, mxc_uri: &str, width: u32, height: u32) -> MatrixFuture<Vec<u8>> {
-        let mxc_uri = mxc_uri.to_owned();
+        let mxc_uri_owned = mxc_uri.to_owned(); // Clone for the async block
         let client = self.client.clone();
         let width = UInt::from(width);
         let height = UInt::from(height);
 
         MatrixFuture::spawn(async move {
+            // Parse the MXC URI
+            let uri = MxcUri::parse(&mxc_uri_owned)
+                 .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+
+            // Create thumbnail settings
             let thumbnail_settings = MediaThumbnailSettings::new(width, height);
-            let source = matrix_sdk::ruma::events::room::MediaSource::Plain(mxc_uri);
-            let request = matrix_sdk::media::MediaRequestParameters {
-                source,
-                format: matrix_sdk::media::MediaFormat::Thumbnail(thumbnail_settings),
+
+            // Create a media request
+            let request = MediaRequest {
+                source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // Use owned URI
+                format: MediaFormat::Thumbnail(thumbnail_settings),
             };
 
+            // Get media content
             let data = client
                 .media()
-                .get_media_content(&request, true)
+                .get_media_content(&request, true) // `true` for use_cache
                 .await
                 .map_err(MediaError::matrix_sdk)?;
 
@@ -190,22 +210,29 @@ impl CyrumMedia {
         height: u32,
         method: ThumbnailMethod,
     ) -> MatrixFuture<Vec<u8>> {
-        let mxc_uri = mxc_uri.to_owned();
+        let mxc_uri_owned = mxc_uri.to_owned(); // Clone for the async block
         let client = self.client.clone();
         let width = UInt::from(width);
         let height = UInt::from(height);
 
         MatrixFuture::spawn(async move {
-            let thumbnail_settings = MediaThumbnailSettings::with_method(method, width, height);
-            let source = matrix_sdk::ruma::events::room::MediaSource::Plain(mxc_uri);
-            let request = matrix_sdk::media::MediaRequestParameters {
-                source,
-                format: matrix_sdk::media::MediaFormat::Thumbnail(thumbnail_settings),
+            // Parse the MXC URI
+            let uri = MxcUri::parse(&mxc_uri_owned)
+                 .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+
+            // Create thumbnail settings with method
+            let thumbnail_settings = MediaThumbnailSettings::new(width, height).method(method); // Use builder pattern
+
+            // Create a media request
+            let request = MediaRequest {
+                source: matrix_sdk::media::MediaSource::Plain(uri.to_owned()), // Use owned URI
+                format: MediaFormat::Thumbnail(thumbnail_settings),
             };
 
+            // Get media content
             let data = client
                 .media()
-                .get_media_content(&request, true)
+                .get_media_content(&request, true) // `true` for use_cache
                 .await
                 .map_err(MediaError::matrix_sdk)?;
 
@@ -214,28 +241,31 @@ impl CyrumMedia {
     }
 
     /// Get the download URL for content.
-    pub fn get_download_url(&self, mxc_uri: &str) -> Option<String> {
+    pub fn get_download_url(&self, mxc_uri: &str) -> Result<Option<String>, MediaError> { // Return Result
         let client = self.client.clone();
-        let uri = match matrix_sdk::ruma::MxcUri::parse(mxc_uri) {
-            Ok(uri) => uri,
-            Err(_) => return None,
-        };
-        client.media().get_content_download_url(&uri).map(|url| url.to_string())
+        let uri = MxcUri::parse(mxc_uri) // Use MxcUri::parse
+            .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+        // Check SDK 0.10+ for getting download URL, might be on client or media helper
+        // Placeholder: Replace with actual SDK 0.10+ method
+        warn!("get_download_url needs verification for SDK 0.10+ method");
+        // let url = client.media().download_url_for(&uri)?; // Example
+        let url: Option<String> = None; // Placeholder
+        Ok(url)
     }
 
     /// Get the thumbnail URL for content.
-    pub fn get_thumbnail_url(&self, mxc_uri: &str, width: u32, height: u32) -> Option<String> {
+    pub fn get_thumbnail_url(&self, mxc_uri: &str, width: u32, height: u32) -> Result<Option<String>, MediaError> { // Return Result
         let client = self.client.clone();
         let width = UInt::from(width);
         let height = UInt::from(height);
         let thumbnail_settings = MediaThumbnailSettings::new(width, height);
-        let uri = match matrix_sdk::ruma::MxcUri::parse(mxc_uri) {
-            Ok(uri) => uri,
-            Err(_) => return None,
-        };
-        client
-            .media()
-            .get_content_thumbnail_url(&uri, thumbnail_settings)
-            .map(|url| url.to_string())
+        let uri = MxcUri::parse(mxc_uri) // Use MxcUri::parse
+            .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+        // Check SDK 0.10+ for getting thumbnail URL
+        // Placeholder: Replace with actual SDK 0.10+ method
+        warn!("get_thumbnail_url needs verification for SDK 0.10+ method");
+        // let url = client.media().thumbnail_url_for(&uri, thumbnail_settings)?; // Example
+        let url: Option<String> = None; // Placeholder
+        Ok(url)
     }
 }

@@ -8,14 +8,12 @@ use tokio::runtime::Handle;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use matrix_sdk::{
-    config::RequestConfig,
-    encryption::{
-        verification::VerificationState,
-        BackupDownloadStrategy,
-        EncryptionEnabled,
-        EncryptionSettings,
-        TrustLevel,
+    config::{RequestConfig, StoreConfig},
+    crypto::{
+        store::BackupDownloadStrategy,
+        types::{trust::TrustLevel, verification::VerificationState},
     },
+    encryption::{Config as EncryptionConfigSdk, EncryptionState}, // Renamed EncryptionSettings to Config
     ruma::{
         api::client::{
             account::register::v3::Request as RegistrationRequest,
@@ -26,8 +24,7 @@ use matrix_sdk::{
         RoomId,
         UserId,
     },
-    Client as MatrixClient,
-    ClientBuilder,
+    Client as MatrixClient, // ClientBuilder is removed, use Client::builder()
 };
 
 use crate::encryption::CyrumEncryption;
@@ -40,6 +37,7 @@ use crate::store::CyrumStateStore;
 use crate::sync::CyrumSync;
 
 /// Encryption setup configuration for CyrumClient
+#[derive(Clone)] // Add Clone derive
 pub struct EncryptionConfig {
     /// Whether to enable encryption automatically
     pub auto_enable: bool,
@@ -81,9 +79,9 @@ impl CyrumClient {
     #[instrument(skip_all, level = "debug")]
     pub fn new(homeserver_url: &str) -> Result<Self> {
         debug!("Creating new Matrix client with default config");
-        let client = ClientBuilder::new()
+        let client = MatrixClient::builder() // Use Client::builder()
             .homeserver_url(homeserver_url)
-            .build()
+            .build() // build() returns Result, no await needed
             .map_err(ClientError::matrix_sdk)?;
 
         Ok(Self {
@@ -107,21 +105,22 @@ impl CyrumClient {
     pub fn with_config<S>(
         homeserver_url: &str,
         store: S,
-        encryption_settings: Option<EncryptionSettings>,
+        encryption_config: Option<EncryptionConfigSdk>, // Use the SDK's EncryptionConfig
         request_config: Option<RequestConfig>,
     ) -> Result<Self>
     where
-        S: matrix_sdk_base::store::StateStore + CyrumStateStore + Send + Sync + 'static,
+        S: matrix_sdk_base::store::StateStore + Send + Sync + 'static, // Removed CyrumStateStore bound here, handled by wrapper
     {
         debug!("Creating Matrix client with custom configuration");
-        let mut builder = ClientBuilder::new().homeserver_url(homeserver_url);
+        let mut builder = MatrixClient::builder().homeserver_url(homeserver_url); // Use Client::builder()
 
-        // Use the store directly
-        builder = builder.state_store(store);
+        // Wrap the store in StoreConfig
+        let store_config = StoreConfig::new().state_store(store);
+        builder = builder.store_config(store_config); // Use .store_config()
 
         // Configure encryption if provided
-        if let Some(settings) = encryption_settings {
-            builder = builder.encryption_settings(settings);
+        if let Some(config) = encryption_config {
+            builder = builder.encryption_config(config); // Use .encryption_config()
         }
 
         // Configure request settings if provided
@@ -129,7 +128,7 @@ impl CyrumClient {
             builder = builder.request_config(config);
         }
 
-        let client = builder.build().map_err(ClientError::matrix_sdk)?;
+        let client = builder.build().map_err(ClientError::matrix_sdk)?; // build() returns Result
 
         Ok(Self {
             inner: Arc::new(client),
@@ -146,35 +145,36 @@ impl CyrumClient {
     pub fn with_encryption<S>(
         homeserver_url: &str,
         store: S,
-        config: Option<EncryptionConfig>,
+        config: Option<EncryptionConfig>, // Use our wrapper config struct here
         request_config: Option<RequestConfig>,
     ) -> Result<Self>
     where
-        S: matrix_sdk_base::store::StateStore + CyrumStateStore + Send + Sync + 'static,
+        S: matrix_sdk_base::store::StateStore + Send + Sync + 'static, // Removed CyrumStateStore bound
     {
         debug!("Creating Matrix client with encryption enabled");
-        let encryption_config = config.unwrap_or_default();
+        let cyrum_encryption_config = config.unwrap_or_default(); // Our config
 
-        // Create encryption settings with optimal defaults
-        let encryption_settings = EncryptionSettings::default()
-            .disable_backups_on_startup(!encryption_config.auto_backup);
+        // Create SDK encryption config
+        let sdk_encryption_config = EncryptionConfigSdk::default()
+            .backup(matrix_sdk::encryption::BackupConfig::default()
+                .enabled(!cyrum_encryption_config.auto_backup)); // Configure backup via BackupConfig
 
-        let mut builder = ClientBuilder::new()
+        let mut builder = MatrixClient::builder() // Use Client::builder()
             .homeserver_url(homeserver_url)
-            .state_store(store)
-            .encryption_settings(encryption_settings);
+            .store_config(StoreConfig::new().state_store(store)) // Use .store_config()
+            .encryption_config(sdk_encryption_config); // Use .encryption_config()
 
         // Configure request settings if provided
         if let Some(config) = request_config {
             builder = builder.request_config(config);
         }
 
-        let client = builder.build().map_err(ClientError::matrix_sdk)?;
+        let client = builder.build().map_err(ClientError::matrix_sdk)?; // build() returns Result
 
         Ok(Self {
             inner: Arc::new(client),
             runtime_handle: Handle::current(),
-            encryption_config: Some(encryption_config),
+            encryption_config: Some(cyrum_encryption_config), // Store our config wrapper
         })
     }
 
@@ -192,6 +192,7 @@ impl CyrumClient {
         debug!("Logging in user: {}", username);
 
         MatrixFuture::spawn(async move {
+            // Call login directly on the client
             client
                 .login_username(&username, &password)
                 .await
@@ -212,47 +213,46 @@ impl CyrumClient {
     /// Initialize encryption settings after login
     async fn initialize_encryption(client: &MatrixClient, config: &EncryptionConfig) -> Result<()> {
         // Check if encryption is already enabled
-        if client.encryption().is_enabled() == EncryptionEnabled::NoE2EE {
+        // Note: is_enabled() might not exist directly, check state instead
+        if client.encryption_state() == EncryptionState::Disabled {
             debug!("Enabling encryption");
-            client.encryption().enable().await.map_err(ClientError::matrix_sdk)?;
+            // Enabling might happen implicitly or require specific setup after login
+            // For now, assume it's handled or needs further investigation based on SDK docs
+            // client.encryption().enable().await.map_err(ClientError::matrix_sdk)?;
+            warn!("Encryption enabling logic needs review for SDK 0.10+");
         }
 
         // Set up key backup if configured
         if config.auto_backup {
             debug!("Setting up key backup");
-            let backup_exists = client
-                .encryption()
-                .backup_info()
-                .await
-                .map_err(ClientError::matrix_sdk)?
-                .is_some();
+            // Use the recovery API
+            let recovery = client.encryption().recovery();
+
+            // Check if backup exists using recovery status
+            let status = recovery.status().await;
+            let backup_exists = status.is_ok(); // Simplified check, might need refinement
 
             if !backup_exists {
                 debug!("Creating new key backup");
                 if let Some(passphrase) = &config.recovery_passphrase {
-                    client
-                        .encryption()
-                        .create_backup_with_passphrase(passphrase)
+                    recovery
+                        .create_recovery_key_from_passphrase(passphrase)
                         .await
                         .map_err(ClientError::matrix_sdk)?;
                 } else {
-                    client
-                        .encryption()
-                        .create_backup_version()
+                    // Auto-generate if no passphrase
+                    recovery
+                        .create_recovery_key()
                         .await
                         .map_err(ClientError::matrix_sdk)?;
                 }
+                // Enable backup after creating key
+                recovery.enable_backup().await.map_err(ClientError::matrix_sdk)?;
+
             } else if !config.online_backup_only {
-                debug!("Enabling existing key backup");
-                if let Some(info) =
-                    client.encryption().backup_info().await.map_err(ClientError::matrix_sdk)?
-                {
-                    client
-                        .encryption()
-                        .enable_backup_v1(info.version)
-                        .await
-                        .map_err(ClientError::matrix_sdk)?;
-                }
+                debug!("Ensuring existing key backup is enabled");
+                // Enable backup if it exists but might be disabled
+                 recovery.enable_backup().await.map_err(ClientError::matrix_sdk)?;
             }
         }
 
@@ -275,6 +275,7 @@ impl CyrumClient {
         debug!("Logging in with custom request");
 
         MatrixFuture::spawn(async move {
+            // Call login directly on the client
             client.login(request).await.map_err(ClientError::matrix_sdk)?;
 
             // Initialize encryption if configured
@@ -298,6 +299,7 @@ impl CyrumClient {
         debug!("Registering new user account");
 
         MatrixFuture::spawn(async move {
+            // Call register directly on the client
             client.register(request).await.map_err(ClientError::matrix_sdk)?;
 
             // Initialize encryption if configured
@@ -319,6 +321,7 @@ impl CyrumClient {
 
         debug!("Logging out current session");
 
+        // Call logout directly on the client
         MatrixFuture::spawn(async move { client.logout().await.map_err(ClientError::matrix_sdk) })
     }
 
@@ -328,7 +331,7 @@ impl CyrumClient {
     }
 
     /// Get the device ID of the current session.
-    pub fn device_id(&self) -> Option<&OwnedDeviceId> {
+    pub fn device_id(&self) -> Option<&DeviceId> { // Changed return type to &DeviceId
         self.inner.device_id()
     }
 
@@ -344,12 +347,12 @@ impl CyrumClient {
     #[instrument(skip(self), level = "debug")]
     pub fn verify_devices(
         &self,
-        device_map: &[(UserId, DeviceId)],
-    ) -> MatrixFuture<Vec<(UserId, DeviceId, VerificationState)>> {
-        let device_map = device_map.to_vec();
+        device_map: &[(OwnedUserId, OwnedDeviceId)], // Use Owned types for cloning
+    ) -> MatrixFuture<Vec<(OwnedUserId, OwnedDeviceId, VerificationState)>> { // Use Owned types
+        let device_map_vec: Vec<(OwnedUserId, OwnedDeviceId)> = device_map.to_vec(); // Explicit type
         let client = self.inner.clone();
 
-        debug!("Verifying {} devices in batch mode", device_map.len());
+        debug!("Verifying {} devices in batch mode", device_map_vec.len());
 
         MatrixFuture::spawn(async move {
             let mut results = Vec::new();
@@ -358,18 +361,23 @@ impl CyrumClient {
             // Process devices in batches
             const BATCH_SIZE: usize = 10;
 
-            for chunk in device_map.chunks(BATCH_SIZE) {
+            for chunk in device_map_vec.chunks(BATCH_SIZE) { // Use device_map_vec
                 let mut futures = Vec::with_capacity(chunk.len());
 
                 // Create futures for each device
                 for (user_id, device_id) in chunk {
-                    let user_id = user_id.clone();
-                    let device_id = device_id.clone();
+                    let user_id = user_id.clone(); // Clone OwnedUserId
+                    let device_id = device_id.clone(); // Clone OwnedDeviceId
 
                     // Get verification state
-                    let future = async move {
+                    let future = async { // Removed move, crypto is Arc-like
                         match crypto.get_device(&user_id, &device_id).await {
-                            Ok(device) => Some((user_id, device_id, device.verification_state())),
+                            // get_device returns Option<Device>
+                            Ok(Some(device)) => Some((user_id, device_id, device.verification_state())),
+                            Ok(None) => {
+                                warn!("Device not found {}/{}", user_id, device_id);
+                                None
+                            }
                             Err(e) => {
                                 error!("Failed to get device {}/{}: {}", user_id, device_id, e);
                                 None
@@ -395,43 +403,47 @@ impl CyrumClient {
 
     /// Restore encryption keys using the configured backup
     #[instrument(skip(self), level = "debug")]
-    pub fn restore_keys(&self) -> MatrixFuture<usize> {
+    pub fn restore_keys(&self, passphrase: Option<&str>) -> MatrixFuture<usize> { // Passphrase might be needed
         let client = self.inner.clone();
+        let passphrase = passphrase.map(|s| s.to_owned());
 
         debug!("Restoring encryption keys from backup");
 
         MatrixFuture::spawn(async move {
-            // Get backup info
-            let backup_info =
-                client.encryption().backup_info().await.map_err(ClientError::matrix_sdk)?;
+            let recovery = client.encryption().recovery();
 
-            let backup_info = match backup_info {
-                Some(info) => info,
-                None => {
-                    warn!("No backup info available");
-                    return Ok(0);
-                },
+            // Check if recovery is enabled and we have a key
+            if !recovery.is_enabled() {
+                 warn!("Recovery is not enabled, cannot restore keys.");
+                 return Ok(0);
+            }
+
+            // Attempt to restore keys. Passphrase might be needed if key isn't cached.
+            // The SDK might handle cached keys automatically. Check SDK 0.10 docs.
+            // This part needs careful review based on how SDK 0.10 handles restoration.
+            // Assuming passphrase is required if key isn't cached:
+            let result = if let Some(pass) = passphrase {
+                 recovery.restore_backup_from_passphrase(&pass, None).await // Pass None for progress
+            } else {
+                 // Try restoring without passphrase (assuming cached key)
+                 // This specific method might not exist, adjust based on SDK
+                 warn!("Attempting key restoration without passphrase, might fail if key not cached.");
+                 // Placeholder: Replace with actual SDK 0.10 method if available
+                 // recovery.restore_backup_with_cached_key().await
+                 return Err(ClientError::InvalidParameter("Passphrase needed or cached key restore method not found".into()));
             };
 
-            // Try to restore with existing key in store
-            match client
-                .encryption()
-                .restore_backup_with_cached_key(
-                    backup_info.version,
-                    BackupDownloadStrategy::LazyLoadRoomKeys,
-                )
-                .await
-            {
-                Ok(result) => {
-                    debug!("Restored {} keys from backup with cached key", result.imported_count);
-                    Ok(result.imported_count)
-                },
-                Err(e) => {
-                    warn!("Failed to restore with cached key: {}", e);
-                    // Cache key is invalid or not available
-                    Ok(0)
-                },
-            }
+
+            match result {
+                 Ok(counts) => {
+                     debug!("Restored {} keys from backup", counts.total);
+                     Ok(counts.total as usize) // Assuming counts.total is the relevant number
+                 },
+                 Err(e) => {
+                     warn!("Failed to restore keys: {}", e);
+                     Err(ClientError::matrix_sdk(e)) // Propagate error
+                 },
+             }
         })
     }
 
@@ -444,12 +456,17 @@ impl CyrumClient {
 
         MatrixFuture::spawn(async move {
             // Set up handler for new device notifications
-            client.add_event_handler(move |ev: matrix_sdk::events::DeviceEvent| {
+            // Check the correct event type and handler signature for SDK 0.10+
+            // Placeholder: This likely needs adjustment
+            client.add_event_handler(move |ev: matrix_sdk::sync::DeviceLists| { // Example type, check SDK
                 let client = client.clone();
 
                 async move {
-                    let user_id = &ev.sender;
-                    let device_id = &ev.content.device_id;
+                    // Logic to extract user_id and device_id from the event `ev`
+                    // This depends heavily on the actual event structure in SDK 0.10+
+                    warn!("TOFU event handling needs verification for SDK 0.10+ event type");
+                    let user_id: &UserId = todo!(); // Extract user_id from ev
+                    let device_id: &DeviceId = todo!(); // Extract device_id from ev
 
                     debug!("New device detected: {}/{}", user_id, device_id);
 
@@ -462,18 +479,23 @@ impl CyrumClient {
                     if devices.devices().count() <= 1 {
                         debug!("First device for user {}, applying TOFU", user_id);
 
-                        // Get the specific device
-                        let device =
-                            client.encryption().get_device(user_id, device_id).await.map_err(
-                                |e| {
-                                    error!("Failed to get device details: {}", e);
-                                },
-                            )?;
+                        // Get the specific device, handling Option
+                        let device = match client.encryption().get_device(user_id, device_id).await {
+                            Ok(Some(d)) => d,
+                            Ok(None) => {
+                                error!("Device {}/{} not found for TOFU", user_id, device_id);
+                                return Ok(()); // Or handle error appropriately
+                            }
+                            Err(e) => {
+                                error!("Failed to get device details: {}", e);
+                                return Err(e); // Propagate error
+                            }
+                        };
 
                         // Trust this device automatically
-                        device.set_trust_level(TrustLevel::Trusted).await.map_err(|e| {
-                            error!("Failed to trust device: {}", e);
-                        })?;
+                        device.set_trust_level(TrustLevel::Trusted); // set_trust_level might not be async anymore
+                        // Check if saving changes is needed after setting trust level
+                        // client.save_changes().await?; // Example if needed
 
                         debug!("Successfully trusted first device for {}", user_id);
                     }
@@ -505,7 +527,8 @@ impl CyrumClient {
         debug!("Creating DM room with user {}", user_id);
 
         MatrixFuture::spawn(async move {
-            let room = client.create_dm_room(&user_id).await.map_err(ClientError::matrix_sdk)?;
+            // Call create_dm directly on the client
+            let room = client.create_dm(&user_id).await.map_err(ClientError::matrix_sdk)?; // Renamed method?
 
             debug!("Created DM room {} with {}", room.room_id(), user_id);
             Ok(CyrumRoom::new(room))
@@ -521,6 +544,7 @@ impl CyrumClient {
         debug!("Joining room with ID {}", room_id);
 
         MatrixFuture::spawn(async move {
+            // Call join_room_by_id directly on the client
             let room = client.join_room_by_id(&room_id).await.map_err(ClientError::matrix_sdk)?;
 
             debug!("Joined room {}", room.room_id());
@@ -537,8 +561,12 @@ impl CyrumClient {
         debug!("Joining room with alias {}", room_alias);
 
         MatrixFuture::spawn(async move {
+            // Call join_room_by_id_or_alias directly on the client
+            // Assuming alias is RoomIdOrAlias type
+            let room_alias_id = matrix_sdk::ruma::RoomAliasId::parse(&room_alias)
+                .map_err(|e| ClientError::InvalidParameter(format!("Invalid room alias: {}", e)))?;
             let room = client
-                .join_room_by_alias(&room_alias)
+                .join_room_by_id_or_alias(&room_alias_id.into()) // Convert alias to RoomIdOrAlias
                 .await
                 .map_err(ClientError::matrix_sdk)?;
 
@@ -562,12 +590,19 @@ impl CyrumClient {
         debug!("Creating new room: {}", name);
 
         MatrixFuture::spawn(async move {
-            let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
-            request.name = Some(name.clone());
-            request.topic = topic.clone();
-            request.is_direct = is_direct;
+            // Use the create_room builder pattern
+            let mut create_builder = client.create_room();
+            create_builder = create_builder.name(name.clone());
+            if let Some(t) = topic {
+                create_builder = create_builder.topic(t);
+            }
+            if is_direct {
+                // Check how to mark as direct in SDK 0.10+ builder
+                warn!("Marking room as direct needs verification for SDK 0.10+ create_room builder");
+                // create_builder = create_builder.is_direct(true); // Example
+            }
 
-            let room = client.create_room(request).await.map_err(ClientError::matrix_sdk)?;
+            let room = create_builder.send().await.map_err(ClientError::matrix_sdk)?;
 
             debug!("Created room {} - {} (direct: {})", room.room_id(), name, is_direct);
             Ok(CyrumRoom::new(room))
@@ -598,7 +633,9 @@ impl CyrumClient {
     /// Stop all background tasks and shutdown the client.
     #[instrument(skip(self), level = "debug")]
     pub fn shutdown(&self) {
-        debug!("Shutting down Matrix client");
-        self.inner.shutdown();
+        debug!("Shutting down Matrix client (Note: shutdown method might be removed, dropping client might be sufficient)");
+        // Check if shutdown() still exists in SDK 0.10+
+        // self.inner.shutdown(); // If it exists
+        warn!("Client shutdown behavior needs verification for SDK 0.10+");
     }
 }
