@@ -1452,10 +1452,10 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                         let txn_id = OwnedTransactionId::try_from(request.own_txn_id.clone())
                             .map_err(|_| {
                                 StoreError::deserialization_error("Invalid child transaction ID")
-                            })?;
+                            })?; // Keep the semicolon here
                         // Wrap it in a ChildTransactionId
                         ChildTransactionId::new(txn_id)
-                    };
+                    }; // Keep the closing brace and semicolon here
 
                     let parent_txn_id = OwnedTransactionId::try_from(request.parent_txn_id)
                         .map_err(|_| {
@@ -2258,4 +2258,6 @@ impl CyrumStateStore for SurrealStateStore {
         })
     }
 
+// The final closing brace for the `impl CyrumStateStore for SurrealStateStore` block should be here.
+// If the extra brace was here, it's now removed.
 }
