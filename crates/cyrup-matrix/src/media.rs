@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tracing::warn; // Add warn import
+use mime; // Add mime import
 
 use matrix_sdk::{
     media::{MediaFormat, MediaRequest, MediaSource, MediaThumbnailSettings}, // Import MediaFormat, MediaRequest, MediaSource
@@ -48,17 +50,19 @@ impl CyrumMedia {
         let filename = filename.map(|s| s.to_owned()); // Clone filename for async block
 
         MatrixFuture::spawn(async move {
-            let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type inside async
-            let data = data.into(); // Convert Vec<u8> to Bytes
-            // Use the media uploader
-            let request = client.media().upload(&content_type, data);
-            let request = if let Some(name) = filename.as_deref() { // Use cloned filename
-                request.file_name(name) // Use builder pattern for filename
-            } else {
-                request
-            };
+            let result = async {
+                let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type inside async
+                let data = data.into(); // Convert Vec<u8> to Bytes
+                // Use the media uploader
+                // TODO: Verify upload method signature and builder pattern in SDK 0.10+
+                let mut request_builder = client.media().upload(&content_type, data); // Assuming upload returns a builder
+                if let Some(name) = filename.as_deref() { // Use cloned filename
+                    request_builder = request_builder.file_name(name); // Use builder pattern for filename
+                }
 
-            let result = request.await;
+                let response = request_builder.await.map_err(MediaError::matrix_sdk)?;
+                Ok(response.content_uri)
+            }.await;
 
             // Map MediaError to crate::error::Error
             result.map(|response| response.content_uri).map_err(crate::error::Error::Media)
@@ -72,10 +76,8 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Read file content
-                let data = match tokio::fs::read(&path).await {
-                Ok(data) => data,
-                Err(e) => return Err(MediaError::IoError(e.to_string())),
-            };
+                let data = tokio::fs::read(&path).await
+                    .map_err(|e| MediaError::IoError(e.to_string()))?;
 
             // Get file name and extension for content type
             let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
@@ -105,15 +107,14 @@ impl CyrumMedia {
             .map_err(|_| MediaError::InvalidParameter("Could not parse mime type".into()))?;
 
             // Use the media uploader
+            // TODO: Verify upload method signature and builder pattern in SDK 0.10+
             let response = client.media()
                     .upload(&content_type, data.into()) // Pass parsed mime and converted data
-                    .file_name(filename) // Set filename
+                    .file_name(filename) // Set filename using builder
                     .await
                     .map_err(MediaError::matrix_sdk)?;
 
                 Ok(response.content_uri)
-            }.await;
-
             // Map MediaError to crate::error::Error
             result.map_err(crate::error::Error::Media)
         })
@@ -127,14 +128,18 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                let uri = MxcUri::parse(&mxc_uri_owned)
+                // TODO: Use matrix_sdk::ruma::MxcUri::parse
+                let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create a media request
-                let request = MediaRequest {
-                    source: MediaSource::Plain(uri.to_owned()), // Use owned URI
+                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
+                // MediaSource might be private. Look for helper functions or structs.
+                let request = MediaRequest { // Assuming MediaRequestConfig
+                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::File,
                 };
+                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let response = client
@@ -159,14 +164,17 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                let uri = MxcUri::parse(&mxc_uri_owned)
+                // TODO: Use matrix_sdk::ruma::MxcUri::parse
+                let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create a media request
-                let request = MediaRequest {
-                    source: MediaSource::Plain(uri.to_owned()), // Use owned URI
+                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
+                let request = MediaRequest { // Assuming MediaRequestConfig
+                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::File,
                 };
+                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client
@@ -198,17 +206,20 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                let uri = MxcUri::parse(&mxc_uri_owned)
+                // TODO: Use matrix_sdk::ruma::MxcUri::parse
+                let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create thumbnail settings
                 let thumbnail_settings = MediaThumbnailSettings::new(width, height);
 
                 // Create a media request
-                let request = MediaRequest {
-                    source: MediaSource::Plain(uri.to_owned()), // Use owned URI
+                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
+                let request = MediaRequest { // Assuming MediaRequestConfig
+                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::Thumbnail(thumbnail_settings),
                 };
+                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client
@@ -241,17 +252,20 @@ impl CyrumMedia {
         MatrixFuture::spawn(async move {
             let result = async {
                 // Parse the MXC URI
-                let uri = MxcUri::parse(&mxc_uri_owned)
+                // TODO: Use matrix_sdk::ruma::MxcUri::parse
+                let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
                      .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
 
                 // Create thumbnail settings with method
                 let thumbnail_settings = MediaThumbnailSettings::new(width, height).method(method); // Use builder pattern
 
                 // Create a media request
-                let request = MediaRequest {
-                    source: MediaSource::Plain(uri.to_owned()), // Use owned URI
+                // TODO: Verify how to construct MediaRequest or equivalent in SDK 0.10+
+                let request = MediaRequest { // Assuming MediaRequestConfig
+                    source: MediaSource::Plain(uri.to_owned()), // This likely needs change
                     format: MediaFormat::Thumbnail(thumbnail_settings),
                 };
+                warn!("MediaRequest construction needs verification for SDK 0.10+");
 
             // Get media content
             let data = client

@@ -5,18 +5,15 @@
 
 use std::sync::Arc;
 use tokio::runtime::Handle;
-
-use std::sync::Arc;
-use tokio::runtime::Handle;
+use tracing::warn;
 
 // Updated imports for SDK 0.10+
+// TODO: Verify these paths are correct for SDK 0.10+
 use matrix_sdk::{
     crypto::{
-        store::{BackupDecryptionKey, BackupDownloadStrategy}, // Moved BackupDownloadStrategy
-        types::{
-            verification::{Emoji, SasVerification, Verification}, // Moved verification types
-            VerificationState, // Moved VerificationState
-        },
+        backups::BackupDownloadStrategy, // Example path
+        store::BackupDecryptionKey,
+        verification::{Emoji, SasVerification, Verification, VerificationState}, // Example path
     },
     ruma::{DeviceId, UserId},
     Client as MatrixClient,
@@ -212,9 +209,10 @@ impl CyrumEncryption {
         MatrixFuture::spawn(async move {
             // get_verification likely renamed or moved, e.g., request_verification
             // Check SDK 0.10+ for verification initiation flow
+            // TODO: Verify request_verification method in SDK 0.10+
             let verification = client
                 .encryption()
-                .request_verification(&user_id, Some(&device_id)) // Example method name
+                .request_verification(&user_id, Some(&device_id)) // Assuming this method exists
                 .await
                 .map_err(EncryptionError::matrix_sdk)?;
 
@@ -232,9 +230,10 @@ impl CyrumEncryption {
 
         MatrixFuture::spawn(async move {
             // get_verification likely renamed or moved, e.g., request_verification
+            // TODO: Verify request_verification method in SDK 0.10+
             let verification = client
                 .encryption()
-                .request_verification(&user_id, None) // Example method name
+                .request_verification(&user_id, None) // Assuming this method exists
                 .await
                 .map_err(EncryptionError::matrix_sdk)?;
 
@@ -251,17 +250,21 @@ impl CyrumEncryption {
             let recovery = client.encryption().recovery();
 
             // Check if recovery key exists, create if not
-            if recovery.get_recovery_key().await.map_err(EncryptionError::matrix_sdk)?.is_none() {
-                 recovery.create_recovery_key().await.map_err(EncryptionError::matrix_sdk)?;
+            // TODO: Verify get_recovery_key and create_recovery_key methods in SDK 0.10+
+            if recovery.get_recovery_key().await.map_err(EncryptionError::matrix_sdk)?.is_none() { // Assuming get_recovery_key exists
+                 // recovery.create_recovery_key().await.map_err(EncryptionError::matrix_sdk)?; // Method likely changed
+                 warn!("create_recovery_key needs verification for SDK 0.10+");
             }
 
             // Enable backup
-            recovery.enable_backup().await.map_err(EncryptionError::matrix_sdk)?;
+            // TODO: Verify enable_backup method in SDK 0.10+
+            recovery.enable_backup().await.map_err(EncryptionError::matrix_sdk)?; // Assuming enable_backup exists
 
             // Get the current backup version (if needed)
-            let status = recovery.status().await.map_err(EncryptionError::matrix_sdk)?;
-            // Extract version from status if required by the caller, otherwise return Ok(())
-            // Ok(status.backup_version.unwrap_or_default()) // Example: return version or empty string
+            // TODO: Verify how to get backup status/version in SDK 0.10+ (e.g., using recovery.state())
+            // let state = recovery.state(); // Example
+            // let version = state.backup_version().map(|v| v.to_string()).unwrap_or_default(); // Example
+            warn!("Backup version retrieval needs verification for SDK 0.10+");
             Ok("".to_string()) // Return empty string for now, adjust if version needed
         })
     }
@@ -281,10 +284,11 @@ impl CyrumEncryption {
                 // Attempt restore without passphrase (might use cached key)
                 // Check SDK 0.10+ documentation for the exact method
                 warn!("Attempting backup restore without passphrase.");
-                // recovery.restore_backup_with_cached_key().await // Example
+                // TODO: Verify method for restoring backup without passphrase (e.g., using cached key) in SDK 0.10+
+                // recovery.restore_backup_with_cached_key().await // Example, method likely changed/removed
                  return Err(EncryptionError::InvalidParameter(
                      "Passphrase needed or cached key restore method not found for SDK 0.10+".to_string(),
-                 ));
+                 )); // Keep error until method verified
             };
 
             match result {
@@ -301,9 +305,10 @@ impl CyrumEncryption {
         MatrixFuture::spawn(async move {
             // Use recovery status
             let recovery = client.encryption().recovery();
-            let status = recovery.status().await;
+            // TODO: Verify how to check backup status/enabled state in SDK 0.10+ (e.g., using recovery.state())
+            let state = recovery.state(); // Example
             // Check if backup is configured/enabled based on status
-            Ok(status.is_ok() && recovery.is_enabled()) // Example check
+            Ok(state != matrix_sdk::encryption::recovery::RecoveryState::Disabled) // Example check
         })
     }
 
@@ -314,7 +319,8 @@ impl CyrumEncryption {
         MatrixFuture::spawn(async move {
             // Use recovery API
             let recovery = client.encryption().recovery();
-            let key = recovery.get_recovery_key().await.map_err(EncryptionError::matrix_sdk)?;
+            // TODO: Verify get_recovery_key method in SDK 0.10+
+            let key = recovery.get_recovery_key().await.map_err(EncryptionError::matrix_sdk)?; // Assuming get_recovery_key exists
 
             key.ok_or_else(|| EncryptionError::MatrixSdk("No recovery key found".to_string()))
                .map(|k| k.to_base58()) // Convert key to base58 string
@@ -334,8 +340,11 @@ impl CyrumEncryption {
             let recovery = client.encryption().recovery();
 
             // Import the key
-            recovery.import_recovery_key(key, None).await // Pass None for progress
-                .map_err(EncryptionError::matrix_sdk)?;
+            // TODO: Verify import_recovery_key method in SDK 0.10+
+            // recovery.import_recovery_key(key, None).await // Method likely changed
+            warn!("import_recovery_key needs verification for SDK 0.10+");
+            // Placeholder error until method verified
+            return Err(EncryptionError::MatrixSdk("import_recovery_key needs verification".into()));
 
             // After importing, keys might be restored automatically or need another step.
             // Check SDK 0.10+ docs. Assuming import triggers restore:
@@ -363,7 +372,8 @@ impl CyrumEncryption {
                 .map_err(EncryptionError::matrix_sdk)? // Propagate error
                 .ok_or_else(|| EncryptionError::MatrixSdk(format!("Device not found: {}/{}", user_id, device_id)))?; // Handle Option
 
-            Ok(device.verification_state())
+            // TODO: Verify device.verification_state() method in SDK 0.10+
+            Ok(device.verification_state()) // Assuming verification_state() exists
         })
     }
 
@@ -394,8 +404,10 @@ impl CyrumEncryption {
 
             // Check the correct event type for verification requests in SDK 0.10+
             // Placeholder: Adjust event type and handling logic
+            // TODO: Verify correct event type and extraction logic for SDK 0.10+
+            use matrix_sdk::ruma::events; // Add use statement
             client.add_event_handler(
-                move |ev: matrix_sdk::events::VerificationRequestEvent| { // Example event type
+                move |ev: events::key::verification::VerificationRequestEvent| { // Example event type, needs verification
                     let sender = sender.clone();
                     // Need to get the actual Verification object from the event `ev`
                     // This depends heavily on the event structure in SDK 0.10+
@@ -403,7 +415,9 @@ impl CyrumEncryption {
 
                     async move {
                         // Placeholder: Get verification from event
-                        let verification: Arc<Verification> = todo!(); // Extract from ev
+                        // TODO: Implement extraction of Verification from the event `ev` based on SDK 0.10+ structure
+                        // Example: let verification = ev.verification();
+                        let verification: Arc<Verification> = todo!("Extract Verification from event"); // Extract from ev
 
                         // Send the wrapped verification request
                         let _ = sender

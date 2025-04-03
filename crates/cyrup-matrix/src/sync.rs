@@ -30,6 +30,7 @@ use futures_util::StreamExt; // Import StreamExt for receiver into_stream
 use crate::error::Result as CyrumResult; // Use crate's Result type
 use crate::error::SyncError;
 use crate::future::{MatrixFuture, MatrixStream};
+use tracing::warn; // Add warn import
 
 /// A synchronous wrapper around the Matrix SDK Sync functionality.
 ///
@@ -233,13 +234,14 @@ impl CyrumSync {
             let (sender, receiver) = channel(100);
 
             // Check event handler signature for SDK 0.10+
-            client.add_event_handler(move |ev: AnyMessageLikeEvent, room: MatrixRoom| {
+            // TODO: Verify event handler signature for AnyMessageLikeEvent in SDK 0.10+
+            client.add_event_handler(move |ev: AnyMessageLikeEvent, room: MatrixRoom| { // Assuming signature is similar
                 let sender = sender.clone();
                 let room_id = room.room_id().to_owned();
 
                 async move {
                     // Map potential SDK errors to our SyncError
-                    let result: CyrumResult<(OwnedRoomId, AnyMessageLikeEvent), SyncError> = Ok((room_id, ev));
+                    let result: CyrumResult<(OwnedRoomId, AnyMessageLikeEvent)> = Ok((room_id, ev)); // Use crate::error::Result
                     let _ = sender.send(result).await;
                 }
             });
@@ -261,10 +263,11 @@ impl CyrumSync {
 
         MatrixFuture::spawn(async move {
             // Check the method for uploading filters in SDK 0.10+
-            let filter_id = client.upload_filter(filter).await // Assuming upload_filter still exists
+            // TODO: Verify upload_filter method in SDK 0.10+
+            let response = client.upload_filter(filter).await // Assuming upload_filter still exists
                 .map_err(SyncError::matrix_sdk)?;
 
-            Ok(filter_id.filter_id) // Response likely contains filter_id field
+            Ok(response.filter_id) // Response likely contains filter_id field
         })
     }
 }

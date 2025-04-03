@@ -15,7 +15,10 @@ use crate::db::dao::receipt::ReceiptDao;
 use crate::db::dao::request_dependency::RequestDependencyDao;
 use crate::db::dao::room_membership::RoomMembershipDao;
 use crate::db::dao::room_state::RoomStateDao;
-use crate::db::dao::send_queue::SendQueueDao;
+use crate::db::dao::{
+    AccountDataDao, ApiCacheDao, CustomDao, KeyValueDao, MediaUploadDao, MessageDao, PresenceDao,
+    ReceiptDao, RequestDependencyDao, RoomMembershipDao, RoomStateDao, SendQueueDao,
+};
 
 // Use type alias to avoid exposing the private Connect type
 type SurrealDbConnection = surrealdb::engine::any::Any;
@@ -112,15 +115,15 @@ impl Dao {
     /// Get a DAO for code documents
 
     /// Get a Room Membership DAO for this database
-    pub fn room_membership_dao(&self) -> crate::db::dao::room_membership_dao::RoomMembershipDao {
-        crate::db::dao::room_membership_dao::RoomMembershipDao::new(
-            crate::db::client::DatabaseClient::SurrealKV(std::sync::Arc::new((*self.db).clone())),
-        )
+    pub fn room_membership_dao(&self) -> RoomMembershipDao {
+        RoomMembershipDao::new(crate::db::client::DatabaseClient::SurrealKV(
+            std::sync::Arc::new((*self.db).clone()),
+        ))
     }
 
     /// Get a Message DAO for this database
-    pub fn message_dao(&self) -> crate::db::dao::message_dao::MessageDao {
-        crate::db::dao::message_dao::MessageDao::new(crate::db::client::DatabaseClient::SurrealKV(
+    pub fn message_dao(&self) -> MessageDao {
+        MessageDao::new(crate::db::client::DatabaseClient::SurrealKV(
             std::sync::Arc::new((*self.db).clone()),
         ))
     }

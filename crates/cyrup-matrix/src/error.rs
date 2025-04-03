@@ -184,6 +184,10 @@ pub enum MediaError {
     /// Unsupported media type
     #[error("Unsupported media type: {0}")]
     UnsupportedMediaType(String),
+
+    /// An invalid parameter was provided
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
 }
 
 impl MediaError {
@@ -223,6 +227,10 @@ pub enum EncryptionError {
     /// Missing encryption keys
     #[error("Missing encryption keys")]
     MissingKeys,
+
+    /// An invalid parameter was provided
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
 }
 
 impl EncryptionError {
