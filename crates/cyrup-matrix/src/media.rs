@@ -116,7 +116,9 @@ impl CyrumMedia {
                     .map_err(MediaError::matrix_sdk)?;
 
                 Ok(response.content_uri)
-            // Map MediaError to crate::error::Error
+            }.await; // Await the inner async block
+
+            // Map MediaError to crate::error::Error inside the outer future
             result.map_err(crate::error::Error::Media)
         })
     }
@@ -284,18 +286,28 @@ impl CyrumMedia {
     }
 
     /// Get the download URL for content.
-    pub fn get_download_url(&self, mxc_uri: &str) -> crate::error::Result<Option<String>> { // Return crate::error::Result
+    pub fn get_download_url(&self, mxc_uri: &str) -> MatrixFuture<Option<String>> {
+        let mxc_uri_owned = mxc_uri.to_owned();
         let client = self.client.clone();
-        let uri = matrix_sdk::ruma::MxcUri::parse(mxc_uri) // Use ruma::MxcUri::parse
-            .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
-        // Check SDK 0.10+ for getting download URL, might be on client or media helper
-        // Placeholder: Replace with actual SDK 0.10+ method
-        warn!("get_download_url needs verification for SDK 0.10+ method");
-        // Placeholder: Assume download_url exists and returns Result<String, _>
-        let url = client.media().download_url(&uri).map(|u| Some(u.to_string())).map_err(MediaError::matrix_sdk)?; // Example
-        // let url: Option<String> = None; // Placeholder
-        Ok(url).map_err(crate::error::Error::Media)
+
+        MatrixFuture::spawn(async move {
+            let result = async {
+                let uri = matrix_sdk::ruma::MxcUri::parse(&mxc_uri_owned)
+                    .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+
+                // Check SDK 0.10+ for getting download URL
+                warn!("get_download_url needs verification for SDK 0.10+ method");
+                // Placeholder: Assume download_url exists and returns Option<Url> or similar
+                // Adjust based on the actual SDK method signature
+                let url = client.media().download_url(&uri); // Example: Assuming it returns Option<Url> directly
+
+                Ok(url.map(|u| u.to_string())) // Convert Url to String if present
+            }.await;
+
+            result.map_err(crate::error::Error::Media)
+        })
     }
+
 
     /// Get the thumbnail URL for content.
     pub fn get_thumbnail_url(&self, mxc_uri: &str, width: u32, height: u32) -> crate::error::Result<Option<String>> { // Return crate::error::Result
