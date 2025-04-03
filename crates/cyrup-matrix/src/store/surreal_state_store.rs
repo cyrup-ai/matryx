@@ -53,6 +53,7 @@ use matrix_sdk_base::{
         StateStore,
         StateStoreDataKey,
         StateStoreDataValue,
+        StoreError,
     },
     MinimalRoomMemberEvent,
     RoomInfo,
@@ -60,9 +61,8 @@ use matrix_sdk_base::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
-use crate::error::StoreError as CyrumStoreError;
 use crate::store::cyrum_state_store::{
     AccountDataFuture,
     CustomValueFuture,
@@ -71,8 +71,6 @@ use crate::store::cyrum_state_store::{
     DependentQueuedRequestStream,
     DisplayNameFuture,
     KeyValueFuture,
-    MediaUploadFuture,
-    MediaUploadStream,
     PresenceFuture,
     PresenceStream,
     ProfileFuture,
@@ -102,6 +100,7 @@ struct KeyValueEntry {
 
 /// SurrealStateStore implementation for Matrix SDK state store backed by SurrealDB
 /// We implement Debug manually since DAOs don't implement Debug
+#[derive(Clone)]
 pub struct SurrealStateStore {
     // Database client for SurrealDB operations
     client: crate::db::DatabaseClient,
@@ -1264,11 +1263,9 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
 
                     // Create queued request
                     let queued_request = QueuedRequest {
-                        room_id: room_id.to_owned(),
-                        event_type: content.event_type().to_string(),
-                        txn_id,
-                        created_at: MilliSecondsSinceUnixEpoch(request.created_at as u64),
                         kind: content,
+                        transaction_id: txn_id,
+                        created_at: MilliSecondsSinceUnixEpoch(request.created_at as u64),
                         priority: request.priority,
                         error: None, // TODO: Handle error storage
                     };
@@ -1450,12 +1447,15 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                             .map_err(|e| matrix_sdk_base::store::StoreError::Json(e))?;
 
                     // Convert transaction IDs
-                    let own_txn_id =
-                        ChildTransactionId::from_str(&request.own_txn_id).map_err(|_| {
-                            matrix_sdk_base::store::StoreError::InvalidRecordFormat(
-                                "Invalid child transaction ID".into(),
-                            )
-                        })?;
+                    let own_txn_id = {
+                        // Create a new transaction ID from the stored string
+                        let txn_id = OwnedTransactionId::try_from(request.own_txn_id.clone())
+                            .map_err(|_| {
+                                StoreError::deserialization_error("Invalid child transaction ID")
+                            })?;
+                        // Wrap it in a ChildTransactionId
+                        ChildTransactionId::new(txn_id)
+                    };
 
                     let parent_txn_id = OwnedTransactionId::try_from(request.parent_txn_id)
                         .map_err(|_| {
@@ -1476,11 +1476,10 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
 
                     // Create dependent queued request
                     let dep_request = DependentQueuedRequest {
-                        room_id: room.to_owned(),
-                        parent_txn_id,
-                        own_txn_id,
+                        own_transaction_id: own_txn_id,
+                        parent_transaction_id: parent_txn_id,
                         created_at: MilliSecondsSinceUnixEpoch(request.created_at as u64),
-                        sent_parent_key,
+                        parent_key: sent_parent_key,
                         kind: content,
                     };
 
@@ -1503,11 +1502,24 @@ impl CyrumStateStore for SurrealStateStore {
         &self,
         key: StateStoreDataKey<'_>,
     ) -> KeyValueFuture<Option<StateStoreDataValue>> {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        let key_str = match key {
+            StateStoreDataKey::SyncToken => StateStoreDataKey::SyncToken,
+            StateStoreDataKey::ServerCapabilities => StateStoreDataKey::ServerCapabilities,
+            StateStoreDataKey::Filter(val) => StateStoreDataKey::Filter(val),
+            StateStoreDataKey::UserAvatarUrl(val) => StateStoreDataKey::UserAvatarUrl(val),
+            StateStoreDataKey::RecentlyVisitedRooms(val) => StateStoreDataKey::RecentlyVisitedRooms(val),
+            StateStoreDataKey::UtdHookManagerData => StateStoreDataKey::UtdHookManagerData,
+            StateStoreDataKey::ComposerDraft(val) => StateStoreDataKey::ComposerDraft(val),
+            StateStoreDataKey::SeenKnockRequests(val) => StateStoreDataKey::SeenKnockRequests(val),
+        };
+        
         KeyValueFuture::new(async move {
             // Use fully qualified syntax to call the StateStore trait method
-            <Self as matrix_sdk_base::store::StateStore>::get_kv_data(self, key)
+            <Self as matrix_sdk_base::store::StateStore>::get_kv_data(&cloned_self, key_str)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e)))
         })
     }
 
@@ -1516,38 +1528,75 @@ impl CyrumStateStore for SurrealStateStore {
         key: StateStoreDataKey<'_>,
         value: StateStoreDataValue,
     ) -> KeyValueFuture<()> {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert any borrowed data to owned
+        let key_owned = match key {
+            StateStoreDataKey::SyncToken => StateStoreDataKey::SyncToken,
+            StateStoreDataKey::ServerCapabilities => StateStoreDataKey::ServerCapabilities,
+            StateStoreDataKey::Filter(val) => StateStoreDataKey::Filter(val),
+            StateStoreDataKey::UserAvatarUrl(val) => StateStoreDataKey::UserAvatarUrl(val),
+            StateStoreDataKey::RecentlyVisitedRooms(val) => StateStoreDataKey::RecentlyVisitedRooms(val),
+            StateStoreDataKey::UtdHookManagerData => StateStoreDataKey::UtdHookManagerData,
+            StateStoreDataKey::ComposerDraft(val) => StateStoreDataKey::ComposerDraft(val),
+            StateStoreDataKey::SeenKnockRequests(val) => StateStoreDataKey::SeenKnockRequests(val),
+        };
+        let value_owned = value;
+        
         KeyValueFuture::new(async move {
-            // Use fully qualified syntax to call the StateStore trait method
-            <Self as matrix_sdk_base::store::StateStore>::set_kv_data(self, key, value)
+            // Use fully qualified syntax to call the StateStore trait method with cloned self
+            <Self as matrix_sdk_base::store::StateStore>::set_kv_data(&cloned_self, key_owned, value_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> KeyValueFuture<()> {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert any borrowed data to owned
+        let key_owned = match key {
+            StateStoreDataKey::SyncToken => StateStoreDataKey::SyncToken,
+            StateStoreDataKey::ServerCapabilities => StateStoreDataKey::ServerCapabilities,
+            StateStoreDataKey::Filter(val) => StateStoreDataKey::Filter(val),
+            StateStoreDataKey::UserAvatarUrl(val) => StateStoreDataKey::UserAvatarUrl(val),
+            StateStoreDataKey::RecentlyVisitedRooms(val) => StateStoreDataKey::RecentlyVisitedRooms(val),
+            StateStoreDataKey::UtdHookManagerData => StateStoreDataKey::UtdHookManagerData,
+            StateStoreDataKey::ComposerDraft(val) => StateStoreDataKey::ComposerDraft(val),
+            StateStoreDataKey::SeenKnockRequests(val) => StateStoreDataKey::SeenKnockRequests(val),
+        };
+        
         KeyValueFuture::new(async move {
-            // Use fully qualified syntax to call the StateStore trait method
-            <Self as matrix_sdk_base::store::StateStore>::remove_kv_data(self, key)
+            // Use fully qualified syntax to call the StateStore trait method with cloned self
+            <Self as matrix_sdk_base::store::StateStore>::remove_kv_data(&cloned_self, key_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn save_changes(&self, changes: &StateChanges) -> StateChangesFuture<()> {
-        let changes = changes.clone();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Clone the changes to avoid lifetime issues with the reference
+        let changes_owned = changes.clone();
+        
         StateChangesFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::save_changes(self, &changes)
+            <Self as matrix_sdk_base::store::StateStore>::save_changes(&cloned_self, &changes_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn get_presence_event(&self, user_id: &UserId) -> PresenceFuture<Option<Raw<PresenceEvent>>> {
-        let user_id = user_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert reference to owned
+        let user_id_owned = user_id.to_owned();
+        
         PresenceFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::get_presence_event(self, &user_id)
+            <Self as matrix_sdk_base::store::StateStore>::get_presence_event(&cloned_self, &user_id_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1555,16 +1604,20 @@ impl CyrumStateStore for SurrealStateStore {
         &self,
         user_ids: &[matrix_sdk_base::ruma::OwnedUserId],
     ) -> PresenceStream {
-        let user_ids = user_ids.to_vec();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert reference to owned
+        let user_ids_owned = user_ids.to_vec();
+        
         PresenceStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_presence_events(self, &user_ids).await {
+            match <Self as matrix_sdk_base::store::StateStore>::get_presence_events(&cloned_self, &user_ids_owned).await {
                 Ok(events) => {
                     for event in events {
                         yield Ok(event);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1576,28 +1629,38 @@ impl CyrumStateStore for SurrealStateStore {
         event_type: StateEventType,
         state_key: &str,
     ) -> StateEventFuture<Option<RawAnySyncOrStrippedState>> {
-        let room_id = room_id.to_owned();
-        let state_key = state_key.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let state_key_owned = state_key.to_owned();
+        let event_type_owned = event_type;
+        
         StateEventFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_state_event(
-                self, &room_id, event_type, &state_key,
+                &cloned_self, &room_id_owned, event_type_owned, &state_key_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn get_state_events(&self, room_id: &RoomId, event_type: StateEventType) -> StateEventStream {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let event_type_owned = event_type;
+        
         StateEventStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_state_events(self, &room_id, event_type).await {
+            match <Self as matrix_sdk_base::store::StateStore>::get_state_events(&cloned_self, &room_id_owned, event_type_owned).await {
                 Ok(events) => {
                     for event in events {
                         yield Ok(event);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1609,19 +1672,31 @@ impl CyrumStateStore for SurrealStateStore {
         event_type: StateEventType,
         state_keys: &[&str],
     ) -> StateEventStream {
-        let room_id = room_id.to_owned();
-        let state_keys = state_keys.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
-        let state_keys_refs: Vec<&str> = state_keys.iter().map(|s| s.as_str()).collect();
-
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let event_type_owned = event_type;
+        // We need to clone the state keys into a vector of owned strings
+        let state_keys_owned = state_keys.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+        
         StateEventStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_state_events_for_keys(self, &room_id, event_type, &state_keys_refs).await {
+            // Create a new slice of string references that will live as long as the async block
+            let state_key_refs: Vec<&str> = state_keys_owned.iter().map(|s| s.as_str()).collect();
+            
+            match <Self as matrix_sdk_base::store::StateStore>::get_state_events_for_keys(
+                &cloned_self, 
+                &room_id_owned, 
+                event_type_owned, 
+                &state_key_refs
+            ).await {
                 Ok(events) => {
                     for event in events {
                         yield Ok(event);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1632,12 +1707,16 @@ impl CyrumStateStore for SurrealStateStore {
         room_id: &RoomId,
         user_id: &UserId,
     ) -> ProfileFuture<Option<MinimalRoomMemberEvent>> {
-        let room_id = room_id.to_owned();
-        let user_id = user_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let user_id_owned = user_id.to_owned();
+        
         ProfileFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::get_profile(self, &room_id, &user_id)
+            <Self as matrix_sdk_base::store::StateStore>::get_profile(&cloned_self, &room_id_owned, &user_id_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1646,57 +1725,24 @@ impl CyrumStateStore for SurrealStateStore {
         room_id: &RoomId,
         user_ids: &'a [OwnedUserId],
     ) -> ProfileFuture<BTreeMap<OwnedUserId, MinimalRoomMemberEvent>> {
-        // We need to fix lifetime issues by changing the return type to own the UserId
-        let room_id = room_id.to_owned();
-        let user_ids = user_ids.to_vec();
-
-        // Create a cloned version of self that we can move into the async block
-        // We need to clone the database client which should have proper Clone implementation
-        let db_client = self.client.clone();
-
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let user_ids_owned = user_ids.to_vec();
+        
         ProfileFuture::new(async move {
-            // Create DAOs for the async block
-            let room_state_dao = crate::db::RoomStateDao::new(db_client.clone());
-
             // Get profiles from room members
             let mut result = BTreeMap::new();
 
-            // For each user ID, get the profile directly from the DAO
-            for user_id in &user_ids {
-                let user_id_str = user_id.to_string();
-                let room_id_str = room_id.to_string();
-
-                // Get the member event from room state
-                if let Ok(Some(value)) = room_state_dao
-                    .get_state_event(&room_id_str, "m.room.member", &user_id_str)
-                    .await
-                {
-                    // Extract display name and avatar URL
-                    let display_name = value
-                        .get("content")
-                        .and_then(|c| c.get("displayname"))
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string());
-                    let avatar_url = value
-                        .get("content")
-                        .and_then(|c| c.get("avatar_url"))
-                        .and_then(|a| a.as_str())
-                        .map(|s| s.to_string());
-                    let membership = value
-                        .get("content")
-                        .and_then(|c| c.get("membership"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string());
-
-                    // Construct the minimal event
-                    let member_event = MinimalRoomMemberEvent {
-                        displayname: display_name,
-                        avatar_url: avatar_url.and_then(|u| matrix_sdk_base::ruma::OwnedMxcUri::try_from(u).ok()),
-                        membership: membership.and_then(|m| matrix_sdk_base::ruma::events::room::member::MembershipState::from_str(&m).ok())
-                            .unwrap_or(matrix_sdk_base::ruma::events::room::member::MembershipState::Leave),
-                    };
-
-                    result.insert(user_id.clone(), member_event);
+            // For each user ID, get the profile using the standard StateStore trait method
+            for user_id in &user_ids_owned {
+                if let Ok(Some(profile)) = <Self as matrix_sdk_base::store::StateStore>::get_profile(
+                    &cloned_self, 
+                    &room_id_owned, 
+                    user_id
+                ).await {
+                    result.insert(user_id.clone(), profile);
                 }
             }
 
@@ -1705,31 +1751,39 @@ impl CyrumStateStore for SurrealStateStore {
     }
 
     fn get_user_ids(&self, room_id: &RoomId, memberships: RoomMemberships) -> UserIdStream {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let memberships_owned = memberships;
+        
         UserIdStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_user_ids(self, &room_id, memberships).await {
+            match <Self as matrix_sdk_base::store::StateStore>::get_user_ids(&cloned_self, &room_id_owned, memberships_owned).await {
                 Ok(user_ids) => {
                     for user_id in user_ids {
                         yield Ok(user_id);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
     }
 
     fn get_room_infos(&self) -> RoomInfoStream {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        
         RoomInfoStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_room_infos(self).await {
+            match <Self as matrix_sdk_base::store::StateStore>::get_room_infos(&cloned_self).await {
                 Ok(room_infos) => {
                     for room_info in room_infos {
                         yield Ok(room_info);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1740,16 +1794,20 @@ impl CyrumStateStore for SurrealStateStore {
         room_id: &RoomId,
         display_name: &DisplayName,
     ) -> DisplayNameFuture<BTreeSet<OwnedUserId>> {
-        let room_id = room_id.to_owned();
-        let display_name = display_name.clone();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let display_name_owned = display_name.clone();
+        
         DisplayNameFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_users_with_display_name(
-                self,
-                &room_id,
-                &display_name,
+                &cloned_self,
+                &room_id_owned,
+                &display_name_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1757,45 +1815,27 @@ impl CyrumStateStore for SurrealStateStore {
         &self,
         room_id: &RoomId,
         display_names: &'a [DisplayName],
-    ) -> DisplayNameFuture<HashMap<&'a DisplayName, BTreeSet<OwnedUserId>>> {
-        // We need to fix lifetime issues by changing the return type to own the DisplayName
-        let room_id = room_id.to_owned();
-        let display_names = display_names.to_vec();
-
-        // Create a cloned version of self that we can move into the async block
-        // We need to clone the database client which should have proper Clone implementation
-        let db_client = self.client.clone();
-
+    ) -> DisplayNameFuture<HashMap<DisplayName, BTreeSet<OwnedUserId>>> {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let display_names_owned = display_names.to_vec();
+        
         DisplayNameFuture::new(async move {
-            // Create DAOs for the async block
-            let room_state_dao = crate::db::RoomStateDao::new(db_client.clone());
-
-            // Create a new map with owned keys
+            // Create a new map with owned keys (changing return type to own DisplayName)
             let mut result = HashMap::new();
 
-            // For each display name, get the matching users from the room state
-            for display_name in &display_names {
-                let room_id_str = room_id.to_string();
-                let display_name_str = display_name.to_string();
-
-                // Get users with this display name
-                match room_state_dao
-                    .get_users_with_display_name(&room_id_str, &display_name_str)
-                    .await
-                {
-                    Ok(user_ids) => {
-                        let mut user_set = BTreeSet::new();
-                        for user_id_str in user_ids {
-                            if let Ok(user_id) = OwnedUserId::try_from(user_id_str) {
-                                user_set.insert(user_id);
-                            }
-                        }
-
-                        if !user_set.is_empty() {
-                            result.insert(display_name.clone(), user_set);
-                        }
-                    },
-                    Err(_) => continue, // Skip on error
+            // For each display name, get the matching users
+            for display_name in &display_names_owned {
+                if let Ok(user_ids) = <Self as matrix_sdk_base::store::StateStore>::get_users_with_display_name(
+                    &cloned_self,
+                    &room_id_owned,
+                    display_name,
+                ).await {
+                    if !user_ids.is_empty() {
+                        result.insert(display_name.clone(), user_ids);
+                    }
                 }
             }
 
@@ -1807,10 +1847,14 @@ impl CyrumStateStore for SurrealStateStore {
         &self,
         event_type: GlobalAccountDataEventType,
     ) -> AccountDataFuture<Option<Raw<AnyGlobalAccountDataEvent>>> {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        let event_type_owned = event_type;
+        
         AccountDataFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::get_account_data_event(self, event_type)
+            <Self as matrix_sdk_base::store::StateStore>::get_account_data_event(&cloned_self, event_type_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1819,13 +1863,18 @@ impl CyrumStateStore for SurrealStateStore {
         room_id: &RoomId,
         event_type: RoomAccountDataEventType,
     ) -> AccountDataFuture<Option<Raw<AnyRoomAccountDataEvent>>> {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let event_type_owned = event_type;
+        
         AccountDataFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_room_account_data_event(
-                self, &room_id, event_type,
+                &cloned_self, &room_id_owned, event_type_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1836,18 +1885,24 @@ impl CyrumStateStore for SurrealStateStore {
         thread: ReceiptThread,
         user_id: &UserId,
     ) -> ReceiptFuture<Option<(OwnedEventId, Receipt)>> {
-        let room_id = room_id.to_owned();
-        let user_id = user_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let user_id_owned = user_id.to_owned();
+        let receipt_type_owned = receipt_type;
+        let thread_owned = thread;
+        
         ReceiptFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::get_user_room_receipt_event(
-                self,
-                &room_id,
-                receipt_type,
-                thread,
-                &user_id,
+                &cloned_self,
+                &room_id_owned,
+                receipt_type_owned,
+                thread_owned,
+                &user_id_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1858,55 +1913,84 @@ impl CyrumStateStore for SurrealStateStore {
         thread: ReceiptThread,
         event_id: &EventId,
     ) -> ReceiptStream {
-        let room_id = room_id.to_owned();
-        let event_id = event_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let event_id_owned = event_id.to_owned();
+        let receipt_type_owned = receipt_type;
+        let thread_owned = thread;
+        
         ReceiptStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::get_event_room_receipt_events(self, &room_id, receipt_type, thread, &event_id).await {
+            match <Self as matrix_sdk_base::store::StateStore>::get_event_room_receipt_events(
+                &cloned_self, 
+                &room_id_owned, 
+                receipt_type_owned, 
+                thread_owned, 
+                &event_id_owned
+            ).await {
                 Ok(receipts) => {
                     for receipt in receipts {
                         yield Ok(receipt);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
     }
 
     fn get_custom_value(&self, key: &[u8]) -> CustomValueFuture<Option<Vec<u8>>> {
-        let key = key.to_vec();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let key_owned = key.to_vec();
+        
         CustomValueFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::get_custom_value(self, &key)
+            <Self as matrix_sdk_base::store::StateStore>::get_custom_value(&cloned_self, &key_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn set_custom_value(&self, key: &[u8], value: Vec<u8>) -> CustomValueFuture<Option<Vec<u8>>> {
-        let key = key.to_vec();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let key_owned = key.to_vec();
+        let value_owned = value;
+        
         CustomValueFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::set_custom_value(self, &key, value)
+            <Self as matrix_sdk_base::store::StateStore>::set_custom_value(&cloned_self, &key_owned, value_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn remove_custom_value(&self, key: &[u8]) -> CustomValueFuture<Option<Vec<u8>>> {
-        let key = key.to_vec();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let key_owned = key.to_vec();
+        
         CustomValueFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::remove_custom_value(self, &key)
+            <Self as matrix_sdk_base::store::StateStore>::remove_custom_value(&cloned_self, &key_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn remove_room(&self, room_id: &RoomId) -> RoomFuture<()> {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        
         RoomFuture::new(async move {
-            <Self as matrix_sdk_base::store::StateStore>::remove_room(self, &room_id)
+            <Self as matrix_sdk_base::store::StateStore>::remove_room(&cloned_self, &room_id_owned)
                 .await
-                .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+                .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1918,18 +2002,26 @@ impl CyrumStateStore for SurrealStateStore {
         request: QueuedRequestKind,
         priority: usize,
     ) -> SendQueueFuture<()> {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let transaction_id_owned = transaction_id;
+        let created_at_owned = created_at;
+        let request_owned = request;
+        let priority_owned = priority;
+        
         SendQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::save_send_queue_request(
-                self,
-                &room_id,
-                transaction_id,
-                created_at,
-                request,
-                priority,
+                &cloned_self,
+                &room_id_owned,
+                transaction_id_owned,
+                created_at_owned,
+                request_owned,
+                priority_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1939,17 +2031,22 @@ impl CyrumStateStore for SurrealStateStore {
         transaction_id: &TransactionId,
         content: QueuedRequestKind,
     ) -> SendQueueFuture<bool> {
-        let room_id = room_id.to_owned();
-        let transaction_id = transaction_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let transaction_id_owned = transaction_id.to_owned();
+        let content_owned = content;
+        
         SendQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::update_send_queue_request(
-                self,
-                &room_id,
-                &transaction_id,
-                content,
+                &cloned_self,
+                &room_id_owned,
+                &transaction_id_owned,
+                content_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -1958,30 +2055,38 @@ impl CyrumStateStore for SurrealStateStore {
         room_id: &RoomId,
         transaction_id: &TransactionId,
     ) -> SendQueueFuture<bool> {
-        let room_id = room_id.to_owned();
-        let transaction_id = transaction_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let transaction_id_owned = transaction_id.to_owned();
+        
         SendQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::remove_send_queue_request(
-                self,
-                &room_id,
-                &transaction_id,
+                &cloned_self,
+                &room_id_owned,
+                &transaction_id_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn load_send_queue_requests(&self, room_id: &RoomId) -> QueuedRequestStream {
-        let room_id = room_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        
         QueuedRequestStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::load_send_queue_requests(self, &room_id).await {
+            match <Self as matrix_sdk_base::store::StateStore>::load_send_queue_requests(&cloned_self, &room_id_owned).await {
                 Ok(requests) => {
                     for request in requests {
                         yield Ok(request);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -1993,30 +2098,38 @@ impl CyrumStateStore for SurrealStateStore {
         transaction_id: &TransactionId,
         error: Option<QueueWedgeError>,
     ) -> SendQueueFuture<()> {
-        let room_id = room_id.to_owned();
-        let transaction_id = transaction_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let transaction_id_owned = transaction_id.to_owned();
+        let error_owned = error;
+        
         SendQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::update_send_queue_request_status(
-                self,
-                &room_id,
-                &transaction_id,
-                error,
+                &cloned_self,
+                &room_id_owned,
+                &transaction_id_owned,
+                error_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn load_rooms_with_unsent_requests(&self) -> RoomIdStream {
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        
         RoomIdStream::new(async_stream::stream! {
-            match <Self as matrix_sdk_base::store::StateStore>::load_rooms_with_unsent_requests(self).await {
+            match <Self as matrix_sdk_base::store::StateStore>::load_rooms_with_unsent_requests(&cloned_self).await {
                 Ok(room_ids) => {
                     for room_id in room_ids {
                         yield Ok(room_id);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
@@ -2030,19 +2143,26 @@ impl CyrumStateStore for SurrealStateStore {
         created_at: MilliSecondsSinceUnixEpoch,
         content: DependentQueuedRequestKind,
     ) -> DependentQueueFuture<()> {
-        let room_id = room_id.to_owned();
-        let parent_txn_id = parent_txn_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let parent_txn_id_owned = parent_txn_id.to_owned();
+        let own_txn_id_owned = own_txn_id;
+        let created_at_owned = created_at;
+        let content_owned = content;
+        
         DependentQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::save_dependent_queued_request(
-                self,
-                &room_id,
-                &parent_txn_id,
-                own_txn_id,
-                created_at,
-                content,
+                &cloned_self,
+                &room_id_owned,
+                &parent_txn_id_owned,
+                own_txn_id_owned,
+                created_at_owned,
+                content_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2052,17 +2172,22 @@ impl CyrumStateStore for SurrealStateStore {
         parent_txn_id: &TransactionId,
         sent_parent_key: SentRequestKey,
     ) -> DependentQueueFuture<usize> {
-        let room_id = room_id.to_owned();
-        let parent_txn_id = parent_txn_id.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let parent_txn_id_owned = parent_txn_id.to_owned();
+        let sent_parent_key_owned = sent_parent_key;
+        
         DependentQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::mark_dependent_queued_requests_as_ready(
-                self,
-                &room_id,
-                &parent_txn_id,
-                sent_parent_key,
+                &cloned_self,
+                &room_id_owned,
+                &parent_txn_id_owned,
+                sent_parent_key_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2072,17 +2197,22 @@ impl CyrumStateStore for SurrealStateStore {
         own_transaction_id: &ChildTransactionId,
         new_content: DependentQueuedRequestKind,
     ) -> DependentQueueFuture<bool> {
-        let room_id = room_id.to_owned();
-        let own_transaction_id = own_transaction_id.clone();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room_id.to_owned();
+        let own_transaction_id_owned = own_transaction_id.clone();
+        let new_content_owned = new_content;
+        
         DependentQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::update_dependent_queued_request(
-                self,
-                &room_id,
-                &own_transaction_id,
-                new_content,
+                &cloned_self,
+                &room_id_owned,
+                &own_transaction_id_owned,
+                new_content_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
@@ -2091,58 +2221,41 @@ impl CyrumStateStore for SurrealStateStore {
         room: &RoomId,
         own_txn_id: &ChildTransactionId,
     ) -> DependentQueueFuture<bool> {
-        let room_id = room.to_owned();
-        let own_txn_id = own_txn_id.clone();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room.to_owned();
+        let own_txn_id_owned = own_txn_id.clone();
+        
         DependentQueueFuture::new(async move {
             <Self as matrix_sdk_base::store::StateStore>::remove_dependent_queued_request(
-                self,
-                &room_id,
-                &own_txn_id,
+                &cloned_self,
+                &room_id_owned,
+                &own_txn_id_owned,
             )
             .await
-            .map_err(crate::error::StoreError::from) // Map sdk::StoreError -> crate::StoreError
+            .map_err(|e| crate::error::Error::Store(crate::error::StoreError::from(e))) // Map sdk::StoreError -> crate::StoreError
         })
     }
 
     fn load_dependent_queued_requests(&self, room: &RoomId) -> DependentQueuedRequestStream {
-        let room_id = room.to_owned();
+        // Clone self to avoid lifetime issues
+        let cloned_self = self.clone();
+        // Convert references to owned
+        let room_id_owned = room.to_owned();
+        
         DependentQueuedRequestStream::new(async_stream::stream! {
-            match self.load_dependent_queued_requests(&room_id).await {
+            match <Self as matrix_sdk_base::store::StateStore>::load_dependent_queued_requests(&cloned_self, &room_id_owned).await {
                 Ok(requests) => {
                     for request in requests {
                         yield Ok(request);
                     }
                 },
                 Err(e) => {
-                    yield Err(crate::error::StoreError::from(e)); // Map sdk::StoreError -> crate::StoreError
+                    yield Err(crate::error::Error::Store(crate::error::StoreError::from(e))); // Map sdk::StoreError -> crate::StoreError
                 }
             }
         })
     }
 
-    fn mark_media_upload_started(&self, request_id: &str) -> MediaUploadFuture<()> {
-        let _request_id = request_id.to_owned();
-        MediaUploadFuture::new(async move {
-            // For media methods, we need to implement them since they might not exist in the StateStore trait
-            // This is just a placeholder - we'll need to add actual implementation
-            Ok(())
-        })
-    }
-
-    fn get_media_uploads(&self) -> MediaUploadStream {
-        MediaUploadStream::new(async_stream::stream! {
-            // For media methods, we need to implement them since they might not exist in the StateStore trait
-            // This is just a placeholder - we'll need to add actual implementation
-            yield Ok("".to_string());
-        })
-    }
-
-    fn remove_media_upload(&self, request_id: &str) -> MediaUploadFuture<()> {
-        let _request_id = request_id.to_owned();
-        MediaUploadFuture::new(async move {
-            // For media methods, we need to implement them since they might not exist in the StateStore trait
-            // This is just a placeholder - we'll need to add actual implementation
-            Ok(())
-        })
-    }
 }
