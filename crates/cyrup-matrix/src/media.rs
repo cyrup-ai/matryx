@@ -20,11 +20,6 @@ use tracing::warn; // Add warn import
 
 use crate::error::MediaError;
 use crate::future::MatrixFuture;
-    Client as MatrixClient,
-};
-
-use crate::error::MediaError;
-use crate::future::MatrixFuture;
 
 /// A synchronous wrapper around the Matrix SDK Media functionality.
 ///
