@@ -10,7 +10,8 @@ use tracing::warn; // Add warn import
 use mime; // Add mime import
 
 use matrix_sdk::{
-    media::{MediaFormat, MediaRequest, MediaSource, MediaThumbnailSettings}, // Import MediaFormat, MediaRequest, MediaSource
+    // TODO: Verify correct import for MediaRequestConfig or similar in SDK 0.10+
+    media::{MediaFormat, MediaRequestConfig as MediaRequest, MediaSource, MediaThumbnailSettings}, // Assuming MediaRequestConfig
     ruma::{
         api::client::media::get_content_thumbnail::v3::Method as ThumbnailMethod, MxcUri, // Import MxcUri
         OwnedMxcUri, // Import OwnedMxcUri
