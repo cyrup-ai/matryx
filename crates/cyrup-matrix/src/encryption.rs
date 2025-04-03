@@ -7,13 +7,12 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::warn;
 
-// Updated imports for SDK 0.10+
-// TODO: Verify these paths are correct for SDK 0.10+
+// Imports for SDK 0.10+
 use matrix_sdk::{
-    crypto::{
-        backups::BackupDownloadStrategy, // Example path
+    encryption::{
+        backups::BackupDownloadStrategy,
         store::BackupDecryptionKey,
-        verification::{Emoji, SasVerification, Verification, VerificationState}, // Example path
+        verification::{Emoji, SasVerification, Verification, VerificationState},
     },
     ruma::{DeviceId, UserId},
     Client as MatrixClient,

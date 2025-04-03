@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::runtime::Handle;
+use tracing::{debug, error, info, warn};
 
 use matrix_sdk::{
     room::Room as MatrixRoom,

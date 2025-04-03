@@ -9,13 +9,12 @@ use tracing::{debug, error, info, instrument, trace, warn};
 
 use matrix_sdk::{
     config::{RequestConfig, StoreConfig},
-    // TODO: Verify these paths are correct for SDK 0.10+
-    crypto::{
-        backups::{BackupConfig, BackupDownloadStrategy}, // Example paths
-        identities::TrustLevel,                          // Example path
-        verification::VerificationState,                 // Example path
+    encryption::{
+        backups::{BackupConfig, BackupDownloadStrategy},
+        identities::TrustLevel,
+        verification::VerificationState,
+        Config as EncryptionConfigSdk, EncryptionState,
     },
-    encryption::{Config as EncryptionConfigSdk, EncryptionState}, // Assuming these are correct
     ruma::{
         api::client::{
             account::register::v3::Request as RegistrationRequest,

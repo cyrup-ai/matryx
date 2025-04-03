@@ -6,20 +6,19 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tracing::warn; // Add warn import
-use mime; // Add mime import
+use mime;
+use tracing::{debug, error, info, warn};
 
 use matrix_sdk::{
-    // TODO: Verify correct import for MediaRequestConfig or similar in SDK 0.10+
-    media::{MediaFormat, MediaRequestConfig as MediaRequest, MediaSource, MediaThumbnailSettings}, // Assuming MediaRequestConfig
+    media::{MediaFormat, MediaRequest, MediaThumbnailSize, MediaThumbnailSettings},
     ruma::{
-        api::client::media::get_content_thumbnail::v3::Method as ThumbnailMethod, MxcUri, // Import MxcUri
-        OwnedMxcUri, // Import OwnedMxcUri
+        api::client::media::get_content_thumbnail::v3::Method as ThumbnailMethod,
+        MxcUri,
+        OwnedMxcUri,
         UInt,
     },
     Client as MatrixClient,
 };
-use tracing::warn; // Add warn import
 
 use crate::error::MediaError;
 use crate::future::MatrixFuture;

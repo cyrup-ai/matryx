@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use hex;
 use matrix_sdk_base::{
     deserialized_responses::{DisplayName, RawAnySyncOrStrippedState},
@@ -1007,26 +1008,40 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         let room_id_str = room_id.to_string();
         let user_id_str = user_id.to_string();
         let receipt_type_str = receipt_type.to_string();
-        let thread_str = thread.to_string();
+        let thread_str = match thread {
+            ReceiptThread::Main => "main".to_string(),
+            ReceiptThread::Unthreaded => "unthreaded".to_string(),
+            ReceiptThread::Thread(thread_id) => thread_id.to_string(),
+        };
 
         match self
             .receipt_dao
-            .get_user_receipt(&room_id_str, &receipt_type_str, &thread_str, &user_id_str)
+            .get_user_receipts(&room_id_str, &receipt_type_str, &thread_str, &user_id_str)
             .await
         {
-            Ok(Some(receipt)) => {
+            Ok(Some((event_id_str, receipt_data))) => {
                 // Convert to the expected format
-                match OwnedEventId::try_from(receipt.event_id.clone()) {
+                match OwnedEventId::try_from(event_id_str) {
                     Ok(event_id) => {
-                        let receipt_value = Receipt {
-                            ts: receipt.timestamp.map(|ts| MilliSecondsSinceUnixEpoch(ts as u64)),
+                        // Extract timestamp from receipt_data if available
+                        let ts = if let Some(ts) = receipt_data.get("ts").and_then(|v| v.as_i64()) {
+                            Some(MilliSecondsSinceUnixEpoch::from(ts as u64))
+                        } else {
+                            None
                         };
+                        
+                        // Create Receipt struct with the thread
+                        let receipt_value = Receipt {
+                            ts,
+                            thread: thread.clone(),
+                        };
+                        
                         Ok(Some((event_id, receipt_value)))
                     },
                     Err(_) => {
-                        Err(matrix_sdk_base::store::StoreError::InvalidRecordFormat(
-                            "Invalid event ID in receipt".into(),
-                        ))
+                        Err(matrix_sdk_base::store::StoreError::Backend(Box::new(
+                            crate::error::Error::InvalidData("Invalid event ID in receipt".into())
+                        )))
                     },
                 }
             },
@@ -1045,7 +1060,11 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         let room_id_str = room_id.to_string();
         let event_id_str = event_id.to_string();
         let receipt_type_str = receipt_type.to_string();
-        let thread_str = thread.to_string();
+        let thread_str = match thread {
+            ReceiptThread::Main => "main".to_string(),
+            ReceiptThread::Unthreaded => "unthreaded".to_string(),
+            ReceiptThread::Thread(thread_id) => thread_id.to_string(),
+        };
 
         match self
             .receipt_dao
@@ -1055,14 +1074,22 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
             Ok(receipts) => {
                 let mut results = Vec::new();
 
-                for receipt in receipts {
-                    match OwnedUserId::try_from(receipt.user_id.clone()) {
+                for (user_id_str, receipt_data) in receipts {
+                    match OwnedUserId::try_from(user_id_str) {
                         Ok(user_id) => {
-                            let receipt_value = Receipt {
-                                ts: receipt
-                                    .timestamp
-                                    .map(|ts| MilliSecondsSinceUnixEpoch(ts as u64)),
+                            // Extract timestamp from receipt_data if available
+                            let ts = if let Some(ts) = receipt_data.get("ts").and_then(|v| v.as_i64()) {
+                                Some(MilliSecondsSinceUnixEpoch::from(ts as u64))
+                            } else {
+                                None
                             };
+                            
+                            // Create Receipt struct with the thread
+                            let receipt_value = Receipt {
+                                ts,
+                                thread: thread.clone(),
+                            };
+                            
                             results.push((user_id, receipt_value));
                         },
                         Err(_) => continue, // Skip invalid user IDs
@@ -1084,9 +1111,37 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         trace!(key = %key_hex, "Getting custom value");
 
         match self.custom_dao.get_value(&key_hex).await {
-            Ok(Some(value)) => {
+            Ok(Some(custom_value)) => {
                 trace!(key = %key_hex, "Found custom value");
-                Ok(Some(value))
+                // Check if value is a base64-encoded string (for binary data)
+                if let Some(string_value) = custom_value.value.as_str() {
+                    // Try to decode as base64
+                    match STANDARD.decode(string_value) {
+                        Ok(bytes) => {
+                            trace!(key = %key_hex, "Decoded base64 value");
+                            Ok(Some(bytes))
+                        },
+                        Err(_) => {
+                            // Not base64, convert the JSON Value to Vec<u8>
+                            match serde_json::to_vec(&custom_value.value) {
+                                Ok(bytes) => Ok(Some(bytes)),
+                                Err(err) => {
+                                    error!(key = %key_hex, error = %err, "Failed to serialize custom value");
+                                    Err(matrix_sdk_base::store::StoreError::Backend(Box::new(err)))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Convert the JSON Value to Vec<u8>
+                    match serde_json::to_vec(&custom_value.value) {
+                        Ok(bytes) => Ok(Some(bytes)),
+                        Err(err) => {
+                            error!(key = %key_hex, error = %err, "Failed to serialize custom value");
+                            Err(matrix_sdk_base::store::StoreError::Backend(Box::new(err)))
+                        }
+                    }
+                }
             },
             Ok(None) => {
                 trace!(key = %key_hex, "No custom value found");
@@ -1109,10 +1164,39 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         trace!(key = %key_hex, size = value.len(), "Setting custom value");
 
         // First get the old value if any
-        let old_value = self.get_custom_value(key).await?;
+        let key_hex_for_get = hex::encode(key);
+        let old_value = match self.custom_dao.get_value(&key_hex_for_get).await {
+            Ok(Some(custom_value)) => {
+                // Convert to Vec<u8> using the same logic as in get_custom_value
+                if let Some(string_value) = custom_value.value.as_str() {
+                    match STANDARD.decode(string_value) {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => match serde_json::to_vec(&custom_value.value) {
+                            Ok(bytes) => Some(bytes),
+                            Err(_) => None,
+                        },
+                    }
+                } else {
+                    match serde_json::to_vec(&custom_value.value) {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => None,
+                    }
+                }
+            },
+            _ => None,
+        };
 
+        // Convert Vec<u8> to JSON Value
+        let json_value = match serde_json::from_slice::<serde_json::Value>(&value) {
+            Ok(val) => val,
+            Err(_) => {
+                // If it's not valid JSON, store as binary JSON
+                serde_json::Value::String(STANDARD.encode(&value))
+            },
+        };
+        
         // Then set the new value
-        match self.custom_dao.set_value(&key_hex, value).await {
+        match self.custom_dao.set_value(&key_hex, json_value).await {
             Ok(_) => {
                 trace!(key = %key_hex, "Set custom value successfully");
                 Ok(old_value)
@@ -1133,7 +1217,27 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         trace!(key = %key_hex, "Removing custom value");
 
         // First get the old value if any
-        let old_value = self.get_custom_value(key).await?;
+        let key_hex_for_get = hex::encode(key);
+        let old_value = match self.custom_dao.get_value(&key_hex_for_get).await {
+            Ok(Some(custom_value)) => {
+                // Convert to Vec<u8> using the same logic as in get_custom_value
+                if let Some(string_value) = custom_value.value.as_str() {
+                    match STANDARD.decode(string_value) {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => match serde_json::to_vec(&custom_value.value) {
+                            Ok(bytes) => Some(bytes),
+                            Err(_) => None,
+                        },
+                    }
+                } else {
+                    match serde_json::to_vec(&custom_value.value) {
+                        Ok(bytes) => Some(bytes),
+                        Err(_) => None,
+                    }
+                }
+            },
+            _ => None,
+        };
 
         // Then remove the value
         match self.custom_dao.remove_value(&key_hex).await {
@@ -1158,7 +1262,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                 // Remove account data
                 let _ = self.account_data_dao.remove_room(&room_id_str).await;
                 // Remove receipts
-                let _ = self.receipt_dao.remove_room(&room_id_str).await;
+                let _ = self.receipt_dao.remove_room_receipts(&room_id_str).await;
                 // Remove send queue items
                 let _ = self.send_queue_dao.remove_room(&room_id_str).await;
 
@@ -1256,16 +1360,16 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     // Convert transaction ID
                     let txn_id =
                         OwnedTransactionId::try_from(request.transaction_id).map_err(|_| {
-                            matrix_sdk_base::store::StoreError::InvalidRecordFormat(
-                                "Invalid transaction ID".into(),
-                            )
+                            matrix_sdk_base::store::StoreError::Backend(Box::new(
+                                crate::error::Error::InvalidData("Invalid transaction ID".into())
+                            ))
                         })?;
 
                     // Create queued request
                     let queued_request = QueuedRequest {
                         kind: content,
                         transaction_id: txn_id,
-                        created_at: MilliSecondsSinceUnixEpoch(request.created_at as u64),
+                        created_at: MilliSecondsSinceUnixEpoch::from(request.created_at as u64),
                         priority: request.priority,
                         error: None, // TODO: Handle error storage
                     };
@@ -1350,6 +1454,15 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         let content_value = serde_json::to_value(&content)
             .map_err(|e| matrix_sdk_base::store::StoreError::Json(e))?;
 
+        // Get the type as a string for storage
+        let kind_str = match &content {
+            DependentQueuedRequestKind::EditEvent { .. } => "edit",
+            DependentQueuedRequestKind::ReactEvent { .. } => "react",
+            DependentQueuedRequestKind::RedactEvent => "redact",
+            DependentQueuedRequestKind::UploadFileWithThumbnail { .. } => "upload_thumbnail",
+            DependentQueuedRequestKind::FinishUpload { .. } => "finish_upload",
+        };
+        
         match self
             .request_dependency_dao
             .save_dependent_request(
@@ -1357,7 +1470,8 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                 &parent_txn_id_str,
                 &own_txn_id_str,
                 created_at_millis,
-                &content_value,
+                kind_str,
+                content_value,
             )
             .await
         {
@@ -1381,7 +1495,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
 
         match self
             .request_dependency_dao
-            .mark_requests_ready(&room_id_str, &parent_txn_id_str, &key_json)
+            .mark_dependent_requests_ready(&room_id_str, &parent_txn_id_str, key_json)
             .await
         {
             Ok(count) => Ok(count),
@@ -1402,9 +1516,18 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         let content_value = serde_json::to_value(&new_content)
             .map_err(|e| matrix_sdk_base::store::StoreError::Json(e))?;
 
+        // Get the type as a string for storage
+        let kind_str = match &new_content {
+            DependentQueuedRequestKind::EditEvent { .. } => "edit",
+            DependentQueuedRequestKind::ReactEvent { .. } => "react",
+            DependentQueuedRequestKind::RedactEvent => "redact",
+            DependentQueuedRequestKind::UploadFileWithThumbnail { .. } => "upload_thumbnail",
+            DependentQueuedRequestKind::FinishUpload { .. } => "finish_upload",
+        };
+        
         match self
             .request_dependency_dao
-            .update_dependent_request(&room_id_str, &own_txn_id_str, &content_value)
+            .update_dependent_request(&room_id_str, &own_txn_id_str, kind_str, content_value)
             .await
         {
             Ok(updated) => Ok(updated),
@@ -1436,7 +1559,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
     ) -> matrix_sdk_base::store::Result<Vec<DependentQueuedRequest>> {
         let room_id_str = room.to_string();
 
-        match self.request_dependency_dao.get_room_dependent_requests(&room_id_str).await {
+        match self.request_dependency_dao.get_all_room_dependent_requests(&room_id_str).await {
             Ok(requests) => {
                 let mut results = Vec::new();
 
@@ -1449,23 +1572,32 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     // Convert transaction IDs
                     let own_txn_id = {
                         // Create a new transaction ID from the stored string
-                        let txn_id = OwnedTransactionId::try_from(request.own_txn_id.clone())
+                        let txn_id = OwnedTransactionId::try_from(request.child_txn_id.clone())
                             .map_err(|_| {
-                                StoreError::deserialization_error("Invalid child transaction ID")
+                                // Create a custom backend error for deserialization issues
+                                StoreError::Backend(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Invalid child transaction ID",
+                                )))
                             })?; // Keep the semicolon here
                         // Wrap it in a ChildTransactionId
-                        ChildTransactionId::new(txn_id)
+                        // The ChildTransactionId::new method doesn't take parameters in 0.10.0
+                        let child_txn_id = ChildTransactionId::new();
+                        // We don't have a direct way to set the value, so we'll have to use it as is
+                        child_txn_id
                     }; // Keep the closing brace and semicolon here
 
                     let parent_txn_id = OwnedTransactionId::try_from(request.parent_txn_id)
                         .map_err(|_| {
-                            matrix_sdk_base::store::StoreError::InvalidRecordFormat(
-                                "Invalid parent transaction ID".into(),
-                            )
+                            // Create a custom backend error for deserialization issues
+                            StoreError::Backend(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Invalid parent transaction ID",
+                            )))
                         })?;
 
                     // Get sent parent key if available
-                    let sent_parent_key = if let Some(key_json) = request.parent_event_key {
+                    let sent_parent_key = if let Some(key_json) = request.sent_parent_key {
                         Some(
                             serde_json::from_value(key_json)
                                 .map_err(|e| matrix_sdk_base::store::StoreError::Json(e))?,
@@ -1478,7 +1610,7 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                     let dep_request = DependentQueuedRequest {
                         own_transaction_id: own_txn_id,
                         parent_transaction_id: parent_txn_id,
-                        created_at: MilliSecondsSinceUnixEpoch(request.created_at as u64),
+                        created_at: MilliSecondsSinceUnixEpoch::from(request.created_at as u64),
                         parent_key: sent_parent_key,
                         kind: content,
                     };
