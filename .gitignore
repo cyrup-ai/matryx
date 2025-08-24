@@ -13,6 +13,7 @@
 *.dll
 *.exe
 .idea
+forks/
 
 # ==============================
 # Rust Specific
