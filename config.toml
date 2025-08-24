@@ -5,7 +5,7 @@ user_id = "@user:matrix.org"
 url = "https://matrix.org"
 
 [settings]
-default_room = "#iamb-users:0x.badd.cafe"
+default_room = "#maxtryx-users:0x.badd.cafe"
 external_edit_file_suffix = ".md"
 log_level = "warn"
 message_shortcode_display = false
@@ -35,15 +35,15 @@ members = ["power", "id"]
 style = "config"
 
 [[layout.tabs]]
-window = "iamb://dms"
+window = "maxtryx://dms"
 
 [[layout.tabs]]
-window = "iamb://rooms"
+window = "maxtryx://rooms"
 
 [[layout.tabs]]
 split = [
-    { "window" = "#iamb-users:0x.badd.cafe" },
-    { "window" = "#iamb-dev:0x.badd.cafe" }
+    { "window" = "#maxtryx-users:0x.badd.cafe" },
+    { "window" = "#maxtryx-dev:0x.badd.cafe" }
 ]
 
 [macros.insert]
@@ -53,6 +53,6 @@ split = [
 "V" = "<C-W>m"
 
 [dirs]
-cache = "/home/user/.cache/iamb/"
-logs = "/home/user/.local/share/iamb/logs/"
+cache = "/home/user/.cache/maxtryx/"
+logs = "/home/user/.local/share/maxtryx/logs/"
 downloads = "/home/user/Downloads/"

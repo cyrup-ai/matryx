@@ -1,4 +1,4 @@
-# Root justfile for cyrum project
+# Root justfile for maxtryx project
 
 # List all available commands
 default:

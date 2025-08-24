@@ -1,106 +1,161 @@
-# CONVENTIONS
+# CLAUDE.md
 
-## async FTW w/ "Hidden Box/Pin"
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Overview
+
+MaxTryX is a Matrix chat client with SurrealDB local storage, built in Rust. It consists of:
+- A TUI (Terminal User Interface) application using `ratatui`
+- A Matrix SDK wrapper API (`matryx_api`) providing synchronous interfaces
+- SurrealDB for local storage with migration support
+- Vim-like keybindings and modal interface design
+
+## Architecture
+
+### Package Structure
+- `packages/api/` - Matrix SDK wrapper (`matryx_api`) with synchronous interfaces hiding async complexity
+- `packages/tui/` - Terminal UI application (`maxtryx` binary) with widgets, modals, and window management
+- `packages/api/vendor/matrix-rust-sdk/` - Vendored Matrix Rust SDK
+- Root crate contains shared configuration and dependencies
+
+### Key Design Principles
+- **Hidden Async Complexity**: The API layer provides synchronous interfaces while managing async operations internally using channels and task spawning
+- **SurrealDB Storage**: All persistent data uses SurrealDB with proper migrations
+- **Modal UI**: TUI follows vim-like modal patterns with sophisticated keybinding system
+- **Widget-based Architecture**: Modular UI components (dialogs, tabs, layouts, text editors)
+
+### Core Modules
+- `packages/api/src/db/` - Database layer with migrations, DAOs, and entities
+- `packages/tui/src/widgets/` - UI components (window, dialog, tabs, layout, text editor)
+- `packages/tui/src/modal/` - Modal system for input handling and keybindings
+- `packages/tui/src/windows/` - Application windows (room chat, welcome screen)
+- `packages/tui/src/message/` - Message rendering and composition
+
+## Common Development Commands
+
+### Building & Running
+```bash
+# Build all packages
+cargo build
+just build
+
+# Run the main TUI application
+cargo run -p tui
+just run tui
+
+# Build in release mode
+cargo build --release
+just release
+```
+
+### Testing
+```bash
+# Run all tests with nextest (preferred)
+cargo nextest run
+just test
+
+# Run integration tests only
+cargo nextest run --test "integration"
+just test-integration
+
+# Run matrix-specific database tests
+just test-matrix-db
+
+# Run matrix tests with tracing enabled
+just test-matrix-trace
+```
+
+### Linting & Formatting
+```bash
+# Format code
+cargo fmt
+just fmt
+
+# Check formatting and run clippy
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+just lint
+
+# Quick check after changes (run after EVERY change)
+cargo fmt && cargo check --message-format short --quiet
+```
+
+### Database Management
+```bash
+# Run migrations for all databases
+just migrate
+
+# Specific database operations
+cd packages/api && just migrate
+```
+
+## Development Conventions
+
+### Async Interface Design
 - ❌ NEVER use `async_trait` or `async fn` in traits
 - ❌ NEVER return `Box<dyn Future>` or `Pin<Box<dyn Future>>` from client interfaces
 - ✅ Provide synchronous interfaces with `.await()` called internally
 - ✅ Hide async complexity behind `channel` and `task` `spawn`
-- ✅ Return intuitive, domain-specific types (e.g., `AgentResponse`, `TranscriptionStream`)
-- ✅ Example: Method returns `TranscriptionStream` (not `Box<dyn Stream>`) that user consumes with `.next().await`.
+- ✅ Return intuitive, domain-specific types (e.g., `MatrixFuture<T>`)
 
-## Yo **CAVEMAN!** Read the damn docs
+### Dependency Management
+- Always use `cargo add/remove` commands, never edit Cargo.toml directly
+- Use latest versions unless explicitly documented otherwise
+- Prefer `cargo search <package> --limit 1` to find latest versions
 
-- Let's face it. You are a brilliant engineer who's been out of the game a couple years. That's like 20 years in any other field.
-- GO GET THE LATEST DOCS!! Don't assume your tools from before the wheel are the best tools or the right syntax.
-- `cargo docs {{package_id}} --open` and MAKE A LITTLE GUIDE.md in `docs/` for yourself with specific snippets that match the operations this project is specifically doing. Link it in `CONVENTIONS.md`, `README.md`, `ARCHITECTURE.md`.
+### Code Quality Standards
+- All code MUST pass `cargo check --message-format short --quiet -- -D warnings`
+- No file should exceed 300 lines - decompose into elegant modules
+- Use `tracing` for logging with appropriate levels
+- Tests belong in `tests/` directory only
+- Use `nextest` for all test execution
+- No suppression of compiler or clippy warnings
 
-## `cargo` rules & `Cargo.toml`
+### SurrealDB Usage
+- Use SurrealDB 2.3+ syntax (significant changes from earlier versions)
+- Use `kv-surrealkv` for local file databases, `kv-tikv` for distributed
+- Apply appropriate table types: document, relational, graph, time series, vector
+- Always use `surrealdb-migrations` 2.2+ for versioned migrations
+- Follow patterns in `packages/api/src/db/` for DAOs and entities
 
-- !! DO NOT edit `Cargo.toml` directly !!
-- Always use the latest version of each dependency unless an exception in writing is granted.
-  - `cargo search {{package_id}} limit 1`
-  - `cargo add` will save you lots of time as it will ensure the latest version is imported.
-- use `cargo` to add, remove, update or upgrade packages.
-- Learn `cargo edit` and `cargo workspace` and you'll be good to go.
-- Lint (after EVERY change): `cargo fmt && cargo check --message-format short --quiet`
-- Build: `cargo build`, Run: `cargo run`
-- Test: Always use `nextest` and `cargo test`
+### Matrix SDK Integration
+- The project uses Matrix SDK 0.13 with custom wrapper in `packages/api/`
+- Several modules are disabled (`#[allow(dead_code)]`) pending migration completion
+- Focus on `packages/api/src/db/` and `packages/api/src/commands/` for active development
+- The wrapper provides synchronous interfaces hiding async complexity from TUI layer
 
-### TODO: Cargo Workspace Versioning
-
-Currently, most crates in this workspace use explicit versions (0.1.0) rather than inheriting from the workspace.package settings. There's an ongoing effort to standardize this by:
-
-1. Converting all crates to use version.workspace = true and edition.workspace = true
-2. Several crates have compilation issues that need to be fixed before this can be completed:
-   - krater: Issues with async/Send trait bounds in the updater.rs file
-   - cli-compositor: Multiple compilation errors related to dependencies and API usage
-   - cyrup-cli: Issues with async_trait and EventListener trait
-   - mcp_server: Issues with Json types and conversions
-
-See TODOs in individual Cargo.toml files for more details.
-
-## Error Handling
-
-- Use Result<T,E> with custom errors
-- No unwrap() except in tests
+### Error Handling
+- Use `Result<T,E>` with custom error types
+- No `unwrap()` except in tests
 - Handle all Result/Option values explicitly
+- Use `anyhow` for application errors, `thiserror` for library errors
 
-## Style & Structure
+### Code Organization
+- Follow Rust naming conventions: `snake_case` for variables/functions
+- Each binary crate should have exactly one binary target
+- Focus on minimal, correct implementations over feature creep
+- Test like an end-user: run `cargo run -p tui` to verify functionality
 
-- No single file should be more than 300 lines long. Decompose once we hit that size into elegant modules that fully handle concerns.
-- Rust official style: snake_case for variables/functions
-- Tests in `tests/` directory only
-- Use `tracing` for logs with appropriate levels
-- ❌ NO suppression of compiler or clippy warnings
-- ✅ All code MUST pass `cargo check --message-format short --quiet -- -D warnings` without exception. Ask if you believe there's a valid exception and document it in writing after approval.
+### Development Workflow
+1. Make changes
+2. Run `cargo fmt && cargo check --message-format short --quiet`
+3. Run appropriate tests with `cargo nextest run`
+4. Verify functionality with actual binary execution
+5. Ensure all warnings are resolved (not suppressed)
 
-## Be a Software Artisan
+## Key Technologies
+- **UI Framework**: `ratatui` for terminal interface
+- **Async Runtime**: `tokio` with full features
+- **Database**: `surrealdb` with `kv-surrealkv` storage
+- **Matrix**: `matrix-sdk` 0.13 with encryption support
+- **CLI**: `clap` for argument parsing
+- **Testing**: `nextest` for fast test execution
+- **Cross-terminal**: `crossterm` for terminal abstraction
+- **Build**: `just` for task automation
 
-- Focus on interface first.
-  - Who is using this product? How can we make this drop in easy for them to adopt?
-  - How are they using it? What is intuitive in this context?
-  - Ask questions before making up features we don't need.
-- WRITE THE *MINIMAL AMOUNT OF CODE* NEEDED TO IMPACT A CHANGE (but do it fully and correctly)
-  - Do not add features that are not requested.
-  - NEVER EVER ADD `examples/*` unless Dave asks for them.
-  - DO ADD tests in nextest. Focus on the key elements that prove it is really working for the user of the software.
-  - DO NOT say "it's all good" or "completed" unless you have **tested like an end-user** (ie. `cargo run` for a bin) and verified the feature.
-  - DO NOT add more than one binary per crate.
-
-## "REAL WORLD" Rules
-
-- ✅ All warnings must be fully resolved, not suppressed.
-- DO NOT use annotations to suppress warnings of any type.
-- DO NOT use private _variable naming to hide warnings.
-  - Unused code is either:
-    1. a bug that needs implementation to function
-    2. a half-assed non-production implementation
-    3. a mess that makes it hard to read and understand
-- NEVER leave **"TODO: in a real world situation ..."** or *"In production we'll handle this differently ..."* or similar suggestions.
-- *WRITE PRODUCTION QUALITY CODE ALL THE TIME!*. The future is now. This is production. You are the best engineers I know. Rise up.
-- ASK, ASK, ASK -- I love your initiative but writing full modules that are all wrong is costly and time consuming to cleanup. Just ask and don't assume anything. I'll hurry along when it's time :)
-
-## SurrealDB (awesome)
-
-- Use SurrealDB for all database operations
-- The syntax in version 2.2.1 has changed significantly
-- use `kv-surrealkv` local file databases and `kv-tikv` for clustered/distributed databases.
-- use the appropriate table type for the job (document, relational, graph, time series, vector)
-- use `surrealdb-migrations` version 2.2+ for perfectly versioned migrations. This is really essential for distributed file-based data.
-- use our `cyrup-ai/surrealdb-client` to get up and running fast with elegant traits and base implementations.
-
-## Preferred Software
-
-- `dioxus` (pure Rust front-end)
-- `axum` (elite tokio based server)
-- `floneum/floneum` ask "Kalosm" (local agents with superpowers)
-- `surrealdb` (swiss army knife of fast, indexed storage and ML support)
-- `livekit` for open-source real-time audio/video
-- `clap`, `ratatui`, `crossterm` ... just amazing cli tools
-- `serde` for serialization/deserialization
-- `tokio` for asynchronous programming and io bound parallelism
-- `rayon` for cpu bound parallelism
-- `nextest` for hella-fast and lovely test execution
-- `chromiumoxide` for web browser automation
-- `jwalk` for efficient parallel directory traversal
+## Notes
+- The project is undergoing migration from an older Matrix SDK version
+- Some modules in the API package are temporarily disabled during this transition
+- Database layer is actively developed with comprehensive DAO patterns
+- TUI implements sophisticated modal editing patterns similar to vim
+- Configuration uses TOML with support for layouts, keybindings, and user customization

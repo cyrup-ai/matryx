@@ -1,0 +1,25 @@
+pub mod account_data;
+pub mod api_cache;
+pub mod custom;
+pub mod key_value;
+pub mod media_upload;
+pub mod message;
+pub mod presence;
+pub mod receipt;
+pub mod request_dependency;
+pub mod room_membership;
+pub mod room_state;
+pub mod send_queue;
+
+pub use account_data::AccountDataDao;
+pub use api_cache::ApiCacheDao;
+pub use custom::CustomDao;
+pub use key_value::KeyValueDao;
+pub use media_upload::MediaUploadDao;
+pub use message::MessageDao;
+pub use presence::PresenceDao;
+pub use receipt::ReceiptDao;
+pub use request_dependency::RequestDependencyDao;
+pub use room_membership::RoomMembershipDao;
+pub use room_state::RoomStateDao;
+pub use send_queue::SendQueueDao;

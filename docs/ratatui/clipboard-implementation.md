@@ -278,4 +278,4 @@ For a TextEditor widget in a Ratatui application, clipboard functionality typica
 
 Implementing clipboard functionality in Ratatui applications requires consideration of terminal limitations and cross-platform behavior. By using external clipboard crates with appropriate abstraction (like the trait-based approach), it's possible to provide robust clipboard operations while maintaining flexibility and testability.
 
-For the Cyrum project, a hybrid approach combining system clipboard access with an internal buffer would provide the best user experience across different environments.
+For the Matrix project, a hybrid approach combining system clipboard access with an internal buffer would provide the best user experience across different environments.

@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 
-use cyrum::widgets::{
+use maxtryx::widgets::{
     LayoutConstraint, LayoutManager, LayoutNode, LayoutType, 
     Tabs, TabsState, Window, WindowComponent, WindowState
 };
@@ -94,13 +94,13 @@ impl ListView {
 }
 
 impl WindowComponent for ListView {
-    fn handle_event(&mut self, event: &cyrum::modal::InputEvent, modal_state: &mut cyrum::modal::ModalState) -> bool {
+    fn handle_event(&mut self, event: &maxtryx::modal::InputEvent, modal_state: &mut maxtryx::modal::ModalState) -> bool {
         if !self.focused {
             return false;
         }
 
         match event {
-            cyrum::modal::InputEvent::Key(key) => {
+            maxtryx::modal::InputEvent::Key(key) => {
                 if modal_state.is_normal_mode() {
                     match key.code {
                         crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
@@ -180,7 +180,7 @@ impl TextView {
 }
 
 impl WindowComponent for TextView {
-    fn handle_event(&mut self, _event: &cyrum::modal::InputEvent, _modal_state: &mut cyrum::modal::ModalState) -> bool {
+    fn handle_event(&mut self, _event: &maxtryx::modal::InputEvent, _modal_state: &mut maxtryx::modal::ModalState) -> bool {
         false
     }
 
@@ -316,15 +316,15 @@ impl App {
 
     /// Handle key events
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<(), Box<dyn Error>> {
-        // Create a cyrum key event from crossterm event
-        let cyrum_key = cyrum::modal::Key {
+        // Create a maxtryx key event from crossterm event
+        let maxtryx_key = maxtryx::modal::Key {
             code: key.code,
             modifiers: key.modifiers,
         };
-        let cyrum_event = cyrum::modal::InputEvent::Key(cyrum_key);
+        let maxtryx_event = maxtryx::modal::InputEvent::Key(maxtryx_key);
 
         // Initialize modal state (we're not fully using it in this example)
-        let mut modal_state = cyrum::modal::ModalState::default();
+        let mut modal_state = maxtryx::modal::ModalState::default();
         if self.mode == Mode::Insert {
             modal_state.enter_insert_mode();
         } else {
@@ -334,7 +334,7 @@ impl App {
         // First check if the focused window handles the event
         if let Some(focused) = &self.focused_window {
             if let Some(window) = self.windows.get_mut(focused) {
-                if window.handle_event(&cyrum_event, &mut modal_state) {
+                if window.handle_event(&maxtryx_event, &mut modal_state) {
                     return Ok(());
                 }
             }

@@ -18,13 +18,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 
-use cyrum::widgets::{
+use maxtryx::widgets::{
     layout::{LayoutConstraint, LayoutManager, LayoutNode, LayoutType},
     window::{WindowComponent, WindowState},
     dialog::{Dialog, DialogButton, DialogState, DialogType},
     dialogmanager::{DialogManager, DialogResult},
 };
-use cyrum::modal::{InputEvent, Key, ModalState};
+use maxtryx::modal::{InputEvent, Key, ModalState};
 
 /// Simple text view component
 struct TextView {
@@ -553,22 +553,22 @@ impl App {
             _ => {},
         }
         
-        // Convert to cyrum event for window components
-        let cyrum_key = Key {
+        // Convert to maxtryx event for window components
+        let maxtryx_key = Key {
             code: key.code,
             modifiers: key.modifiers,
         };
-        let cyrum_event = InputEvent::Key(cyrum_key);
+        let maxtryx_event = InputEvent::Key(maxtryx_key);
         
         // First check if the dialog manager handles the event
-        if self.dialog_manager.handle_event(&cyrum_event, &mut self.modal_state) {
+        if self.dialog_manager.handle_event(&maxtryx_event, &mut self.modal_state) {
             return Ok(());
         }
         
         // Then check if the active window handles the event
         if let Some(active_id) = &self.active_window {
             if let Some(window) = self.windows.get_mut(active_id) {
-                if window.handle_event(&cyrum_event, &mut self.modal_state) {
+                if window.handle_event(&maxtryx_event, &mut self.modal_state) {
                     return Ok(());
                 }
             }

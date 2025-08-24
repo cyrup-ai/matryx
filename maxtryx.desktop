@@ -1,0 +1,12 @@
+[Desktop Entry]
+Categories=Network;InstantMessaging;Chat;
+Comment=A Matrix client for Vim addicts
+Exec=maxtryx
+GenericName=Matrix Client
+Keywords=Matrix;matrix.org;chat;communications;talk;
+Name=maxtryx
+Icon=maxtryx
+StartupNotify=false
+Terminal=true
+TryExec=maxtryx
+Type=Application

@@ -16,9 +16,9 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 
-// Import from cyrum
-use cyrum::modal::{InputEvent, Key};
-use cyrum::widgets::{
+// Import from maxtryx
+use maxtryx::modal::{InputEvent, Key};
+use maxtryx::widgets::{
     Dialog, DialogButton, DialogId, DialogManager, DialogResult, DialogState, DialogType,
     FileEntry, WizardStep
 };

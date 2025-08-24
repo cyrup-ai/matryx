@@ -1,0 +1,33 @@
+pub mod account_data;
+pub mod api_cache;
+pub mod custom_value;
+pub mod encryption_data;
+pub mod key_value;
+pub mod media_upload;
+pub mod message;
+pub mod presence;
+pub mod receipt;
+pub mod request_dependency;
+pub mod room_membership;
+pub mod room_state;
+pub mod searchable_message;
+pub mod send_queue;
+pub mod user_profile;
+
+pub use account_data::AccountDataEntity;
+pub use api_cache::ApiCacheEntry;
+pub use custom_value::CustomValue;
+pub use encryption_data::EncryptionData;
+pub use key_value::KeyValue;
+pub use media_upload::MediaUpload;
+pub use message::Message;
+pub use presence::PresenceData;
+pub use receipt::Receipt;
+pub use request_dependency::RequestDependency;
+pub use room_membership::RoomMembership;
+pub use room_state::RoomState;
+pub use searchable_message::SearchableMessage;
+pub use send_queue::SendQueueEntry;
+// Alias for backward compatibility
+pub use send_queue::SendQueueEntry as SendQueueRequest;
+pub use user_profile::UserProfile;
