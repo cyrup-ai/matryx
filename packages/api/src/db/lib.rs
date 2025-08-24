@@ -29,5 +29,5 @@ pub use error::{Error, ErrorContext, Result};
 pub use migration::{get_hardcoded_migration, run_migration, run_migration_from_directory};
 
 // Export common SurrealDB types for convenience
-pub use surrealdb::sql::{Array, Id, Object, Thing, Value};
-pub use surrealdb::Surreal;
+pub use surrealdb::{RecordId, RecordIdKey, Surreal, Value};
+pub use surrealdb::value::Object;

@@ -23,7 +23,7 @@ pub async fn migrate() -> Result<()> {
 
     // Connect to SurrealDB using file: protocol for v2.2.1+ compatibility
     let conn_str = format!("file:{}", path.to_string_lossy());
-    let db = connect(&conn_str)
+    let db: surrealdb::Surreal<surrealdb::engine::any::Any> = connect(&conn_str)
         .with_capacity(10)
         .await
         .context("Failed to connect to database")?;
@@ -38,7 +38,7 @@ pub async fn migrate() -> Result<()> {
     info!("Running migrations with surrealdb-migrations v2.2.0...");
 
     // Create a migration runner
-    let mut _runner = MigrationRunner::new(&db);
+    let mut _runner = MigrationRunner::<surrealdb::engine::any::Any>::new(&db);
 
     // Register migrations from our migrations directory
     let yaml_path = MIGRATIONS_DIR

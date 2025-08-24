@@ -247,8 +247,8 @@ impl MatrixSync {
                     match client.sync_once(settings.clone()).await {
                         Ok(response) => {
                             // Process events from response manually
-                            // This would normally be handled by event handlers
-                            for (room_id, room_info) in response.rooms.join {
+                            // This would normally be handled by event handlers  
+                            for (room_id, room_info) in response.rooms.joined {
                                 // Process timeline events - access the timeline directly
                                 // Timeline is not optional in this version
                                 for raw_event in room_info.timeline.events {
@@ -257,7 +257,7 @@ impl MatrixSync {
                                         if let Ok(msg_event) = serde_json::from_str::<AnyMessageLikeEvent>(&raw_json) {
                                             if let Some(room) = client.get_room(&room_id) {
                                                 let result: MatrixResult<(OwnedRoomId, AnyMessageLikeEvent)> = 
-                                                    Ok((room_id.clone(), msg_event));
+                                                    Ok((room_id.to_owned(), msg_event));
                                                 let _ = sender.send(result).await;
                                             }
                                         }

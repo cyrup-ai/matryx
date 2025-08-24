@@ -64,6 +64,7 @@ impl Dao {
                 )),
                 crate::db::migration::get_hardcoded_migration(),
             )
+            .get()
             .await?;
 
             println!("✅ Database migration completed");

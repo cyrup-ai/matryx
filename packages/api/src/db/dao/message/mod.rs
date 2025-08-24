@@ -41,7 +41,7 @@ impl MessageItem {
 
 impl MessageDao {
     pub fn new(client: DatabaseClient) -> Self {
-        Self { dao: Dao::new(client) }
+        Self { dao: Dao::new(client, "message") }
     }
     
     // Find messages by room with a limit

@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use async_trait::async_trait;
+
 use hex;
 
 use matrix_sdk_base::{
@@ -936,9 +936,9 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
     ) -> matrix_sdk_base::store::Result<Option<Raw<AnyGlobalAccountDataEvent>>> {
         let event_type_str = event_type.to_string();
 
-        match self.account_data_dao.get_account_data("", &event_type_str).await {
+        match self.account_data_dao.get_account_data(&event_type_str).await {
             Ok(Some(account_data)) => {
-                match serde_json::from_value(account_data.event) {
+                match serde_json::from_value(account_data) {
                     Ok(event) => Ok(Some(event)),
                     Err(err) => Err(matrix_sdk_base::store::StoreError::Json(err)),
                 }
@@ -956,9 +956,9 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
         let room_id_str = room_id.to_string();
         let event_type_str = event_type.to_string();
 
-        match self.account_data_dao.get_account_data(&room_id_str, &event_type_str).await {
+        match self.account_data_dao.get_room_account_data(&room_id_str, &event_type_str).await {
             Ok(Some(account_data)) => {
-                match serde_json::from_value(account_data.event) {
+                match serde_json::from_value(account_data) {
                     Ok(event) => Ok(Some(event)),
                     Err(err) => Err(matrix_sdk_base::store::StoreError::Json(err)),
                 }
@@ -1002,9 +1002,10 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                             None
                         };
 
-                        // Create Receipt struct with the thread (using builder for non_exhaustive struct)
-                        let receipt_value = Receipt::new(thread.clone())
-                            .with_ts(ts);
+                        // Create Receipt struct using Matrix SDK 0.13 API
+                        let timestamp = ts.unwrap_or_else(|| MilliSecondsSinceUnixEpoch::now());
+                        let mut receipt_value = Receipt::new(timestamp);
+                        receipt_value.thread = thread;
                         
                         Ok(Some((event_id, receipt_value)))
                     },
@@ -1319,6 +1320,8 @@ impl matrix_sdk_base::store::StateStore for SurrealStateStore {
                         kind: content,
                         transaction_id,
                         error,
+                        priority: 0, // Default priority
+                        created_at: matrix_sdk_base::ruma::MilliSecondsSinceUnixEpoch::now(),
                     });
                 }
             }

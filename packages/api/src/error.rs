@@ -244,6 +244,10 @@ pub enum EncryptionError {
     #[error("Invalid recovery key: {0}")]
     InvalidRecoveryKey(String),
 
+    /// User identity not found
+    #[error("User identity not found")]
+    UserIdentityNotFound,
+
     /// Missing encryption keys
     #[error("Missing encryption keys")]
     MissingKeys,

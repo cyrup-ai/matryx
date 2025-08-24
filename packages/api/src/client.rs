@@ -572,7 +572,7 @@ impl MatrixClient {
             let room_alias_id = matrix_sdk::ruma::RoomAliasId::parse(&room_alias)
                 .map_err(|e| ClientError::InvalidParameter(format!("Invalid room alias: {}", e)))?;
             let room = client
-                .join_room_by_id_or_alias(&room_alias_id.into()) // Convert alias to RoomIdOrAliasId
+                .join_room_by_id_or_alias(&room_alias_id.into(), &[]) // Convert alias to RoomIdOrAliasId, empty server list
                 .await
                 .map_err(ClientError::matrix_sdk)?;
 

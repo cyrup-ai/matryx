@@ -6,18 +6,21 @@
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
-// Imports for SDK 0.11+
+// Imports for SDK 0.13+
 use matrix_sdk::{
     encryption::{
-        verification::{Emoji, SasVerification, Verification},
+        verification::{Emoji, SasVerification, Verification, VerificationRequest},
     },
-    ruma::{DeviceId, UserId},
+    ruma::{
+        DeviceId, UserId,
+        events::{
+            key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            room::message::{MessageType, OriginalSyncRoomMessageEvent},
+        },
+    },
     Client as MatrixClient,
 };
-
-// Define local types until we update to SDK reference types
-// For BackupDecryptionKey/recovery key
-type BackupDecryptionKey = Vec<u8>; // Simplified for compilation
+use matrix_sdk_base::crypto::store::types::BackupDecryptionKey;
 
 // Define our verification state enum
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +38,7 @@ fn parse_recovery_key(recovery_key: &str) -> std::result::Result<BackupDecryptio
     //     return Err("Invalid recovery key format".into());
     // }
 
-    // Use from_base58 for SDK 0.10+
+    // Use from_base58 for SDK 0.13+
     BackupDecryptionKey::from_base58(recovery_key)
         .map_err(|e| format!("Invalid recovery key: {}", e))
 }
@@ -127,7 +130,7 @@ impl MatrixVerificationRequest {
                     // Pass the existing Arc<SasVerification>
                     Ok(MatrixSasVerification::new(sas.clone()))
                 },
-                Verification::QrCodeV1(_) => { // Handle QrCodeV1 if needed, or return error
+                Verification::QrV1(_) => { // Handle QrV1 if needed, or return error
                     Err(EncryptionError::UnsupportedVerificationType(
                         "QR code verification not handled by accept_sas".into(),
                     ))
@@ -151,7 +154,7 @@ impl MatrixVerificationRequest {
         MatrixFuture::spawn(async move {
             let result = match &*inner { // Match on the dereferenced Arc
                 Verification::SasV1(sas) => sas.cancel().await.map_err(EncryptionError::matrix_sdk),
-                Verification::QrCodeV1(qr) => { // Handle QrCodeV1
+                Verification::QrV1(qr) => { // Handle QrV1
                     qr.cancel().await.map_err(EncryptionError::matrix_sdk) // Assuming cancel exists
                 },
                 // Add other verification types if they exist in SDK 0.10+
@@ -170,7 +173,7 @@ impl MatrixVerificationRequest {
     pub fn other_user_id(&self) -> Result<&UserId, EncryptionError> {
         match &*self.inner {
             Verification::SasV1(sas) => Ok(sas.other_user_id()),
-            Verification::QrCodeV1(qr) => Ok(qr.other_user_id()), // Assuming QrCodeV1 has other_user_id
+            Verification::QrV1(qr) => Ok(qr.other_user_id()), // Assuming QrV1 has other_user_id
             #[allow(unreachable_patterns)]
             _ => Err(EncryptionError::UnsupportedVerificationType(
                 "Cannot get other_user_id for this verification type".into(),
@@ -182,7 +185,7 @@ impl MatrixVerificationRequest {
     pub fn other_device_id(&self) -> Result<&DeviceId, EncryptionError> { // Returns Result<&DeviceId>
         match &*self.inner {
             Verification::SasV1(sas) => Ok(sas.other_device_id()),
-            Verification::QrCodeV1(qr) => Ok(qr.other_device_id()),
+            Verification::QrV1(qr) => Ok(qr.other_device_id()),
             // Add other verification types if they exist in SDK 0.10+
             #[allow(unreachable_patterns)] // Keep allow if only Sas and Qr exist
             _ => Err(EncryptionError::UnsupportedVerificationType(
@@ -240,14 +243,20 @@ impl MatrixEncryption {
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            // get_verification likely renamed or moved, e.g., request_verification
-            let verification = client
+            // First get the user identity, then request verification
+            let user_identity = client
                 .encryption()
-                .request_verification(&user_id, None) // Assuming this method exists
+                .get_user_identity(&user_id)
+                .await
+                .map_err(EncryptionError::matrix_sdk)?
+                .ok_or(EncryptionError::UserIdentityNotFound)?;
+
+            let verification_request = user_identity
+                .request_verification()
                 .await
                 .map_err(EncryptionError::matrix_sdk)?;
 
-            Ok(MatrixVerificationRequest::new(verification)) // Pass Arc directly
+            Ok(MatrixVerificationRequest::new(Arc::new(verification_request)))
         })
     }
 
@@ -256,48 +265,45 @@ impl MatrixEncryption {
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            // Use the recovery API
             let recovery = client.encryption().recovery();
 
-            // Check if recovery is enabled, enable if not
-            if recovery.state() == matrix_sdk::encryption::recovery::RecoveryState::Disabled {
-                let _recovery_key = recovery.enable().await.map_err(EncryptionError::matrix_sdk)?;
-            }
+            // Enable backup through recovery API
+            recovery.enable_backup().await.map_err(EncryptionError::matrix_sdk)?;
 
-            // Enable backup
-            recovery.enable_backup().await.map_err(EncryptionError::matrix_sdk)?; // Assuming enable_backup exists
-
-            // Get the current backup version (if needed)
-            // let state = recovery.state(); // Example
-            // let version = state.backup_version().map(|v| v.to_string()).unwrap_or_default(); // Example
-            Ok("".to_string()) // Return empty string for now, adjust if version needed
+            // Return empty string as backup version isn't directly accessible
+            Ok("".to_string())
         })
     }
 
-    /// Restore room keys from backup.
-    pub fn restore_backup(&self, passphrase: Option<&str>) -> MatrixFuture<usize> {
-        let passphrase = passphrase.map(|s| s.to_owned());
+    /// Restore room keys from backup using recovery key.
+    pub fn restore_backup(&self, recovery_key: Option<&str>) -> MatrixFuture<usize> {
+        let recovery_key = recovery_key.map(|s| s.to_owned());
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
             let recovery = client.encryption().recovery();
 
-            // Restore backup using passphrase if provided
-            let result = if let Some(pass) = passphrase {
-                recovery.restore_backup_from_passphrase(&pass, None).await // Pass None for progress
+            // Restore backup using recovery key if provided
+            let result = if let Some(key) = recovery_key {
+                recovery.recover(&key).await.map_err(EncryptionError::matrix_sdk)
             } else {
-                // Attempt restore without passphrase (might use cached key)
-                // Check SDK 0.10+ documentation for the exact method
-                // recovery.restore_backup_with_cached_key().await // Example, method likely changed/removed
-                 return Err(EncryptionError::InvalidParameter(
-                     "Passphrase needed or cached key restore method not found for SDK 0.10+".to_string(),
-                 )); // Keep error until method verified
+                return Err(EncryptionError::InvalidParameter(
+                    "Recovery key required for backup restoration".to_string(),
+                ));
             };
 
             match result {
-                 Ok(counts) => Ok(counts.total as usize), // Return total count
-                 Err(e) => Err(EncryptionError::matrix_sdk(e)),
-             }
+                Ok(()) => {
+                    // Recovery doesn't return a count directly, but we can check if backups are enabled
+                    let backups_enabled = client.encryption().backups().are_enabled().await;
+                    if backups_enabled {
+                        Ok(1) // Return 1 to indicate successful recovery
+                    } else {
+                        Ok(0)
+                    }
+                },
+                Err(e) => Err(e),
+            }
         })
     }
 
@@ -306,12 +312,8 @@ impl MatrixEncryption {
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            // Use recovery status
-            let recovery = client.encryption().recovery();
-            // TODO: Verify how to check backup status/enabled state in SDK 0.10+ (e.g., using recovery.state())
-            let state = recovery.state(); // Example
-            // Check if backup is configured/enabled based on status
-            Ok(state != matrix_sdk::encryption::recovery::RecoveryState::Disabled) // Example check
+            // Check if backups exist on server
+            client.encryption().backups().exists_on_server().await.map_err(EncryptionError::matrix_sdk)
         })
     }
 
@@ -320,14 +322,10 @@ impl MatrixEncryption {
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            // Use recovery API
-            let recovery = client.encryption().recovery();
-            // In Matrix SDK 0.13, recovery key is managed through state, not directly accessible
-            // Return placeholder for now - in practice, the recovery key would be stored when created
-            let key = None; // Assuming get_recovery_key exists
-
-            key.ok_or_else(|| EncryptionError::MatrixSdk("No recovery key found".to_string()))
-               .map(|k| k.to_base58()) // Convert key to base58 string
+            // In Matrix SDK 0.13, recovery keys are generated and returned during the enable process
+            // This method is for exporting an existing key, which may not be directly accessible
+            // Return error indicating the key should be saved during creation
+            Err(EncryptionError::MatrixSdk("Recovery key must be saved during creation - not directly exportable".to_string()))
         })
     }
 
@@ -337,21 +335,19 @@ impl MatrixEncryption {
         let client = self.client.clone();
 
         MatrixFuture::spawn(async move {
-            let key = parse_recovery_key(&recovery_key)
-                .map_err(EncryptionError::InvalidRecoveryKey)?;
-
-            // Use recovery API
+            // In Matrix SDK 0.13, importing a recovery key is done through the recover method
             let recovery = client.encryption().recovery();
 
-            // Import the key
-            // recovery.import_recovery_key(key, None).await // Method likely changed
-            // Placeholder error until method verified
-            return Err(EncryptionError::MatrixSdk("import_recovery_key needs verification".into()));
+            // Import and restore using the recovery key
+            recovery.recover(&recovery_key).await.map_err(EncryptionError::matrix_sdk)?;
 
-            // After importing, keys might be restored automatically or need another step.
-            // Check SDK 0.10+ docs. Assuming import triggers restore:
-            // We might not get a count directly from import. Return 0 or trigger restore separately.
-            // Ok(0) // Placeholder count
+            // Check if backups are now enabled to return success indicator
+            let backups_enabled = client.encryption().backups().are_enabled().await;
+            if backups_enabled {
+                Ok(1) // Return 1 to indicate successful import and activation
+            } else {
+                Ok(0)
+            }
         })
     }
 
@@ -407,25 +403,41 @@ impl MatrixEncryption {
         MatrixStream::spawn(async move {
             let (sender, receiver) = tokio::sync::mpsc::channel(100);
 
-            // In 0.11, verification requests are handled through the encryption() API
-            // rather than directly through events
-            let crypto = client.encryption();
-            
-            // Set up a listener for new verification requests
-            crypto.register_verification_handler(move |request| {
-                let sender = sender.clone();
-                
+            // In Matrix SDK 0.13, verification requests are handled through event handlers
+            use matrix_sdk::ruma::events::{
+                key::verification::request::ToDeviceKeyVerificationRequestEvent,
+                room::message::{MessageType, OriginalSyncRoomMessageEvent},
+            };
+
+            let sender_clone = sender.clone();
+            client.add_event_handler(move |ev: ToDeviceKeyVerificationRequestEvent, client: matrix_sdk::Client| {
+                let sender = sender_clone.clone();
                 async move {
-                    // Wrap the verification in our custom type
-                    let verification = Arc::new(request);
-                    
-                    // Send the wrapped verification request
-                    let _ = sender
-                        .send(Ok(MatrixVerificationRequest::new(verification)))
-                        .await;
-                    
-                    // Return true to indicate we'll handle this request
-                    true
+                    if let Ok(Some(request)) = client
+                        .encryption()
+                        .get_verification_request(&ev.sender, &ev.content.transaction_id)
+                        .await 
+                    {
+                        let verification = Arc::new(request);
+                        let _ = sender.send(Ok(MatrixVerificationRequest::new(verification))).await;
+                    }
+                }
+            });
+
+            let sender_clone2 = sender.clone();
+            client.add_event_handler(move |ev: OriginalSyncRoomMessageEvent, client: matrix_sdk::Client| {
+                let sender = sender_clone2.clone();
+                async move {
+                    if let MessageType::VerificationRequest(_) = &ev.content.msgtype {
+                        if let Ok(Some(request)) = client
+                            .encryption()
+                            .get_verification_request(&ev.sender, &ev.event_id)
+                            .await
+                        {
+                            let verification = Arc::new(request);
+                            let _ = sender.send(Ok(MatrixVerificationRequest::new(verification))).await;
+                        }
+                    }
                 }
             });
 

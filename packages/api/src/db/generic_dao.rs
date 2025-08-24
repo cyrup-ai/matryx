@@ -213,7 +213,7 @@ impl<T: Entity> Dao<T> {
     /// Create a live query
     pub fn live_query<R>(&self, query: &str) -> crate::db::client::LiveQueryStream<R>
     where
-        R: DeserializeOwned + Send + Sync + 'static,
+        R: DeserializeOwned + Send + Sync + Unpin + 'static,
     {
         self.client.live_query(query)
     }
@@ -466,7 +466,7 @@ impl<T: Entity + 'static> BaseDao<T> for Dao<T> {
 
         let handle = tokio::spawn(async move {
             let query = format!("DEFINE TABLE {} SCHEMAFULL", T::table_name());
-            let result = client.query(&query).await;
+            let result = client.query::<()>(&query).await;
             match result {
                 Ok(_) => {
                     let _ = tx.send(DaoResponse::Success).await;

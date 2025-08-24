@@ -5,7 +5,7 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use surrealdb::engine::any::connect;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
 use std::fmt::Debug;
 use std::marker::Unpin;
 use std::time::Duration;
@@ -98,6 +98,7 @@ pub enum LiveAction {
 
 
 /// Stream for query results
+#[derive(Clone)]
 pub struct QueryStream<T> {
     client: DatabaseClient,
     query: String,
@@ -154,11 +155,30 @@ impl<T: DeserializeOwned + Send + Sync + 'static> QueryStream<T> {
 impl<T: DeserializeOwned + Send + Sync + 'static> std::future::Future for QueryStream<T> {
     type Output = Result<T>;
     
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        // Convert to owned self to consume
-        let this = unsafe { std::pin::Pin::into_inner_unchecked(self.clone()) };
-        // Use get method via a wrapper future
-        let fut = this.get();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Take ownership of the fields we need
+        let client = self.client.clone();
+        let query = self.query.clone();
+        let params = self.params.clone();
+        
+        // Create the future with owned data
+        let fut = async move {
+            match client {
+                DatabaseClient::SurrealKV(db) => {
+                    let mut response = if let Some(params) = params {
+                        db.query(&query).bind(params).await?
+                    } else {
+                        db.query(&query).await?
+                    };
+
+                    let result: Option<T> = response.take(0).map_err(|e| {
+                        Error::database(format!("Failed to extract result from response: {}", e))
+                    })?;
+                    result.ok_or_else(|| Error::database("Query returned no result".to_string()))
+                }
+            }
+        };
+        
         // Create a pinned boxed future
         let mut fut = Box::pin(fut);
         // Poll the inner future
@@ -167,6 +187,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> std::future::Future for QueryS
 }
 
 /// Stream for optional query results
+#[derive(Clone)]
 pub struct OptionalQueryStream<T> {
     client: DatabaseClient,
     query: String,
@@ -229,11 +250,27 @@ impl<T: DeserializeOwned + Send + Sync + 'static> OptionalQueryStream<T> {
 impl<T: DeserializeOwned + Send + Sync + 'static> std::future::Future for OptionalQueryStream<T> {
     type Output = Result<Option<T>>;
     
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        // Convert to owned self to consume
-        let this = unsafe { std::pin::Pin::into_inner_unchecked(self.clone()) };
-        // Use get method via a wrapper future
-        let fut = this.get();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Take ownership of the fields we need
+        let client = self.client.clone();
+        let query = self.query.clone();
+        let params = self.params.clone();
+        
+        // Create the future with owned data
+        let fut = async move {
+            match client {
+                DatabaseClient::SurrealKV(db) => {
+                    let response = if let Some(params) = params {
+                        db.query(&query).bind(params).await?
+                    } else {
+                        db.query(&query).await?
+                    };
+
+                    Self::extract_result(response).await
+                }
+            }
+        };
+        
         // Create a pinned boxed future
         let mut fut = Box::pin(fut);
         // Poll the inner future
@@ -242,6 +279,7 @@ impl<T: DeserializeOwned + Send + Sync + 'static> std::future::Future for Option
 }
 
 /// Stream for multiple query results
+#[derive(Clone)]
 pub struct MultiQueryStream<T> {
     client: DatabaseClient,
     query: String,
@@ -304,11 +342,31 @@ impl<T: DeserializeOwned + Send + Sync + 'static> MultiQueryStream<T> {
 impl<T: DeserializeOwned + Send + Sync + 'static> std::future::Future for MultiQueryStream<T> {
     type Output = Result<Vec<T>>;
     
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        // Convert to owned self to consume
-        let this = unsafe { std::pin::Pin::into_inner_unchecked(self.clone()) };
-        // Use get method via a wrapper future
-        let fut = this.get();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Take ownership of the fields we need
+        let client = self.client.clone();
+        let query = self.query.clone();
+        let params = self.params.clone();
+        
+        // Create the future with owned data
+        let fut = async move {
+            match client {
+                DatabaseClient::SurrealKV(db) => {
+                    let mut response = if let Some(params) = params {
+                        db.query(&query).bind(params).await?
+                    } else {
+                        db.query(&query).await?
+                    };
+
+                    let result: Vec<T> = response.take(0).map_err(|e| {
+                        Error::database(format!("Failed to extract result from response: {}", e))
+                    })?;
+
+                    Ok(result)
+                }
+            }
+        };
+        
         // Create a pinned boxed future
         let mut fut = Box::pin(fut);
         // Poll the inner future
@@ -484,7 +542,6 @@ impl<T: DeserializeOwned + Send + Sync + Unpin + 'static> LiveQueryStream<T> {
                 // Spawn a task to process notifications from the SurrealDB stream
                 tokio::spawn(async move {
                     use futures::stream::StreamExt;
-                    use std::pin::Pin;
                     let mut stream = Box::pin(live_stream);
                     
                     while let Some(notification_result) = stream.next().await {
@@ -525,7 +582,7 @@ impl DatabaseClient {
     /// Create a live query
     pub fn live_query<T>(&self, query: &str) -> LiveQueryStream<T>
     where
-        T: DeserializeOwned + Send + Sync + 'static,
+        T: DeserializeOwned + Send + Sync + Unpin + 'static,
     {
         LiveQueryStream::new(self.clone(), query.to_string())
     }
@@ -572,9 +629,9 @@ impl DatabaseClient {
         T: DeserializeOwned + Send + Sync + 'static,
     {
         match &self {
-            DatabaseClient::SurrealKV(db) => {
+            DatabaseClient::SurrealKV(_db) => {
                 // Use the Resource directly for better type safety
-                let resource = Resource::from((table, id));
+                let _resource = Resource::from((table, id));
                 let query = format!("SELECT * FROM {}:{}", table, id);
                 OptionalQueryStream::new(self.clone(), query)
             },
@@ -603,9 +660,9 @@ impl DatabaseClient {
         T: DeserializeOwned + Send + Sync + 'static,
     {
         match &self {
-            DatabaseClient::SurrealKV(db) => {
+            DatabaseClient::SurrealKV(_db) => {
                 // Use the Resource directly for better type safety
-                let resource = Resource::from((table, id));
+                let _resource = Resource::from((table, id));
                 let query = format!("DELETE {}:{} RETURN BEFORE", table, id);
                 OptionalQueryStream::new(self.clone(), query)
             },
@@ -618,9 +675,9 @@ impl DatabaseClient {
         T: DeserializeOwned + Send + Sync + 'static,
     {
         match &self {
-            DatabaseClient::SurrealKV(db) => {
+            DatabaseClient::SurrealKV(_db) => {
                 // Use the Resource directly for better type safety
-                let resource = Resource::from(table);
+                let _resource = Resource::from(table);
                 let query = format!("SELECT * FROM {}", table);
                 MultiQueryStream::new(self.clone(), query)
             },

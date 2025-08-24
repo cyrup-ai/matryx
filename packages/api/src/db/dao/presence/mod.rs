@@ -165,7 +165,16 @@ impl PresenceDao {
 
             // If not updated, create new
             if updated.is_empty() {
-                let presence = PresenceData { id: None, user_id, event, updated_at: now };
+                let presence = PresenceData { 
+                    id: None, 
+                    user_id, 
+                    presence: event.to_string(), 
+                    last_active_ago: None,
+                    currently_active: Some(true),
+                    status_msg: None,
+                    data: serde_json::Value::Null,
+                    updated_at: now 
+                };
 
                 let mut presence = presence;
                 dao.create(&mut presence).await?;

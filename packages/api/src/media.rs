@@ -91,20 +91,19 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type inside async
-                let data = data.into(); // Convert Vec<u8> to Bytes
-                // Use the media uploader
-                let mut request_builder = client.media().upload(&content_type, data); // Assuming upload returns a builder
-                if let Some(name) = filename.as_deref() { // Use cloned filename
-                    request_builder = request_builder.file_name(name); // Use builder pattern for filename
+                let content_type = content_type.parse().map_err(|_| MediaError::InvalidParameter("Invalid content type".into()))?; // Parse content type
+                
+                // Use the Matrix SDK 0.13 media upload API
+                let mut upload_request = client.media().upload(&content_type, data, None);
+                if let Some(name) = filename.as_deref() {
+                    upload_request = upload_request.file_name(name);
                 }
 
-                let response = request_builder.await.map_err(MediaError::matrix_sdk)?;
+                let response = upload_request.await.map_err(MediaError::matrix_sdk)?;
                 Ok(response.content_uri)
             }.await;
 
-            // Map MediaError to crate::error::Error
-            result.map(|response| response.content_uri).map_err(crate::error::Error::Media)
+            result.map_err(crate::error::Error::Media)
         })
     }
 
@@ -145,14 +144,12 @@ impl MatrixMedia {
             .parse::<mime::Mime>() // Parse the determined mime type string
             .map_err(|_| MediaError::InvalidParameter("Could not parse mime type".into()))?;
 
-            // Use the media uploader
-            let response = client.media()
-                    .upload(&content_type, data.into()) // Pass parsed mime and converted data
-                    .file_name(filename) // Set filename using builder
-                    .await
-                    .map_err(MediaError::matrix_sdk)?;
+            // Use the Matrix SDK 0.13 media upload API
+            let mut upload_request = client.media().upload(&content_type, data, None);
+            upload_request = upload_request.file_name(&filename);
 
-                Ok(response.content_uri)
+            let response = upload_request.await.map_err(MediaError::matrix_sdk)?;
+            Ok(response.content_uri)
             }.await; // Await the inner async block
 
             // Map MediaError to crate::error::Error inside the outer future
@@ -167,14 +164,18 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                // Parse the MXC URI in Matrix SDK 0.11
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                     .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
 
-                // In Matrix SDK 0.11, download media content via the client.media() API
+                // Create MediaSource from the parsed URI
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source);
+
+                // Download media content using the new API
                 let response = client
                     .media()
-                    .download(&uri)
+                    .get_media_content(&request, true)
                     .await
                     .map_err(MediaError::matrix_sdk)?;
 
@@ -193,23 +194,23 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                // Parse the MXC URI
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                     .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
 
-                // In 0.11, we use MediaConfig directly for more flexibility
-                let request = MediaRequestConfig::new()
-                    .format(MediaFormat::File);
+                // Create MediaSource and get content
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source);
 
-            // Use media API directly in 0.11
-            let data = client
-                .media()
-                .download(&uri)
-                .await
-                .map_err(MediaError::matrix_sdk)?;
+                // Download media content using the new API
+                let data = client
+                    .media()
+                    .get_media_content(&request, true)
+                    .await
+                    .map_err(MediaError::matrix_sdk)?;
 
-            // Write to file
-            tokio::fs::write(path, data)
+                // Write to file
+                tokio::fs::write(path, data)
                     .await
                     .map_err(|e| MediaError::IoError(e.to_string()))?;
 
@@ -230,20 +231,25 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                // Parse the MXC URI
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                     .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
 
-                // Create a media request with thumbnail
-                let request = MediaRequestConfig::new()
-                    .format(MediaFormat::Thumbnail(ThumbnailSize::new(width, height)));
+                // Create MediaSource and thumbnail settings
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let thumbnail_settings = matrix_sdk::media::MediaThumbnailSettings::new(
+                    matrix_sdk::ruma::UInt::from(width), 
+                    matrix_sdk::ruma::UInt::from(height)
+                );
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source)
+                    .with_thumbnail(thumbnail_settings);
 
-            // Use media API directly in 0.11
-            let data = client
-                .media()
-                .download(&uri)
-                .await
-                .map_err(MediaError::matrix_sdk)?;
+                // Download thumbnail using the new API
+                let data = client
+                    .media()
+                    .get_media_content(&request, true)
+                    .await
+                    .map_err(MediaError::matrix_sdk)?;
 
                 Ok(data)
             }.await;
@@ -268,18 +274,23 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                // Parse the MXC URI
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                     .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
 
-                // Just prepare the thumbnail request parameters
-                // Actual implementation will use SDK API directly
-                let thumb_size = ThumbnailSize::new(width, height).method(method);
+                // Create MediaSource and thumbnail settings with method
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let thumbnail_settings = matrix_sdk::media::MediaThumbnailSettings::new(
+                    matrix_sdk::ruma::UInt::from(width), 
+                    matrix_sdk::ruma::UInt::from(height)
+                ).method(method);
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source)
+                    .with_thumbnail(thumbnail_settings);
 
-                // Use media API directly in 0.11
+                // Download thumbnail using the new API
                 let data = client
                     .media()
-                    .download_thumbnail(&uri, thumb_size)
+                    .get_media_content(&request, true)
                     .await
                     .map_err(MediaError::matrix_sdk)?;
 
@@ -298,11 +309,16 @@ impl MatrixMedia {
 
         MatrixFuture::spawn(async move {
             let result = async {
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                 .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
 
-                // Get download URL in 0.11
-                let url = client.media().get_download_url(&uri);
+                // Create MediaSource
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source);
+
+                // Get download URL using Matrix SDK 0.13 API
+                let url = client.media().get_download_url(&request);
                 
                 // Convert URL to string if present
                 Ok(url.map(|u| u.to_string()))
@@ -323,11 +339,21 @@ impl MatrixMedia {
         
         MatrixFuture::spawn(async move {
             let result = async {
-                let uri = matrix_sdk::ruma::MxcUri::from_str(&mxc_uri_owned)
-                    .map_err(|e| MediaError::InvalidUri(e.to_string()))?;
+                // Parse the MXC URI - in Matrix SDK 0.13, MxcUri is parsed differently
+                let uri: matrix_sdk::ruma::OwnedMxcUri = mxc_uri_owned.try_into()
+                     .map_err(|e| MediaError::InvalidUri(format!("Invalid MXC URI: {:?}", e)))?;
+
+                // Create MediaSource and thumbnail settings
+                let media_source = matrix_sdk::ruma::events::room::MediaSource::Plain(uri);
+                let thumbnail_settings = matrix_sdk::media::MediaThumbnailSettings::new(
+                    matrix_sdk::ruma::UInt::from(width), 
+                    matrix_sdk::ruma::UInt::from(height)
+                );
+                let request = matrix_sdk::media::MediaRequestParameters::from_source(&media_source)
+                    .with_thumbnail(thumbnail_settings);
                     
-                // Get thumbnail URL in 0.11
-                let url = client.media().get_thumbnail_url(&uri, thumbnail);
+                // Get thumbnail URL using Matrix SDK 0.13 API
+                let url = client.media().get_download_url(&request);
                 
                 // Convert URL to string if present
                 Ok(url.map(|u| u.to_string()))
