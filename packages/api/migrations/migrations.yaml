@@ -1,3 +1,0 @@
-migrations:
-  - 20250329_000000 # Initial schema
-  - 20250330_000001 # Matrix state store

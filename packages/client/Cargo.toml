@@ -1,0 +1,31 @@
+[package]
+name = "matryx_client"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+warnings = "warn"
+
+[dependencies]
+
+matryx_entity = { path = "../entity" }
+matryx_surrealdb = { path = "../surrealdb" }
+
+reqwest = { version = "0.12", features = ["json", "stream"] }
+urlencoding = "2.1"
+tokio = { version = "1.47.1", features = ["full"] }
+serde = "1.0.219"
+serde_json = "1.0.143"
+chrono = "0.4.41"
+uuid = "1.18.0"
+thiserror = "2.0.16"
+anyhow = "1.0.99"
+tracing = "0.1.41"
+futures = "0.3.31"
+tokio-tungstenite = "0.24"
+url = "2.5"
+base64 = "0.22.1"
+
+[lib]
+name = "matryx_client"
+path = "src/lib.rs"

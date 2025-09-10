@@ -1,0 +1,26 @@
+use axum::{Json, extract::Path, http::StatusCode};
+use serde_json::{Value, json};
+
+/// GET /_matrix/client/v3/rooms/{roomId}/context/{eventId}
+pub async fn get(
+    Path((_room_id, _event_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    Ok(Json(json!({
+        "start": "t1-start_token",
+        "end": "t1-end_token",
+        "events_before": [],
+        "event": {
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "Example message"
+            },
+            "event_id": "$example_event_id:example.com",
+            "sender": "@example:example.com",
+            "origin_server_ts": 1234567890,
+            "room_id": "!example_room:example.com"
+        },
+        "events_after": [],
+        "state": []
+    })))
+}

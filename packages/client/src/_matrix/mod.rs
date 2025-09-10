@@ -1,0 +1,8 @@
+pub mod _well_known;
+pub mod app;
+pub mod client;
+pub mod federation;
+pub mod key;
+pub mod media;
+#[path = "static/mod.rs"]
+pub mod static_;

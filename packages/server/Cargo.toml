@@ -1,0 +1,40 @@
+[package]
+name = "matryx_server"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+matryx_entity = { path = "../entity" }
+matryx_surrealdb = { path = "../surrealdb" }
+
+axum = { version = "0.8.4", features = ["ws"] }
+chrono = "0.4.41"
+serde = "1.0.219"
+serde_json = "1.0.143"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-stream = "0.1"
+uuid = "1.18.0"
+tower-http = { version = "0.6.6", features = ["cors"] }
+tracing-subscriber = "0.3.19"
+jsonwebtoken = "9.3.1"
+thiserror = "2.0.16"
+anyhow = "1.0.99"
+tower = "0.5.2"
+surrealdb = { path = "../../forks/surrealdb/crates/sdk", features = ["kv-surrealkv"] }
+bcrypt = "0.17.1"
+tracing = "0.1.41"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+reqwest = { version = "0.11", features = ["json"] }
+rand = "0.8.5"
+base64 = "0.22.1"
+futures = "0.3.31"
+sha2 = "0.10.8"
+regex = "1.5"
+
+[[bin]]
+path = "src/main.rs"
+name = "matryxd"

@@ -1,0 +1,26 @@
+Review surrealdb 3.0 livequery functionality
+./forks/surrealb 
+
+Review the project architecture:
+./packages/entity
+has all the spec compliant entities/domain objects
+
+./packages/surrealdb
+/Volumes/samsung_t9/maxtryx/packages/surrealdb/migrations/matryx.surql
+contains the surrealdb schema for matryx
+/Volumes/samsung_t9/maxtryx/packages/surrealdb/src/repository
+uses a repository pattern for all surrealdb access
+
+./packages/server
+contains the matryx homeserver 
+with all routes laid out in a sparse one file per route fashion
+
+./packages/client
+contains a livequery client for the homeserver
+with all routes laid out in a sparse one file per route fashion 
+
+CURRENT OBJECTIVE:
+
+implement:
+
+- /Volumes/samsung_t9/maxtryx/spec/server/*.md

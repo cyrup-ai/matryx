@@ -1,0 +1,24 @@
+pub mod backfill;
+pub mod event;
+pub mod event_auth;
+pub mod exchange_third_party_invite;
+pub mod get_missing_events;
+pub mod hierarchy;
+pub mod invite;
+pub mod make_join;
+pub mod make_knock;
+pub mod make_leave;
+pub mod media;
+pub mod openid;
+pub mod public_rooms;
+pub mod query;
+pub mod send;
+pub mod send_join;
+pub mod send_knock;
+pub mod send_leave;
+// pub mod send_to_device; // Removed - non-spec-compliant federation endpoint
+pub mod state;
+pub mod state_ids;
+pub mod threepid;
+pub mod user;
+pub mod version;
