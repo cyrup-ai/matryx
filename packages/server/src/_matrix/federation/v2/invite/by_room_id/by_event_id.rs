@@ -22,14 +22,6 @@ struct XMatrixAuth {
     signature: String,
 }
 
-/// V2 invite request body structure
-#[derive(Debug, Deserialize)]
-struct InviteV2Request {
-    event: Value,
-    invite_room_state: Option<Vec<StrippedStateEvent>>,
-    room_version: String,
-}
-
 /// Parse X-Matrix authentication header
 fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
     let auth_header = headers
@@ -90,7 +82,7 @@ pub async fn put(
     State(state): State<AppState>,
     Path((room_id, event_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(payload): Json<InviteV2Request>,
+    Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
     let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
@@ -122,7 +114,17 @@ pub async fn put(
         })?;
 
     // Extract event from v2 request structure
-    let event = &payload.event;
+    let event = payload.get("event").ok_or_else(|| {
+        warn!("Missing event in v2 request");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let room_version = payload.get("room_version").and_then(|v| v.as_str()).ok_or_else(|| {
+        warn!("Missing room_version in v2 request");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let invite_room_state = payload.get("invite_room_state");
 
     // Validate the event structure
     let sender = event.get("sender").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -195,21 +197,23 @@ pub async fn put(
             StatusCode::NOT_FOUND
         })?;
 
-    if room.room_version != payload.room_version {
+    if room.room_version != room_version {
         warn!(
             "Room version mismatch: room has {}, request has {}",
-            room.room_version, payload.room_version
+            room.room_version, room_version
         );
         return Ok(Json(json!({
             "errcode": "M_INCOMPATIBLE_ROOM_VERSION",
-            "error": format!("Room version {} not supported", payload.room_version),
+            "error": format!("Room version {} not supported", room_version),
             "room_version": room.room_version
         })));
     }
 
     // Check if user is already in the room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    if let Ok(Some(existing_membership)) = membership_repo.get_by_room_user(&room_id, state_key).await {
+    if let Ok(Some(existing_membership)) =
+        membership_repo.get_by_room_user(&room_id, state_key).await
+    {
         match existing_membership.membership {
             MembershipState::Join => {
                 warn!("User {} is already joined to room {}", state_key, room_id);
@@ -221,7 +225,7 @@ pub async fn put(
             MembershipState::Ban => {
                 warn!("User {} is banned from room {}", state_key, room_id);
                 return Ok(Json(json!({
-                    "errcode": "M_FORBIDDEN", 
+                    "errcode": "M_FORBIDDEN",
                     "error": "User is banned from the room"
                 })));
             },
@@ -327,11 +331,11 @@ pub async fn put(
 
     // Build response with signed event and optional room state
     let mut response_event = serde_json::to_value(&stored_event).unwrap_or(json!({}));
-    
+
     // Add invite_room_state to unsigned section if provided
-    if let Some(room_state) = payload.invite_room_state {
+    if let Some(room_state) = invite_room_state {
         if let Some(unsigned) = response_event.get_mut("unsigned") {
-            unsigned["invite_room_state"] = serde_json::to_value(room_state).unwrap_or(json!([]));
+            unsigned["invite_room_state"] = room_state.clone();
         } else {
             response_event["unsigned"] = json!({
                 "invite_room_state": room_state
@@ -344,7 +348,10 @@ pub async fn put(
         "event": response_event
     });
 
-    info!("Successfully processed invite event {} for user {} in room {} (v2)", event_id, state_key, room_id);
+    info!(
+        "Successfully processed invite event {} for user {} in room {} (v2)",
+        event_id, state_key, room_id
+    );
 
     Ok(Json(response))
 }
@@ -357,9 +364,7 @@ async fn check_invite_authorization(
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Get sender's membership and power level
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let sender_membership = membership_repo
-        .get_by_room_user(&room.room_id, sender)
-        .await?;
+    let sender_membership = membership_repo.get_by_room_user(&room.room_id, sender).await?;
 
     // Sender must be in the room to invite others
     match sender_membership {
@@ -403,9 +408,7 @@ async fn check_invite_power_level(
     match power_levels {
         Some(pl) => {
             let required_level = pl.invite.unwrap_or(0); // Default invite level is 0
-            let user_level = pl.users
-                .and_then(|users| users.get(user_id).copied())
-                .unwrap_or(0); // Default user level is 0
+            let user_level = pl.users.and_then(|users| users.get(user_id).copied()).unwrap_or(0); // Default user level is 0
 
             Ok(user_level >= required_level)
         },

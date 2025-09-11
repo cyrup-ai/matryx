@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::MatrixSessionService;
 use crate::federation::authorization::{AuthorizationEngine, AuthorizationError};
+use crate::federation::event_signing::EventSigningEngine;
 use crate::state::AppState;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::error::RepositoryError;
@@ -72,6 +73,7 @@ pub struct PduValidator {
     event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
     authorization_engine: AuthorizationEngine,
+    event_signing_engine: EventSigningEngine,
     db: surrealdb::Surreal<surrealdb::engine::any::Any>,
     homeserver_name: String,
 }
@@ -85,12 +87,15 @@ impl PduValidator {
         homeserver_name: String,
     ) -> Self {
         let authorization_engine = AuthorizationEngine::new(event_repo.clone(), room_repo.clone());
+        let event_signing_engine =
+            EventSigningEngine::new(session_service.clone(), db.clone(), homeserver_name.clone());
 
         Self {
             session_service,
             event_repo,
             room_repo,
             authorization_engine,
+            event_signing_engine,
             db,
             homeserver_name,
         }
@@ -128,13 +133,13 @@ impl PduValidator {
             return Ok(ValidationResult::Valid(event));
         }
 
-        // Step 2: Signature Verification
-        self.validate_signatures(&event, origin_server).await?;
-        debug!("Step 2 passed: Signature verification for event {}", event.event_id);
-
-        // Step 3: Hash Verification
-        self.validate_hashes(&event).await?;
-        debug!("Step 3 passed: Hash verification for event {}", event.event_id);
+        // Step 2: Signature Verification using EventSigningEngine
+        let expected_servers = vec![origin_server.to_string()];
+        self.event_signing_engine
+            .validate_event_crypto(&event, &expected_servers)
+            .await
+            .map_err(|e| PduValidationError::SignatureError(format!("{:?}", e)))?;
+        debug!("Step 2&3 passed: Crypto validation for event {}", event.event_id);
 
         // Step 4: Auth Events Validation
         self.validate_auth_events(&event).await?;
@@ -338,102 +343,7 @@ impl PduValidator {
         }
     }
 
-    /// Step 2: Validate Ed25519 signatures using existing crypto system
-    async fn validate_signatures(
-        &self,
-        event: &Event,
-        origin_server: &str,
-    ) -> Result<(), PduValidationError> {
-        let signatures_value = event
-            .signatures
-            .as_ref()
-            .map(|s| serde_json::to_value(s).unwrap_or_default())
-            .unwrap_or_default();
-        let signatures_obj = signatures_value.as_object().ok_or_else(|| {
-            PduValidationError::SignatureError("Signatures must be an object".to_string())
-        })?;
-
-        // Verify signature from the origin server
-        let server_signatures = signatures_obj
-            .get(origin_server)
-            .ok_or_else(|| {
-                PduValidationError::SignatureError(format!(
-                    "No signature found from origin server {}",
-                    origin_server
-                ))
-            })?
-            .as_object()
-            .ok_or_else(|| {
-                PduValidationError::SignatureError(
-                    "Server signatures must be an object".to_string(),
-                )
-            })?;
-
-        for (key_id, signature) in server_signatures {
-            let signature_str = signature.as_str().ok_or_else(|| {
-                PduValidationError::SignatureError("Signature must be a string".to_string())
-            })?;
-
-            // Create canonical JSON for signature verification
-            let canonical_json = self.create_canonical_json_for_signing(event)?;
-
-            // Get public key for the server and key ID
-            let public_key = self.get_server_public_key(origin_server, key_id).await?;
-
-            // Use existing Ed25519 verification from session service
-            self.session_service
-                .verify_ed25519_signature(signature_str, &canonical_json, &public_key)
-                .map_err(|e| {
-                    PduValidationError::SignatureError(format!(
-                        "Ed25519 signature verification failed: {:?}",
-                        e
-                    ))
-                })?;
-
-            debug!("Verified signature from {} with key {}", origin_server, key_id);
-        }
-
-        Ok(())
-    }
-
-    /// Step 3: Validate SHA256 content hashes using existing implementation
-    async fn validate_hashes(&self, event: &Event) -> Result<(), PduValidationError> {
-        let hashes_value = event
-            .hashes
-            .as_ref()
-            .map(|h| serde_json::to_value(h).unwrap_or_default())
-            .unwrap_or_default();
-        let hashes_obj = hashes_value.as_object().ok_or_else(|| {
-            PduValidationError::InvalidFormat("Hashes must be an object".to_string())
-        })?;
-
-        // Verify SHA256 hash
-        if let Some(sha256_hash) = hashes_obj.get("sha256") {
-            let expected_hash = sha256_hash.as_str().ok_or_else(|| {
-                PduValidationError::InvalidFormat("SHA256 hash must be a string".to_string())
-            })?;
-
-            let calculated_hashes = self.calculate_content_hashes(event)?;
-            let calculated_hash =
-                calculated_hashes.get("sha256").and_then(|v| v.as_str()).ok_or_else(|| {
-                    PduValidationError::HashMismatch {
-                        expected: expected_hash.to_string(),
-                        actual: "hash calculation failed".to_string(),
-                    }
-                })?;
-
-            if expected_hash != calculated_hash {
-                return Err(PduValidationError::HashMismatch {
-                    expected: expected_hash.to_string(),
-                    actual: calculated_hash.to_string(),
-                });
-            }
-
-            debug!("SHA256 hash verification passed for event {}", event.event_id);
-        }
-
-        Ok(())
-    }
+    /// Replaced by EventSigningEngine.validate_event_crypto
 
     /// Step 6: Validate against current room state (soft-fail check)
     async fn validate_current_state(&self, event: &Event) -> Result<(), PduValidationError> {
@@ -467,59 +377,7 @@ impl PduValidator {
         Ok(())
     }
 
-    /// Create canonical JSON representation for signature verification (Matrix compliant)
-    fn create_canonical_json_for_signing(
-        &self,
-        event: &Event,
-    ) -> Result<String, PduValidationError> {
-        let canonical_event = json!({
-            "auth_events": event.auth_events,
-            "content": event.content,
-            "depth": event.depth,
-            "event_type": event.event_type,
-            "hashes": event.hashes,
-            "prev_events": event.prev_events,
-            "room_id": event.room_id,
-            "sender": event.sender,
-            "state_key": event.state_key,
-            "origin_server_ts": event.origin_server_ts
-        });
-
-        // Use Matrix canonical JSON (sorted keys, no whitespace)
-        let canonical_json = self.to_canonical_json(&canonical_event)?;
-        Ok(canonical_json)
-    }
-
-    /// Calculate SHA256 content hashes using existing Matrix implementation
-    fn calculate_content_hashes(&self, event: &Event) -> Result<Value, PduValidationError> {
-        // Create canonical JSON for content hashing per Matrix specification
-        let canonical_content = json!({
-            "auth_events": event.auth_events,
-            "content": event.content,
-            "depth": event.depth,
-            "event_type": event.event_type,
-            "prev_events": event.prev_events,
-            "room_id": event.room_id,
-            "sender": event.sender,
-            "state_key": event.state_key,
-            "origin_server_ts": event.origin_server_ts
-        });
-
-        // Convert to canonical JSON string (sorted keys, no whitespace)
-        let canonical_json = self.to_canonical_json(&canonical_content)?;
-
-        // Calculate SHA256 hash
-        let mut hasher = Sha256::new();
-        hasher.update(canonical_json.as_bytes());
-        let hash = hasher.finalize();
-
-        // Encode as base64
-        let hash_b64 = general_purpose::STANDARD.encode(&hash);
-
-        Ok(json!({
-            "sha256": hash_b64
-        }))
-    }
+    /// Replaced by EventSigningEngine.calculate_content_hash and related methods
 
     /// Get public key for server (production implementation needed)
     async fn get_server_public_key(

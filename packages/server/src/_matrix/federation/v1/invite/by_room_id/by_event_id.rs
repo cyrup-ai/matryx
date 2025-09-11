@@ -76,7 +76,7 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
 
 /// PUT /_matrix/federation/v1/invite/{roomId}/{eventId}
 ///
-/// Invites a remote user to a room. Once the event has been signed by both the inviting 
+/// Invites a remote user to a room. Once the event has been signed by both the inviting
 /// homeserver and the invited homeserver, it can be sent to all of the servers in the room.
 pub async fn put(
     State(state): State<AppState>,
@@ -186,7 +186,9 @@ pub async fn put(
 
     // Check if user is already in the room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    if let Ok(Some(existing_membership)) = membership_repo.get_by_room_user(&room_id, state_key).await {
+    if let Ok(Some(existing_membership)) =
+        membership_repo.get_by_room_user(&room_id, state_key).await
+    {
         match existing_membership.membership {
             MembershipState::Join => {
                 warn!("User {} is already joined to room {}", state_key, room_id);
@@ -198,7 +200,7 @@ pub async fn put(
             MembershipState::Ban => {
                 warn!("User {} is banned from room {}", state_key, room_id);
                 return Ok(Json(json!({
-                    "errcode": "M_FORBIDDEN", 
+                    "errcode": "M_FORBIDDEN",
                     "error": "User is banned from the room"
                 })));
             },
@@ -317,7 +319,10 @@ pub async fn put(
         }
     ]);
 
-    info!("Successfully processed invite event {} for user {} in room {}", event_id, state_key, room_id);
+    info!(
+        "Successfully processed invite event {} for user {} in room {}",
+        event_id, state_key, room_id
+    );
 
     Ok(Json(response))
 }
@@ -330,9 +335,7 @@ async fn check_invite_authorization(
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Get sender's membership and power level
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let sender_membership = membership_repo
-        .get_by_room_user(&room.room_id, sender)
-        .await?;
+    let sender_membership = membership_repo.get_by_room_user(&room.room_id, sender).await?;
 
     // Sender must be in the room to invite others
     match sender_membership {
@@ -376,9 +379,7 @@ async fn check_invite_power_level(
     match power_levels {
         Some(pl) => {
             let required_level = pl.invite.unwrap_or(0); // Default invite level is 0
-            let user_level = pl.users
-                .and_then(|users| users.get(user_id).copied())
-                .unwrap_or(0); // Default user level is 0
+            let user_level = pl.users.and_then(|users| users.get(user_id).copied()).unwrap_or(0); // Default user level is 0
 
             Ok(user_level >= required_level)
         },
