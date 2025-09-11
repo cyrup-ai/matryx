@@ -1,6 +1,6 @@
 use crate::repository::error::RepositoryError;
 use matryx_entity::types::Session;
-use surrealdb::{engine::any::Any, Surreal};
+use surrealdb::{Surreal, engine::any::Any};
 
 #[derive(Clone)]
 pub struct SessionRepository {
@@ -29,8 +29,12 @@ impl SessionRepository {
         Ok(session)
     }
 
-    pub async fn get_by_access_token(&self, access_token: &str) -> Result<Option<Session>, RepositoryError> {
-        let query = "SELECT * FROM session WHERE access_token = $token AND is_active = true LIMIT 1";
+    pub async fn get_by_access_token(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<Session>, RepositoryError> {
+        let query =
+            "SELECT * FROM session WHERE access_token = $token AND is_active = true LIMIT 1";
         let mut result = self.db.query(query).bind(("token", access_token.to_string())).await?;
         let sessions: Vec<Session> = result.take(0)?;
         Ok(sessions.into_iter().next())

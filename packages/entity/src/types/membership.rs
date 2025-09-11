@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use crate::types::MembershipState;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Room membership record for efficient room/user relationship tracking
 /// This represents the current membership state between a user and room

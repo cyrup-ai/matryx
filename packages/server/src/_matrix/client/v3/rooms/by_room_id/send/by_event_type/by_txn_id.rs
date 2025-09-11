@@ -168,16 +168,16 @@ pub async fn put(
     // Calculate content hashes according to Matrix specification
     let hashes_value = crate::utils::matrix_events::calculate_content_hashes(&event)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let hashes: HashMap<String, String> = serde_json::from_value(hashes_value)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hashes: HashMap<String, String> =
+        serde_json::from_value(hashes_value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     event.hashes = Some(hashes);
 
     // Sign event with server's Ed25519 private key
     let signatures_value = crate::utils::matrix_events::sign_event(&state, &event)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let signatures: HashMap<String, HashMap<String, String>> = serde_json::from_value(signatures_value)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let signatures: HashMap<String, HashMap<String, String>> =
+        serde_json::from_value(signatures_value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     event.signatures = Some(signatures);
 
     // Store event in database
@@ -254,7 +254,7 @@ async fn get_room_power_levels(
     if let Some(event) = power_levels.into_iter().next() {
         match event.content {
             EventContent::Unknown(value) => Ok(value),
-            _ => Ok(serde_json::json!({}))
+            _ => Ok(serde_json::json!({})),
         }
     } else {
         // Default power levels

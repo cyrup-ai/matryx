@@ -1,6 +1,6 @@
 use crate::repository::error::RepositoryError;
 use matryx_entity::types::Room;
-use surrealdb::{engine::any::Any, Surreal};
+use surrealdb::{Surreal, engine::any::Any};
 
 #[derive(Clone)]
 pub struct RoomRepository {
@@ -14,11 +14,8 @@ impl RoomRepository {
 
     pub async fn create(&self, room: &Room) -> Result<Room, RepositoryError> {
         let room_clone = room.clone();
-        let created: Option<Room> = self
-            .db
-            .create(("room", &room.room_id))
-            .content(room_clone)
-            .await?;
+        let created: Option<Room> =
+            self.db.create(("room", &room.room_id)).content(room_clone).await?;
         created.ok_or_else(|| {
             RepositoryError::Database(surrealdb::Error::msg("Failed to create room"))
         })
@@ -31,11 +28,8 @@ impl RoomRepository {
 
     pub async fn update(&self, room: &Room) -> Result<Room, RepositoryError> {
         let room_clone = room.clone();
-        let updated: Option<Room> = self
-            .db
-            .update(("room", &room.room_id))
-            .content(room_clone)
-            .await?;
+        let updated: Option<Room> =
+            self.db.update(("room", &room.room_id)).content(room_clone).await?;
         updated.ok_or_else(|| {
             RepositoryError::Database(surrealdb::Error::msg("Failed to update room"))
         })
@@ -61,7 +55,11 @@ impl RoomRepository {
         Ok(rooms)
     }
 
-    pub async fn is_room_member(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+    pub async fn is_room_member(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<bool, RepositoryError> {
         let query = "
             SELECT count() FROM membership 
             WHERE room_id = $room_id 
@@ -69,7 +67,8 @@ impl RoomRepository {
             AND membership IN ['join', 'invite']
             GROUP ALL
         ";
-        let mut result = self.db
+        let mut result = self
+            .db
             .query(query)
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))

@@ -144,12 +144,14 @@ pub async fn post(
         predecessor: None,
         alt_aliases: None,
         state_events_count: Some(0),
-        federate: Some(request
-            .creation_content
-            .as_ref()
-            .and_then(|c| c.get("m.federate"))
-            .and_then(|f| f.as_bool())
-            .unwrap_or(true)),
+        federate: Some(
+            request
+                .creation_content
+                .as_ref()
+                .and_then(|c| c.get("m.federate"))
+                .and_then(|f| f.as_bool())
+                .unwrap_or(true),
+        ),
     };
 
     // Store room
@@ -207,7 +209,11 @@ pub async fn post(
         &state,
         &room_id,
         &user_id,
-        &room.power_levels.as_ref().map(|pl| serde_json::to_value(pl).unwrap_or_default()).unwrap_or_default(),
+        &room
+            .power_levels
+            .as_ref()
+            .map(|pl| serde_json::to_value(pl).unwrap_or_default())
+            .unwrap_or_default(),
         event_depth,
         &prev_events,
         &[create_event_id.clone(), join_event_id.clone()],

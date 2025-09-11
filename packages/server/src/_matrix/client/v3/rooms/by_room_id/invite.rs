@@ -214,7 +214,11 @@ async fn get_user_membership(
 
 async fn can_user_invite(state: &AppState, room: &Room, user_id: &str) -> Result<bool, StatusCode> {
     // Get the power levels from the room
-    let power_levels_value = room.power_levels.as_ref().map(|pl| serde_json::to_value(pl).unwrap_or_default()).unwrap_or_default();
+    let power_levels_value = room
+        .power_levels
+        .as_ref()
+        .map(|pl| serde_json::to_value(pl).unwrap_or_default())
+        .unwrap_or_default();
     let power_levels = match power_levels_value.as_object() {
         Some(levels) => levels,
         None => {
@@ -349,7 +353,8 @@ async fn create_membership_event(
 
     // Sign event with server's Ed25519 private key
     let signatures_value = sign_event(state, &event).await?;
-    let signatures: HashMap<String, HashMap<String, String>> = serde_json::from_value(signatures_value)?;
+    let signatures: HashMap<String, HashMap<String, String>> =
+        serde_json::from_value(signatures_value)?;
     event.signatures = Some(signatures);
 
     // Store the event

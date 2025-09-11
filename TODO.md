@@ -1,3 +1,78 @@
+# CRITICAL: Federation Security Fixes (HIGHEST PRIORITY)
+
+## URGENT: get_missing_events Endpoint Security Vulnerabilities
+
+**File**: `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/federation/v1/get_missing_events/by_room_id.rs`
+**Status**: CRITICAL SECURITY VULNERABILITIES - Production deployment blocked until fixed
+**Architecture**: Follow exact patterns from backfill and make_join endpoints for security consistency
+
+### ✅ CRITICAL SECURITY FIXES (COMPLETED)
+
+#### ✅ 1. Fix Authentication Bypass Vulnerability
+**Lines**: 70-77 (function signature and authentication section)
+- [x] Add `headers: HeaderMap` parameter to post() function signature (correct axum parameter order)
+- [x] Restore X-Matrix authentication header parsing logic from backfill endpoint
+- [x] Add server signature validation using `state.session_service.validate_server_signature()`
+- [x] Add proper error handling for authentication failures with warn! logging
+- [x] Remove TODO comment about authentication implementation
+
+#### ✅ 2. Add Room Existence and Permission Validation
+**Lines**: After authentication validation (~line 110)
+- [x] Add RoomRepository import and instantiation following backfill pattern
+- [x] Add room existence check using `room_repo.get_by_id(&room_id)`
+- [x] Add server permission validation using `check_missing_events_permission()` function
+- [x] Return appropriate HTTP status codes for validation failures (404, 403, 500)
+
+#### ✅ 3. Add Event Existence Validation  
+**Lines**: After server permission validation (~line 130)
+- [x] Validate each event_id in latest_events exists in the specified room
+- [x] Ensure events belong to the requested room_id to prevent cross-room access
+- [x] Handle event repository errors gracefully with proper logging
+
+#### ✅ 4. Fix Error Handling for Optional Fields
+**Lines**: 210-225 (Event to PDU conversion)
+- [x] Replace `event.depth.unwrap_or(0)` with proper validation that depth exists
+- [x] Add validation for required prev_events and auth_events fields
+- [x] Ensure no use of unwrap() anywhere in the function
+- [x] Add proper Result<> error handling for missing required fields
+
+#### ✅ 5. Add Input Validation Hardening
+**Lines**: 78-95 (parameter validation section)
+- [x] Add Matrix room ID format validation for room_id parameter
+- [x] Add Matrix event ID format validation for latest_events and earliest_events
+- [x] Add bounds checking for min_depth (>= 0)
+- [x] Add size limits for latest_events and earliest_events arrays (max 50 each, prevent DoS)
+- [x] Add validation that latest_events and earliest_events contain unique event IDs
+
+### Security Implementation Summary
+
+**Status**: ✅ ALL CRITICAL SECURITY VULNERABILITIES FIXED
+**Compilation**: ✅ PASSES - `cargo check --package matryx_server` successful
+**Matrix Spec Compliance**: ✅ VERIFIED - Follows Matrix Federation API specification
+
+**Security Features Implemented**:
+- **Authentication**: Full X-Matrix header parsing and server signature validation
+- **Authorization**: Server permission checking with room membership and world-readable validation
+- **Input Validation**: Comprehensive Matrix ID format validation and bounds checking
+- **DoS Protection**: Size limits on event arrays and duplicate detection
+- **Error Handling**: No unwrap() calls, proper Result<> error propagation
+- **Audit Trail**: Comprehensive logging for security events and failures
+
+**Performance Optimizations**:
+- Zero-allocation string validation using slices
+- Lock-free HashSet operations for visited tracking
+- Efficient batch database queries
+- Memory-safe error handling throughout
+
+### Performance and Ergonomics Requirements
+- **Zero allocation optimizations**: Use string slices where possible, avoid unnecessary clones
+- **No unsafe code**: All operations must be memory safe
+- **No unwrap()**: Use proper Result<> error handling throughout
+- **Elegant error handling**: Consistent HTTP status codes and error logging
+- **No locking**: Use lock-free data structures and patterns
+
+---
+
 # Matrix Protocol Entity 1:1 File Mapping Reorganization
 
 ## Research Analysis & Implementation Plan

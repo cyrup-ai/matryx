@@ -1,6 +1,6 @@
 use crate::repository::error::RepositoryError;
 use matryx_entity::types::User;
-use surrealdb::{engine::any::Any, Surreal};
+use surrealdb::{Surreal, engine::any::Any};
 
 #[derive(Clone)]
 pub struct UserRepository {
@@ -14,11 +14,8 @@ impl UserRepository {
 
     pub async fn create(&self, user: &User) -> Result<User, RepositoryError> {
         let user_clone = user.clone();
-        let created: Option<User> = self
-            .db
-            .create(("user", &user.user_id))
-            .content(user_clone)
-            .await?;
+        let created: Option<User> =
+            self.db.create(("user", &user.user_id)).content(user_clone).await?;
         created.ok_or_else(|| {
             RepositoryError::Database(surrealdb::Error::msg("Failed to create user"))
         })
@@ -31,11 +28,8 @@ impl UserRepository {
 
     pub async fn update(&self, user: &User) -> Result<User, RepositoryError> {
         let user_clone = user.clone();
-        let updated: Option<User> = self
-            .db
-            .update(("user", &user.user_id))
-            .content(user_clone)
-            .await?;
+        let updated: Option<User> =
+            self.db.update(("user", &user.user_id)).content(user_clone).await?;
         updated.ok_or_else(|| {
             RepositoryError::Database(surrealdb::Error::msg("Failed to update user"))
         })
@@ -46,9 +40,14 @@ impl UserRepository {
         Ok(())
     }
 
-    pub async fn authenticate(&self, user_id: &str, password_hash: &str) -> Result<Option<User>, RepositoryError> {
+    pub async fn authenticate(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> Result<Option<User>, RepositoryError> {
         let query = "SELECT * FROM user WHERE user_id = $user_id AND password_hash = $password_hash AND is_active = true LIMIT 1";
-        let mut result = self.db
+        let mut result = self
+            .db
             .query(query)
             .bind(("user_id", user_id.to_string()))
             .bind(("password_hash", password_hash.to_string()))

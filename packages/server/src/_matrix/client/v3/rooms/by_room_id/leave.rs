@@ -289,9 +289,10 @@ async fn create_membership_event(
     let hashes: HashMap<String, String> = serde_json::from_value(hashes_value)?;
     event.hashes = Some(hashes);
 
-    // Sign event with server's Ed25519 private key  
+    // Sign event with server's Ed25519 private key
     let signatures_value = crate::utils::matrix_events::sign_event(state, &event).await?;
-    let signatures: HashMap<String, HashMap<String, String>> = serde_json::from_value(signatures_value)?;
+    let signatures: HashMap<String, HashMap<String, String>> =
+        serde_json::from_value(signatures_value)?;
     event.signatures = Some(signatures);
 
     // Store the event

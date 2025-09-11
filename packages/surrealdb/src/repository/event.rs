@@ -62,6 +62,23 @@ impl<C: Connection> EventRepository<C> {
         Ok(events)
     }
 
+    /// Get the room creation event (m.room.create) for a specific room
+    /// This is essential for determining room version and authorization rules
+    pub async fn get_room_create_event(
+        &self,
+        room_id: &str,
+    ) -> Result<Option<Event>, RepositoryError> {
+        let room_id_owned = room_id.to_string();
+        let events: Vec<Event> = self
+            .db
+            .query("SELECT * FROM event WHERE room_id = $room_id AND event_type = 'm.room.create' AND state_key = '' LIMIT 1")
+            .bind(("room_id", room_id_owned))
+            .await?
+            .take(0)?;
+
+        Ok(events.into_iter().next())
+    }
+
     /// Subscribe to real-time room events using SurrealDB LiveQuery
     /// Returns a stream of notifications for new events in the specified room
     pub async fn subscribe_room_events(

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::MatrixSessionService;
+use crate::federation::authorization::{AuthorizationEngine, AuthorizationError};
 use crate::state::AppState;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::error::RepositoryError;
@@ -32,6 +33,9 @@ pub enum PduValidationError {
 
     #[error("Authorization failed: {0}")]
     AuthorizationError(String),
+
+    #[error("Matrix authorization error: {0}")]
+    MatrixAuthorizationError(#[from] AuthorizationError),
 
     #[error("State validation failed: {0}")]
     StateError(String),
@@ -67,6 +71,7 @@ pub struct PduValidator {
     session_service: Arc<MatrixSessionService>,
     event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
+    authorization_engine: AuthorizationEngine,
     db: surrealdb::Surreal<surrealdb::engine::any::Any>,
     homeserver_name: String,
 }
@@ -79,10 +84,13 @@ impl PduValidator {
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
         homeserver_name: String,
     ) -> Self {
+        let authorization_engine = AuthorizationEngine::new(event_repo.clone(), room_repo.clone());
+
         Self {
             session_service,
             event_repo,
             room_repo,
+            authorization_engine,
             db,
             homeserver_name,
         }
@@ -132,16 +140,19 @@ impl PduValidator {
         self.validate_auth_events(&event).await?;
         debug!("Step 4 passed: Auth events validation for event {}", event.event_id);
 
-        // Step 5: State Before Validation
-        match self.validate_state_before(&event).await {
+        // Step 5: Matrix Authorization Rules Validation (state before)
+        match self.validate_matrix_authorization(&event).await {
             Ok(_) => {
-                debug!("Step 5 passed: State before validation for event {}", event.event_id);
+                debug!(
+                    "Step 5 passed: Matrix authorization validation for event {}",
+                    event.event_id
+                );
             },
             Err(e) => {
                 warn!("Step 5 failed for event {}: {}", event.event_id, e);
                 return Ok(ValidationResult::Rejected {
                     event_id: event.event_id.clone(),
-                    reason: format!("State before validation failed: {}", e),
+                    reason: format!("Matrix authorization failed: {}", e),
                 });
             },
         }
@@ -209,6 +220,75 @@ impl PduValidator {
         Ok(())
     }
 
+    /// Step 5: Comprehensive Matrix authorization validation using authorization engine
+    async fn validate_matrix_authorization(&self, event: &Event) -> Result<(), PduValidationError> {
+        // Load auth events for the authorization engine
+        let mut auth_events = Vec::new();
+
+        if let Some(auth_event_ids) = &event.auth_events {
+            for auth_event_id in auth_event_ids {
+                match self.event_repo.get_by_id(auth_event_id).await {
+                    Ok(Some(auth_event)) => {
+                        auth_events.push(auth_event);
+                    },
+                    Ok(None) => {
+                        if !event.outlier.unwrap_or(false) {
+                            return Err(PduValidationError::AuthorizationError(format!(
+                                "Auth event {} not found for authorization validation",
+                                auth_event_id
+                            )));
+                        }
+                    },
+                    Err(e) => {
+                        error!("Database error loading auth event {}: {}", auth_event_id, e);
+                        return Err(PduValidationError::DatabaseError(e));
+                    },
+                }
+            }
+        }
+
+        // Get room version for authorization rules
+        let room_version = self.get_room_version(&event.room_id).await?;
+
+        // Run comprehensive Matrix authorization validation
+        self.authorization_engine
+            .authorize_event(event, &auth_events, &room_version)
+            .await
+            .map_err(|e| {
+                debug!("Authorization failed for event {}: {}", event.event_id, e);
+                PduValidationError::MatrixAuthorizationError(e)
+            })?;
+
+        debug!("Comprehensive Matrix authorization passed for event {}", event.event_id);
+        Ok(())
+    }
+
+    /// Get room version for authorization validation
+    async fn get_room_version(&self, room_id: &str) -> Result<String, PduValidationError> {
+        // Try to get room version from the room create event
+        match self.event_repo.get_room_create_event(room_id).await {
+            Ok(Some(create_event)) => {
+                let room_version = create_event
+                    .content
+                    .get("room_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1"); // Default to room version 1 if not specified
+
+                debug!("Found room version {} for room {}", room_version, room_id);
+                Ok(room_version.to_string())
+            },
+            Ok(None) => {
+                // Room create event not found - use default room version
+                warn!("Room create event not found for room {}, using default version 1", room_id);
+                Ok("1".to_string())
+            },
+            Err(e) => {
+                error!("Database error fetching room create event for {}: {}", room_id, e);
+                Err(PduValidationError::DatabaseError(e))
+            },
+        }
+    }
+
     /// Step 5: Basic state validation
     async fn validate_state_before(&self, event: &Event) -> Result<(), PduValidationError> {
         // Basic validation checks
@@ -264,7 +344,11 @@ impl PduValidator {
         event: &Event,
         origin_server: &str,
     ) -> Result<(), PduValidationError> {
-        let signatures_value = event.signatures.as_ref().map(|s| serde_json::to_value(s).unwrap_or_default()).unwrap_or_default();
+        let signatures_value = event
+            .signatures
+            .as_ref()
+            .map(|s| serde_json::to_value(s).unwrap_or_default())
+            .unwrap_or_default();
         let signatures_obj = signatures_value.as_object().ok_or_else(|| {
             PduValidationError::SignatureError("Signatures must be an object".to_string())
         })?;
@@ -314,7 +398,11 @@ impl PduValidator {
 
     /// Step 3: Validate SHA256 content hashes using existing implementation
     async fn validate_hashes(&self, event: &Event) -> Result<(), PduValidationError> {
-        let hashes_value = event.hashes.as_ref().map(|h| serde_json::to_value(h).unwrap_or_default()).unwrap_or_default();
+        let hashes_value = event
+            .hashes
+            .as_ref()
+            .map(|h| serde_json::to_value(h).unwrap_or_default())
+            .unwrap_or_default();
         let hashes_obj = hashes_value.as_object().ok_or_else(|| {
             PduValidationError::InvalidFormat("Hashes must be an object".to_string())
         })?;
@@ -359,7 +447,9 @@ impl PduValidator {
         }
 
         // Validate prev_events exist and are reasonable
-        if event.prev_events.as_ref().map_or(true, |pe| pe.is_empty()) && event.depth.unwrap_or(0) > 0 {
+        if event.prev_events.as_ref().map_or(true, |pe| pe.is_empty()) &&
+            event.depth.unwrap_or(0) > 0
+        {
             return Err(PduValidationError::StateError(
                 "Non-genesis events must have prev_events".to_string(),
             ));

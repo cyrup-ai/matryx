@@ -9,8 +9,8 @@ use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -442,10 +442,11 @@ async fn create_membership_event(
         error!("Failed to sign event: {}", e);
         e
     })?;
-    let signatures: HashMap<String, HashMap<String, String>> = serde_json::from_value(signatures_value).map_err(|e| {
-        error!("Failed to convert signatures: {}", e);
-        e
-    })?;
+    let signatures: HashMap<String, HashMap<String, String>> =
+        serde_json::from_value(signatures_value).map_err(|e| {
+            error!("Failed to convert signatures: {}", e);
+            e
+        })?;
     event.signatures = Some(signatures);
 
     // Store the event

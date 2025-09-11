@@ -312,12 +312,21 @@ async fn sign_join_event(
         event.signatures = serde_json::from_value(json!({})).ok();
     }
 
-    let signatures_value = event.signatures.as_ref().map(|s| serde_json::to_value(s).unwrap_or_default()).unwrap_or_default();
-    let mut signatures_map: std::collections::HashMap<String, std::collections::HashMap<String, String>> = serde_json::from_value(signatures_value).unwrap_or_default();
+    let signatures_value = event
+        .signatures
+        .as_ref()
+        .map(|s| serde_json::to_value(s).unwrap_or_default())
+        .unwrap_or_default();
+    let mut signatures_map: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = serde_json::from_value(signatures_value).unwrap_or_default();
 
     signatures_map.insert(
         state.homeserver_name.clone(),
-        [(format!("ed25519:{}", signing_key.key_id), signature)].into_iter().collect(),
+        [(format!("ed25519:{}", signing_key.key_id), signature)]
+            .into_iter()
+            .collect(),
     );
 
     event.signatures = serde_json::from_value(serde_json::to_value(signatures_map)?).ok();

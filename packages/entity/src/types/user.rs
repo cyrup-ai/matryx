@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Matrix user entity
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

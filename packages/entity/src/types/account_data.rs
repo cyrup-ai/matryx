@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Matrix account data entity as defined in the Matrix specification
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,7 +26,11 @@ pub struct AccountData {
 
 impl AccountData {
     /// Create new global account data
-    pub fn new_global(user_id: String, account_data_type: String, content: serde_json::Value) -> Self {
+    pub fn new_global(
+        user_id: String,
+        account_data_type: String,
+        content: serde_json::Value,
+    ) -> Self {
         let now = Utc::now();
         Self {
             user_id,
@@ -39,7 +43,12 @@ impl AccountData {
     }
 
     /// Create new room-specific account data
-    pub fn new_room(user_id: String, room_id: String, account_data_type: String, content: serde_json::Value) -> Self {
+    pub fn new_room(
+        user_id: String,
+        room_id: String,
+        account_data_type: String,
+        content: serde_json::Value,
+    ) -> Self {
         let now = Utc::now();
         Self {
             user_id,

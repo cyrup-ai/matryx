@@ -53,20 +53,34 @@ pub struct NotificationPowerLevels {
     pub room: i64,
 }
 
-fn default_users_default() -> i64 { 0 }
-fn default_events_default() -> i64 { 0 }
-fn default_ban() -> i64 { 50 }
-fn default_kick() -> i64 { 50 }
-fn default_redact() -> i64 { 50 }
-fn default_invite() -> i64 { 50 }
-fn default_state_default() -> i64 { 50 }
-fn default_room() -> i64 { 50 }
+fn default_users_default() -> i64 {
+    0
+}
+fn default_events_default() -> i64 {
+    0
+}
+fn default_ban() -> i64 {
+    50
+}
+fn default_kick() -> i64 {
+    50
+}
+fn default_redact() -> i64 {
+    50
+}
+fn default_invite() -> i64 {
+    50
+}
+fn default_state_default() -> i64 {
+    50
+}
+fn default_room() -> i64 {
+    50
+}
 
 impl Default for NotificationPowerLevels {
     fn default() -> Self {
-        Self {
-            room: default_room(),
-        }
+        Self { room: default_room() }
     }
 }
 
