@@ -319,6 +319,16 @@ pub async fn put(
                             })?;
                     }
                 },
+                "m.direct_to_device" => {
+                    if let Some(content) = edu.get("content") {
+                        process_direct_to_device_edu(&state, &x_matrix_auth.origin, content)
+                            .await
+                            .map_err(|e| {
+                                warn!("Failed to process direct to device EDU: {}", e);
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            })?;
+                    }
+                },
                 _ => {
                     debug!("Unknown EDU type: {}", edu_type);
                 },
@@ -431,6 +441,16 @@ async fn cache_transaction_result(
 ///
 /// Handles m.typing ephemeral events that indicate users typing in rooms.
 /// Updates the typing_events table and triggers real-time notifications.
+/// 
+/// Matrix spec format:
+/// {
+///   "content": {
+///     "room_id": "!room:server.com",
+///     "user_id": "@user:server.com", 
+///     "typing": true
+///   },
+///   "edu_type": "m.typing"
+/// }
 async fn process_typing_edu(
     state: &AppState,
     origin_server: &str,
@@ -441,56 +461,113 @@ async fn process_typing_edu(
         .and_then(|v| v.as_str())
         .ok_or("Missing room_id in typing EDU")?;
 
-    let user_ids = content
-        .get("user_ids")
-        .and_then(|v| v.as_array())
-        .ok_or("Missing or invalid user_ids in typing EDU")?;
+    let user_id = content
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing user_id in typing EDU")?;
 
-    let timeout = content.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30000); // Default 30 seconds
+    let typing = content
+        .get("typing")
+        .and_then(|v| v.as_bool())
+        .ok_or("Missing or invalid typing boolean in typing EDU")?;
 
-    // Validate users are from the origin server
-    for user_id_val in user_ids {
-        if let Some(user_id) = user_id_val.as_str() {
-            if !user_id.ends_with(&format!(":{}", origin_server)) {
-                warn!("Typing EDU user {} not from origin server {}", user_id, origin_server);
-                return Err(format!("Invalid user origin for typing EDU: {}", user_id).into());
-            }
-        }
+    debug!(
+        "Processing typing EDU: user={}, room={}, typing={}, origin={}",
+        user_id, room_id, typing, origin_server
+    );
+
+    // Validate user belongs to origin server
+    if !user_id.ends_with(&format!(":{}", origin_server)) {
+        warn!("Typing EDU user {} not from origin server {}", user_id, origin_server);
+        return Err(format!("Invalid user origin for typing EDU: {}", user_id).into());
     }
 
-    let expires_at = Utc::now() + chrono::Duration::milliseconds(timeout as i64);
+    // Verify user is in the room
+    let membership_check = "
+        SELECT membership 
+        FROM room_memberships 
+        WHERE room_id = $room_id AND user_id = $user_id 
+        LIMIT 1
+    ";
 
-    // Update typing events table
-    for user_id_val in user_ids {
-        if let Some(user_id) = user_id_val.as_str() {
-            let query = "
-                CREATE typing_events SET
-                    room_id = $room_id,
-                    user_id = $user_id,
-                    server_name = $server_name,
-                    started_at = $started_at,
-                    expires_at = $expires_at
-            ";
+    let mut membership_result = state
+        .db
+        .query(membership_check)
+        .bind(("room_id", room_id.to_string()))
+        .bind(("user_id", user_id.to_string()))
+        .await?;
 
-            let _response = state
-                .db
-                .query(query)
-                .bind(("room_id", room_id.to_string()))
-                .bind(("user_id", user_id.to_string()))
-                .bind(("server_name", origin_server.to_string()))
-                .bind(("started_at", Utc::now()))
-                .bind(("expires_at", expires_at))
-                .await
-                .map_err(|e| format!("Failed to store typing EDU: {}", e))?;
-
-            debug!(
-                "Stored typing EDU for user {} in room {} (expires: {})",
-                user_id, room_id, expires_at
-            );
-        }
+    let memberships: Vec<serde_json::Value> = membership_result.take(0)?;
+    
+    if memberships.is_empty() {
+        debug!("Ignoring typing EDU for user {} not in room {}", user_id, room_id);
+        return Ok(());
     }
 
-    info!("Processed typing EDU for room {} from server {}", room_id, origin_server);
+    let membership = memberships[0]
+        .get("membership")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if membership != "join" {
+        debug!("Ignoring typing EDU for user {} not joined to room {} (membership: {})", 
+               user_id, room_id, membership);
+        return Ok(());
+    }
+
+    if typing {
+        // User started typing - create/update typing event with timeout
+        let expires_at = Utc::now() + chrono::Duration::seconds(30); // 30 second timeout
+
+        let query = "
+            BEGIN;
+            DELETE typing_events WHERE room_id = $room_id AND user_id = $user_id;
+            CREATE typing_events SET
+                room_id = $room_id,
+                user_id = $user_id,
+                server_name = $server_name,
+                started_at = $started_at,
+                expires_at = $expires_at;
+            COMMIT;
+        ";
+
+        let _response = state
+            .db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("server_name", origin_server.to_string()))
+            .bind(("started_at", Utc::now()))
+            .bind(("expires_at", expires_at))
+            .await
+            .map_err(|e| format!("Failed to store typing start EDU: {}", e))?;
+
+        debug!(
+            "User {} started typing in room {} (expires: {})",
+            user_id, room_id, expires_at
+        );
+    } else {
+        // User stopped typing - remove typing event
+        let query = "
+            DELETE typing_events 
+            WHERE room_id = $room_id AND user_id = $user_id
+        ";
+
+        let _response = state
+            .db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(|e| format!("Failed to remove typing stop EDU: {}", e))?;
+
+        debug!("User {} stopped typing in room {}", user_id, room_id);
+    }
+
+    info!(
+        "Processed typing EDU: user={}, room={}, typing={}", 
+        user_id, room_id, typing
+    );
     Ok(())
 }
 
@@ -852,5 +929,209 @@ async fn process_cross_signing_key(
         })?;
 
     debug!("Stored {} cross-signing key for user {}", key_type, user_id);
+    Ok(())
+}
+
+/// Process direct-to-device EDU for send-to-device messaging
+async fn process_direct_to_device_edu(
+    state: &AppState,
+    origin: &str,
+    content: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Processing direct-to-device EDU from origin: {}", origin);
+
+    // Parse the direct-to-device content
+    let message_id = content
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing message_id in direct-to-device EDU")?;
+
+    let sender = content
+        .get("sender")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing sender in direct-to-device EDU")?;
+
+    let event_type = content
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing type in direct-to-device EDU")?;
+
+    let messages = content
+        .get("messages")
+        .and_then(|v| v.as_object())
+        .ok_or("Missing or invalid messages in direct-to-device EDU")?;
+
+    debug!(
+        "Processing direct-to-device message: id={}, sender={}, type={}, recipients={}",
+        message_id,
+        sender,
+        event_type,
+        messages.len()
+    );
+
+    // Check for duplicate message_id to ensure idempotence
+    let duplicate_check = "
+        SELECT message_id 
+        FROM to_device_messages 
+        WHERE message_id = $message_id AND origin_server = $origin
+        LIMIT 1
+    ";
+
+    let mut duplicate_result = state
+        .db
+        .query(duplicate_check)
+        .bind(("message_id", message_id.to_string()))
+        .bind(("origin", origin.to_string()))
+        .await?;
+
+    let existing_messages: Vec<serde_json::Value> = duplicate_result.take(0)?;
+    
+    if !existing_messages.is_empty() {
+        debug!("Duplicate direct-to-device message ignored: {}", message_id);
+        return Ok(());
+    }
+
+    // Process messages for each user
+    for (user_id, user_devices) in messages {
+        let device_messages = user_devices
+            .as_object()
+            .ok_or(format!("Invalid device messages for user {}", user_id))?;
+
+        // Check if user exists locally
+        let user_check = "SELECT user_id FROM users WHERE user_id = $user_id LIMIT 1";
+        let mut user_result = state
+            .db
+            .query(user_check)
+            .bind(("user_id", user_id.clone()))
+            .await?;
+
+        let local_users: Vec<serde_json::Value> = user_result.take(0)?;
+        
+        if local_users.is_empty() {
+            debug!("Ignoring direct-to-device message for non-local user: {}", user_id);
+            continue;
+        }
+
+        // Process messages for each device
+        for (device_id, message_content) in device_messages {
+            if device_id == "*" {
+                // Send to all devices for this user
+                let all_devices_query = "
+                    SELECT device_id 
+                    FROM device 
+                    WHERE user_id = $user_id
+                ";
+
+                let mut devices_result = state
+                    .db
+                    .query(all_devices_query)
+                    .bind(("user_id", user_id.clone()))
+                    .await?;
+
+                let user_devices: Vec<serde_json::Value> = devices_result.take(0)?;
+
+                for device_record in user_devices {
+                    if let Some(actual_device_id) = device_record.get("device_id").and_then(|v| v.as_str()) {
+                        store_to_device_message(
+                            state,
+                            message_id,
+                            origin,
+                            sender,
+                            event_type,
+                            user_id,
+                            actual_device_id,
+                            message_content,
+                        ).await?;
+                    }
+                }
+            } else {
+                // Send to specific device
+                let device_check = "
+                    SELECT device_id 
+                    FROM device 
+                    WHERE user_id = $user_id AND device_id = $device_id 
+                    LIMIT 1
+                ";
+
+                let mut device_result = state
+                    .db
+                    .query(device_check)
+                    .bind(("user_id", user_id.clone()))
+                    .bind(("device_id", device_id.clone()))
+                    .await?;
+
+                let target_devices: Vec<serde_json::Value> = device_result.take(0)?;
+
+                if target_devices.is_empty() {
+                    debug!("Device {} not found for user {}, ignoring message", device_id, user_id);
+                    continue;
+                }
+
+                store_to_device_message(
+                    state,
+                    message_id,
+                    origin,
+                    sender,
+                    event_type,
+                    user_id,
+                    device_id,
+                    message_content,
+                ).await?;
+            }
+        }
+    }
+
+    debug!("Successfully processed direct-to-device EDU: {}", message_id);
+    Ok(())
+}
+
+/// Store a to-device message in the database
+async fn store_to_device_message(
+    state: &AppState,
+    message_id: &str,
+    origin: &str,
+    sender: &str,
+    event_type: &str,
+    user_id: &str,
+    device_id: &str,
+    content: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let query = "
+        CREATE to_device_messages SET
+            message_id = $message_id,
+            origin_server = $origin,
+            sender = $sender,
+            event_type = $event_type,
+            user_id = $user_id,
+            device_id = $device_id,
+            content = $content,
+            received_at = $received_at,
+            delivered = false
+    ";
+
+    let _response = state
+        .db
+        .query(query)
+        .bind(("message_id", message_id.to_string()))
+        .bind(("origin", origin.to_string()))
+        .bind(("sender", sender.to_string()))
+        .bind(("event_type", event_type.to_string()))
+        .bind(("user_id", user_id.to_string()))
+        .bind(("device_id", device_id.to_string()))
+        .bind(("content", content.clone()))
+        .bind(("received_at", Utc::now()))
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to store to-device message {} for {}:{}: {}",
+                message_id, user_id, device_id, e
+            )
+        })?;
+
+    debug!(
+        "Stored to-device message {} for user {} device {}",
+        message_id, user_id, device_id
+    );
+
     Ok(())
 }

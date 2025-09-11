@@ -312,7 +312,7 @@ fn create_federation_routes() -> Router<AppState> {
         .route("/v1/query/:query_type", get(_matrix::federation::v1::query::by_query_type::get))
         .route("/v1/state/:room_id", get(_matrix::federation::v1::state::by_room_id::get))
         .route("/v1/state_ids/:room_id", get(_matrix::federation::v1::state_ids::by_room_id::get))
-        .route("/v1/user/devices/:user_id", get(_matrix::client::v1::user::get))
+        .route("/v1/user/devices/:user_id", get(_matrix::federation::v1::user::devices::by_user_id::get))
         .route("/v1/version", get(_matrix::federation::v1::version::get))
         .route(
             "/v1/get_missing_events/:room_id",
