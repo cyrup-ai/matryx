@@ -104,7 +104,10 @@ pub async fn post(
                 return Err(StatusCode::FORBIDDEN);
             },
             MembershipState::Ban => {
-                warn!("Room knock failed - user {} is banned from room {}", user_id, actual_room_id);
+                warn!(
+                    "Room knock failed - user {} is banned from room {}",
+                    user_id, actual_room_id
+                );
                 return Err(StatusCode::FORBIDDEN);
             },
             MembershipState::Knock => {

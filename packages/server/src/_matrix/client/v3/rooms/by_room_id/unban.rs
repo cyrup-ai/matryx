@@ -110,10 +110,14 @@ pub async fn post(
     })?;
 
     // Check if unbanner is a member of the room with appropriate permissions
-    let unbanner_membership = get_user_membership(&state, &room_id, &unbanner_id).await.map_err(|_| {
-        warn!("Room unban failed - unbanner {} is not a member of room {}", unbanner_id, room_id);
-        StatusCode::FORBIDDEN
-    })?;
+    let unbanner_membership =
+        get_user_membership(&state, &room_id, &unbanner_id).await.map_err(|_| {
+            warn!(
+                "Room unban failed - unbanner {} is not a member of room {}",
+                unbanner_id, room_id
+            );
+            StatusCode::FORBIDDEN
+        })?;
 
     if unbanner_membership.membership != MembershipState::Join {
         warn!(
@@ -124,10 +128,16 @@ pub async fn post(
     }
 
     // Check target user's current membership - must be banned to unban
-    let target_membership = get_user_membership(&state, &room_id, &request.user_id).await.map_err(|_| {
-        warn!("Room unban failed - target user {} has no membership in room {}", request.user_id, room_id);
-        StatusCode::BAD_REQUEST
-    })?;
+    let target_membership =
+        get_user_membership(&state, &room_id, &request.user_id)
+            .await
+            .map_err(|_| {
+                warn!(
+                    "Room unban failed - target user {} has no membership in room {}",
+                    request.user_id, room_id
+                );
+                StatusCode::BAD_REQUEST
+            })?;
 
     if target_membership.membership != MembershipState::Ban {
         match target_membership.membership {
@@ -136,7 +146,10 @@ pub async fn post(
                 return Err(StatusCode::BAD_REQUEST);
             },
             MembershipState::Leave => {
-                info!("User {} is not banned from room {} (already left)", request.user_id, room_id);
+                info!(
+                    "User {} is not banned from room {} (already left)",
+                    request.user_id, room_id
+                );
                 return Ok(Json(UnbanResponse {}));
             },
             MembershipState::Invite => {
@@ -180,8 +193,8 @@ pub async fn post(
     let unban_event_id = create_membership_event(
         &state,
         &room_id,
-        &unbanner_id,         // The unbanner is the sender
-        &request.user_id,     // The unbanned user is the target
+        &unbanner_id,           // The unbanner is the sender
+        &request.user_id,       // The unbanned user is the target
         MembershipState::Leave, // Unban results in leave membership
         request.reason.as_deref(),
         event_depth,
@@ -376,7 +389,8 @@ async fn create_membership_event(
 
     // Get existing membership to preserve display name and avatar
     let membership_id = format!("{}:{}", target, room_id);
-    let existing_membership: Option<Membership> = state.db.select(("membership", &membership_id)).await.ok().flatten();
+    let existing_membership: Option<Membership> =
+        state.db.select(("membership", &membership_id)).await.ok().flatten();
 
     // Create/update membership record
     let membership_record = Membership {

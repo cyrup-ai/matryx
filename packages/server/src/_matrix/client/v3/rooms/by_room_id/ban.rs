@@ -110,10 +110,11 @@ pub async fn post(
     })?;
 
     // Check if banner is a member of the room with appropriate permissions
-    let banner_membership = get_user_membership(&state, &room_id, &banner_id).await.map_err(|_| {
-        warn!("Room ban failed - banner {} is not a member of room {}", banner_id, room_id);
-        StatusCode::FORBIDDEN
-    })?;
+    let banner_membership =
+        get_user_membership(&state, &room_id, &banner_id).await.map_err(|_| {
+            warn!("Room ban failed - banner {} is not a member of room {}", banner_id, room_id);
+            StatusCode::FORBIDDEN
+        })?;
 
     if banner_membership.membership != MembershipState::Join {
         warn!(
@@ -353,7 +354,8 @@ async fn create_membership_event(
 
     // Get existing membership to preserve display name and avatar
     let membership_id = format!("{}:{}", target, room_id);
-    let existing_membership: Option<Membership> = state.db.select(("membership", &membership_id)).await.ok().flatten();
+    let existing_membership: Option<Membership> =
+        state.db.select(("membership", &membership_id)).await.ok().flatten();
 
     // Create/update membership record
     let membership_record = Membership {

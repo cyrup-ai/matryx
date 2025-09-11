@@ -14,6 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{self, warn};
 
 use crate::auth::AuthenticatedUser;
+use crate::room::LiveMembershipService;
 use crate::state::AppState;
 use matryx_entity::types::{AccountData, Event, Membership, MembershipState, Room};
 use matryx_surrealdb::repository::event::EventRepository;
@@ -589,13 +590,17 @@ async fn handle_live_sync_streams(
     // Send initial sync data
     send_initial_sync_sse(&state, &auth, &tx).await?;
 
-    // Set up LiveQuery streams for real-time updates
+    // Set up LiveQuery streams for real-time updates with advanced authorization
+
+    // Initialize advanced membership service
+    let live_membership_service = LiveMembershipService::new(Arc::new(state.db.clone()));
 
     // 1. Stream for new events in joined rooms
     let event_stream = create_event_live_stream(&state, user_id.clone()).await?;
 
-    // 2. Stream for membership changes
-    let membership_stream = create_membership_live_stream(&state, user_id.clone()).await?;
+    // 2. Stream for membership changes with authorization filtering
+    let membership_stream =
+        create_enhanced_membership_stream(&live_membership_service, &user_id).await?;
 
     // 3. Stream for account data changes
     let account_data_stream = create_account_data_live_stream(&state, user_id.clone()).await?;
@@ -830,106 +835,129 @@ async fn create_event_live_stream(
     Ok(sync_stream)
 }
 
-async fn create_membership_live_stream(
-    state: &AppState,
-    user_id: String,
+/// Enhanced membership stream using advanced authorization
+async fn create_enhanced_membership_stream(
+    live_membership_service: &LiveMembershipService,
+    user_id: &str,
 ) -> Result<
     impl Stream<Item = Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>>>,
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    // Create LiveQuery for membership changes affecting this user
-    let mut stream = state
-        .db
-        .query(
-            r#"
-            LIVE SELECT * FROM membership
-            WHERE user_id = $user_id
-        "#,
-        )
-        .bind(("user_id", user_id.clone()))
-        .await?;
+    // Create filtered membership stream using advanced service
+    let filtered_stream = live_membership_service
+        .create_user_membership_stream(user_id)
+        .await
+        .map_err(|e| format!("Failed to create membership stream: {:?}", e))?;
 
-    let sync_stream = stream.stream::<surrealdb::Notification<Membership>>(0)?
-        .map(move |notification_result| -> Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>> {
-            let notification = notification_result?;
+    // Transform filtered membership updates to Matrix sync format
+    let sync_stream = filtered_stream.map(
+        move |filter_result| -> Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>> {
+            let filtered_update =
+                filter_result.map_err(|e| format!("Membership filter error: {:?}", e))?;
 
-            match notification.action {
-                surrealdb::Action::Create | surrealdb::Action::Update => {
-                    let membership = notification.data;
+            // Extract membership info from filtered update
+            let update = &filtered_update.update;
 
-                    // Create appropriate room update based on membership state
-                    let rooms_update = match membership.membership {
-                        MembershipState::Join => {
-                            let mut joined_rooms = HashMap::new();
-                            joined_rooms.insert(membership.room_id.clone(), JoinedRoomUpdate {
-                                timeline: None,
-                                state: Some(StateUpdate {
-                                    events: Vec::new(), // Would populate with actual state events
-                                }),
-                                ephemeral: None,
-                                account_data: None,
-                                unread_notifications: None,
-                            });
+            // Create appropriate room update based on membership state
+            let rooms_update = match update.membership_state {
+                MembershipState::Join => {
+                    let mut joined_rooms = HashMap::new();
 
-                            RoomsUpdate {
-                                join: Some(joined_rooms),
-                                invite: None,
-                                leave: None,
-                            }
+                    // Create membership event from filtered content
+                    let membership_event = json!({
+                        "type": "m.room.member",
+                        "state_key": update.user_id,
+                        "sender": update.sender.clone().unwrap_or_else(|| update.user_id.clone()),
+                        "content": {
+                            "membership": "join",
+                            "reason": update.reason
                         },
-                        MembershipState::Invite => {
-                            let mut invited_rooms = HashMap::new();
-                            invited_rooms.insert(membership.room_id.clone(), InvitedRoomUpdate {
-                                invite_state: Some(StateUpdate {
-                                    events: Vec::new(), // Would populate with invite state
-                                }),
-                            });
+                        "event_id": update.event_id,
+                        "origin_server_ts": update.timestamp
+                    });
 
-                            RoomsUpdate {
-                                join: None,
-                                invite: Some(invited_rooms),
-                                leave: None,
-                            }
-                        },
-                        MembershipState::Leave | MembershipState::Ban => {
-                            let mut left_rooms = HashMap::new();
-                            left_rooms.insert(membership.room_id.clone(), LeftRoomUpdate {
-                                timeline: None,
-                                state: None,
-                            });
-
-                            RoomsUpdate {
-                                join: None,
-                                invite: None,
-                                leave: Some(left_rooms),
-                            }
-                        },
-                        _ => RoomsUpdate {
-                            join: None,
-                            invite: None,
-                            leave: None,
-                        },
-                    };
-
-                    Ok(LiveSyncUpdate {
-                        next_batch: format!("s{}", Utc::now().timestamp_millis()),
-                        rooms: Some(rooms_update),
-                        presence: None,
+                    joined_rooms.insert(update.room_id.clone(), JoinedRoomUpdate {
+                        timeline: None,
+                        state: Some(StateUpdate { events: vec![membership_event] }),
+                        ephemeral: None,
                         account_data: None,
-                        to_device: None,
-                        device_lists: None,
-                    })
+                        unread_notifications: None,
+                    });
+
+                    RoomsUpdate {
+                        join: Some(joined_rooms),
+                        invite: None,
+                        leave: None,
+                    }
                 },
-                _ => Ok(LiveSyncUpdate {
-                    next_batch: format!("s{}", Utc::now().timestamp_millis()),
-                    rooms: None,
-                    presence: None,
-                    account_data: None,
-                    to_device: None,
-                    device_lists: None,
-                }),
-            }
-        });
+                MembershipState::Invite => {
+                    let mut invited_rooms = HashMap::new();
+
+                    let invite_event = json!({
+                        "type": "m.room.member",
+                        "state_key": update.user_id,
+                        "sender": update.sender.clone().unwrap_or_else(|| update.user_id.clone()),
+                        "content": {
+                            "membership": "invite",
+                            "reason": update.reason
+                        },
+                        "event_id": update.event_id,
+                        "origin_server_ts": update.timestamp
+                    });
+
+                    invited_rooms.insert(update.room_id.clone(), InvitedRoomUpdate {
+                        invite_state: Some(StateUpdate { events: vec![invite_event] }),
+                    });
+
+                    RoomsUpdate {
+                        join: None,
+                        invite: Some(invited_rooms),
+                        leave: None,
+                    }
+                },
+                MembershipState::Leave | MembershipState::Ban => {
+                    let mut left_rooms = HashMap::new();
+
+                    let leave_event = json!({
+                        "type": "m.room.member",
+                        "state_key": update.user_id,
+                        "sender": update.sender.clone().unwrap_or_else(|| update.user_id.clone()),
+                        "content": {
+                            "membership": match update.membership_state {
+                                MembershipState::Leave => "leave",
+                                MembershipState::Ban => "ban",
+                                _ => "leave"
+                            },
+                            "reason": update.reason
+                        },
+                        "event_id": update.event_id,
+                        "origin_server_ts": update.timestamp
+                    });
+
+                    left_rooms.insert(update.room_id.clone(), LeftRoomUpdate {
+                        timeline: Some(TimelineUpdate {
+                            events: vec![leave_event],
+                            limited: Some(false),
+                            prev_batch: None,
+                        }),
+                        state: None,
+                    });
+
+                    RoomsUpdate { join: None, invite: None, leave: Some(left_rooms) }
+                },
+                _ => RoomsUpdate { join: None, invite: None, leave: None },
+            };
+
+            Ok(LiveSyncUpdate {
+                next_batch: format!("s{}", Utc::now().timestamp_millis()),
+                rooms: Some(rooms_update),
+                presence: None,
+                account_data: None,
+                to_device: None,
+                device_lists: None,
+            })
+        },
+    );
 
     Ok(sync_stream)
 }

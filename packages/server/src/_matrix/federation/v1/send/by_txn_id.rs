@@ -441,12 +441,12 @@ async fn cache_transaction_result(
 ///
 /// Handles m.typing ephemeral events that indicate users typing in rooms.
 /// Updates the typing_events table and triggers real-time notifications.
-/// 
+///
 /// Matrix spec format:
 /// {
 ///   "content": {
 ///     "room_id": "!room:server.com",
-///     "user_id": "@user:server.com", 
+///     "user_id": "@user:server.com",
 ///     "typing": true
 ///   },
 ///   "edu_type": "m.typing"
@@ -498,20 +498,19 @@ async fn process_typing_edu(
         .await?;
 
     let memberships: Vec<serde_json::Value> = membership_result.take(0)?;
-    
+
     if memberships.is_empty() {
         debug!("Ignoring typing EDU for user {} not in room {}", user_id, room_id);
         return Ok(());
     }
 
-    let membership = memberships[0]
-        .get("membership")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let membership = memberships[0].get("membership").and_then(|v| v.as_str()).unwrap_or("");
 
     if membership != "join" {
-        debug!("Ignoring typing EDU for user {} not joined to room {} (membership: {})", 
-               user_id, room_id, membership);
+        debug!(
+            "Ignoring typing EDU for user {} not joined to room {} (membership: {})",
+            user_id, room_id, membership
+        );
         return Ok(());
     }
 
@@ -542,10 +541,7 @@ async fn process_typing_edu(
             .await
             .map_err(|e| format!("Failed to store typing start EDU: {}", e))?;
 
-        debug!(
-            "User {} started typing in room {} (expires: {})",
-            user_id, room_id, expires_at
-        );
+        debug!("User {} started typing in room {} (expires: {})", user_id, room_id, expires_at);
     } else {
         // User stopped typing - remove typing event
         let query = "
@@ -564,10 +560,7 @@ async fn process_typing_edu(
         debug!("User {} stopped typing in room {}", user_id, room_id);
     }
 
-    info!(
-        "Processed typing EDU: user={}, room={}, typing={}", 
-        user_id, room_id, typing
-    );
+    info!("Processed typing EDU: user={}, room={}, typing={}", user_id, room_id, typing);
     Ok(())
 }
 
@@ -985,7 +978,7 @@ async fn process_direct_to_device_edu(
         .await?;
 
     let existing_messages: Vec<serde_json::Value> = duplicate_result.take(0)?;
-    
+
     if !existing_messages.is_empty() {
         debug!("Duplicate direct-to-device message ignored: {}", message_id);
         return Ok(());
@@ -999,14 +992,10 @@ async fn process_direct_to_device_edu(
 
         // Check if user exists locally
         let user_check = "SELECT user_id FROM users WHERE user_id = $user_id LIMIT 1";
-        let mut user_result = state
-            .db
-            .query(user_check)
-            .bind(("user_id", user_id.clone()))
-            .await?;
+        let mut user_result = state.db.query(user_check).bind(("user_id", user_id.clone())).await?;
 
         let local_users: Vec<serde_json::Value> = user_result.take(0)?;
-        
+
         if local_users.is_empty() {
             debug!("Ignoring direct-to-device message for non-local user: {}", user_id);
             continue;
@@ -1031,7 +1020,9 @@ async fn process_direct_to_device_edu(
                 let user_devices: Vec<serde_json::Value> = devices_result.take(0)?;
 
                 for device_record in user_devices {
-                    if let Some(actual_device_id) = device_record.get("device_id").and_then(|v| v.as_str()) {
+                    if let Some(actual_device_id) =
+                        device_record.get("device_id").and_then(|v| v.as_str())
+                    {
                         store_to_device_message(
                             state,
                             message_id,
@@ -1041,7 +1032,8 @@ async fn process_direct_to_device_edu(
                             user_id,
                             actual_device_id,
                             message_content,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
             } else {
@@ -1076,7 +1068,8 @@ async fn process_direct_to_device_edu(
                     user_id,
                     device_id,
                     message_content,
-                ).await?;
+                )
+                .await?;
             }
         }
     }
@@ -1128,10 +1121,7 @@ async fn store_to_device_message(
             )
         })?;
 
-    debug!(
-        "Stored to-device message {} for user {} device {}",
-        message_id, user_id, device_id
-    );
+    debug!("Stored to-device message {} for user {} device {}", message_id, user_id, device_id);
 
     Ok(())
 }

@@ -79,10 +79,11 @@ pub async fn post(
     }
 
     // Check current membership status
-    let current_membership = get_user_membership(&state, &room_id, &user_id).await.map_err(|_| {
-        warn!("Room forget failed - user {} has no membership in room {}", user_id, room_id);
-        StatusCode::BAD_REQUEST
-    })?;
+    let current_membership =
+        get_user_membership(&state, &room_id, &user_id).await.map_err(|_| {
+            warn!("Room forget failed - user {} has no membership in room {}", user_id, room_id);
+            StatusCode::BAD_REQUEST
+        })?;
 
     // User must have left the room to forget it
     match current_membership.membership {
@@ -94,7 +95,10 @@ pub async fn post(
             return Err(StatusCode::BAD_REQUEST);
         },
         MembershipState::Invite => {
-            warn!("Room forget failed - user {} is invited to room {} (should reject first)", user_id, room_id);
+            warn!(
+                "Room forget failed - user {} is invited to room {} (should reject first)",
+                user_id, room_id
+            );
             return Err(StatusCode::BAD_REQUEST);
         },
         MembershipState::Ban => {
@@ -102,14 +106,18 @@ pub async fn post(
             info!("User {} forgetting banned room {}", user_id, room_id);
         },
         MembershipState::Knock => {
-            warn!("Room forget failed - user {} is knocking on room {} (should withdraw first)", user_id, room_id);
+            warn!(
+                "Room forget failed - user {} is knocking on room {} (should withdraw first)",
+                user_id, room_id
+            );
             return Err(StatusCode::BAD_REQUEST);
         },
     }
 
     // Remove the membership record to "forget" the room
     let membership_id = format!("{}:{}", user_id, room_id);
-    let delete_result: Result<Option<Membership>, _> = state.db.delete(("membership", &membership_id)).await;
+    let delete_result: Result<Option<Membership>, _> =
+        state.db.delete(("membership", &membership_id)).await;
 
     match delete_result {
         Ok(deleted_membership) => {
@@ -121,7 +129,10 @@ pub async fn post(
             }
         },
         Err(e) => {
-            error!("Failed to delete membership record for user {} in room {}: {}", user_id, room_id, e);
+            error!(
+                "Failed to delete membership record for user {} in room {}: {}",
+                user_id, room_id, e
+            );
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     }
@@ -222,7 +233,10 @@ async fn cleanup_user_room_state(
         .bind(("room_id", room_id.to_string()))
         .await
     {
-        warn!("Failed to clean up typing indicators for user {} in room {}: {}", user_id, room_id, e);
+        warn!(
+            "Failed to clean up typing indicators for user {} in room {}: {}",
+            user_id, room_id, e
+        );
     }
 
     info!("Cleaned up room state for user {} in forgotten room {}", user_id, room_id);

@@ -76,10 +76,7 @@ pub async fn post(
         },
     };
 
-    info!(
-        "Processing room join request for user: {} to room: {} from: {}",
-        user_id, room_id, addr
-    );
+    info!("Processing room join request for user: {} to room: {} from: {}", user_id, room_id, addr);
 
     // Validate room ID format
     if !room_id.starts_with('!') {
@@ -147,10 +144,7 @@ pub async fn post(
     )
     .await
     .map_err(|e| {
-        error!(
-            "Failed to create join event for user {} in room {}: {}",
-            user_id, room_id, e
-        );
+        error!("Failed to create join event for user {} in room {}: {}", user_id, room_id, e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -203,15 +197,21 @@ async fn can_user_join(state: &AppState, room: &Room, user_id: &str) -> Result<b
             let allow_conditions = get_room_join_rule_allow_conditions(state, &room.room_id)
                 .await
                 .map_err(|e| {
-                    error!("Failed to get join rule allow conditions for room {}: {}", room.room_id, e);
+                    error!(
+                        "Failed to get join rule allow conditions for room {}: {}",
+                        room.room_id, e
+                    );
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
             // Check if user is a member of any of the allowed rooms/spaces
             for condition in allow_conditions {
                 if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership") {
-                    if let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str()) {
-                        if let Ok(membership) = get_user_membership(state, allowed_room_id, user_id).await {
+                    if let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str())
+                    {
+                        if let Ok(membership) =
+                            get_user_membership(state, allowed_room_id, user_id).await
+                        {
                             if membership.membership == MembershipState::Join {
                                 info!(
                                     "User {} allowed to join restricted room {} via membership in room {}",

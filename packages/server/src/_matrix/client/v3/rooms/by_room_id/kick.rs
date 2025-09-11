@@ -110,10 +110,11 @@ pub async fn post(
     })?;
 
     // Check if kicker is a member of the room with appropriate permissions
-    let kicker_membership = get_user_membership(&state, &room_id, &kicker_id).await.map_err(|_| {
-        warn!("Room kick failed - kicker {} is not a member of room {}", kicker_id, room_id);
-        StatusCode::FORBIDDEN
-    })?;
+    let kicker_membership =
+        get_user_membership(&state, &room_id, &kicker_id).await.map_err(|_| {
+            warn!("Room kick failed - kicker {} is not a member of room {}", kicker_id, room_id);
+            StatusCode::FORBIDDEN
+        })?;
 
     if kicker_membership.membership != MembershipState::Join {
         warn!(
@@ -124,10 +125,16 @@ pub async fn post(
     }
 
     // Check target user's current membership
-    let target_membership = get_user_membership(&state, &room_id, &request.user_id).await.map_err(|_| {
-        warn!("Room kick failed - target user {} is not a member of room {}", request.user_id, room_id);
-        StatusCode::FORBIDDEN
-    })?;
+    let target_membership =
+        get_user_membership(&state, &room_id, &request.user_id)
+            .await
+            .map_err(|_| {
+                warn!(
+                    "Room kick failed - target user {} is not a member of room {}",
+                    request.user_id, room_id
+                );
+                StatusCode::FORBIDDEN
+            })?;
 
     // Target must be currently joined to be kicked
     if target_membership.membership != MembershipState::Join {
@@ -146,7 +153,7 @@ pub async fn post(
                     request.user_id, target_membership.membership, room_id
                 );
                 return Err(StatusCode::FORBIDDEN);
-            }
+            },
         }
     }
 
@@ -176,8 +183,8 @@ pub async fn post(
     let kick_event_id = create_membership_event(
         &state,
         &room_id,
-        &kicker_id,           // The kicker is the sender
-        &request.user_id,     // The kicked user is the target
+        &kicker_id,             // The kicker is the sender
+        &request.user_id,       // The kicked user is the target
         MembershipState::Leave, // Kick results in leave membership
         request.reason.as_deref(),
         event_depth,
@@ -284,7 +291,7 @@ async fn get_auth_events_for_kick(
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     // Get the auth events needed for a kick event:
     // - m.room.create event
-    // - m.room.power_levels event  
+    // - m.room.power_levels event
     // - Kicking user's m.room.member event (join state)
 
     let query = r#"
@@ -372,7 +379,8 @@ async fn create_membership_event(
 
     // Get existing membership to preserve display name and avatar
     let membership_id = format!("{}:{}", target, room_id);
-    let existing_membership: Option<Membership> = state.db.select(("membership", &membership_id)).await.ok().flatten();
+    let existing_membership: Option<Membership> =
+        state.db.select(("membership", &membership_id)).await.ok().flatten();
 
     // Create/update membership record
     let membership_record = Membership {

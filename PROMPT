@@ -21,6 +21,8 @@ with all routes laid out in a sparse one file per route fashion
 
 CURRENT OBJECTIVE:
 
-implement:
+complete the outstanding requirements from:
 
 - /Volumes/samsung_t9/maxtryx/spec/server/*.md
+
+deeply read and understand the current codebase implementation and plan out next steps.
