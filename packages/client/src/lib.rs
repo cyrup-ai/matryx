@@ -4,6 +4,9 @@
 //! and real-time WebSocket support for live queries and sync.
 
 pub mod _matrix;
+pub mod device;
+pub mod realtime;
+pub mod sync;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -334,7 +337,7 @@ impl MatrixClient {
 
     /// Logout from the Matrix server
     pub async fn logout(&mut self) -> Result<()> {
-        if let Some(_) = &self.credentials {
+        if self.credentials.is_some() {
             let request =
                 self.authenticated_request(reqwest::Method::POST, "/_matrix/client/v3/logout")?;
             let response = request.json(&serde_json::json!({})).send().await?;

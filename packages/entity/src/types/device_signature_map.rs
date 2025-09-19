@@ -22,10 +22,7 @@ impl DeviceSignatureMap {
         device_id: String,
         signature: SignatureMap,
     ) {
-        self.signatures
-            .entry(user_id)
-            .or_insert_with(HashMap::new)
-            .insert(device_id, signature);
+        self.signatures.entry(user_id).or_default().insert(device_id, signature);
     }
 }
 

@@ -8,6 +8,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
+use matryx_entity::utils::canonical_json;
 
 /// POST /_matrix/key/v2/query
 ///
@@ -149,7 +150,7 @@ async fn create_notary_signature(
         obj.remove("signatures");
     }
 
-    let canonical_json = serde_json::to_string(&canonical_data)?;
+    let canonical_json = canonical_json(&canonical_data)?;
 
     // Sign the canonical JSON
     let signature = sign_canonical_json(&canonical_json, &signing_key.private_key)?;

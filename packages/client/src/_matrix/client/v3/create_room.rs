@@ -72,16 +72,16 @@ pub async fn create_room(
         let error_body = response.text().await.unwrap_or_default();
 
         // Parse Matrix error response if possible
-        if let Ok(matrix_error) = serde_json::from_str::<Value>(&error_body) {
-            if let Some(errcode) = matrix_error.get("errcode").and_then(|v| v.as_str()) {
-                let error_msg = matrix_error
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
+        if let Ok(matrix_error) = serde_json::from_str::<Value>(&error_body) &&
+            let Some(errcode) = matrix_error.get("errcode").and_then(|v| v.as_str())
+        {
+            let error_msg = matrix_error
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
 
-                error!("Room creation failed with Matrix error {}: {}", errcode, error_msg);
-                return Err(anyhow::anyhow!("Room creation failed: {} ({})", error_msg, errcode));
-            }
+            error!("Room creation failed with Matrix error {}: {}", errcode, error_msg);
+            return Err(anyhow::anyhow!("Room creation failed: {} ({})", error_msg, errcode));
         }
         error!("Room creation request failed: {} - {}", status, error_body);
         return Err(anyhow::anyhow!("Room creation request failed: {} - {}", status, error_body));

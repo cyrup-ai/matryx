@@ -18,3 +18,9 @@ impl RoomKeyBackup {
         self.sessions.insert(session_id, data);
     }
 }
+
+impl Default for RoomKeyBackup {
+    fn default() -> Self {
+        Self::new()
+    }
+}

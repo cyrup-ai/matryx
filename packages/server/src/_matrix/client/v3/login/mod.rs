@@ -1,6 +1,7 @@
 use axum::http::HeaderMap;
 use axum::{Json, extract::ConnectInfo, extract::State, http::StatusCode};
 use chrono::Utc;
+use regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -89,7 +90,7 @@ pub async fn post(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     match request.login_type.as_str() {
         "m.login.password" => handle_password_login(state, addr, headers, request).await,
-        "m.login.token" => handle_token_login(state, request).await,
+        "m.login.token" => handle_token_login(state, addr, headers, request).await,
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
@@ -134,15 +135,19 @@ async fn handle_password_login(
 }
 
 async fn handle_token_login(
-    _state: AppState,
-    _request: LoginRequest,
+    state: AppState,
+    addr: SocketAddr,
+    headers: HeaderMap,
+    request: LoginRequest,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     // Handle SSO and application service authentication
-    match _request.login_type.as_str() {
-        "m.login.sso" => handle_sso_login(_state, &_request).await,
-        "m.login.application_service" => handle_application_service_login(_state, &_request).await,
+    match request.login_type.as_str() {
+        "m.login.sso" => handle_sso_login(state, addr, headers, &request).await,
+        "m.login.application_service" => {
+            handle_application_service_login(state, addr, headers, &request).await
+        },
         _ => {
-            warn!("Unsupported login type: {}", _request.login_type);
+            warn!("Unsupported login type: {}", request.login_type);
             Err(StatusCode::BAD_REQUEST)
         },
     }
@@ -312,6 +317,8 @@ struct SsoProvider {
 /// Handle SSO-based login using pre-validated tokens
 async fn handle_sso_login(
     state: AppState,
+    addr: SocketAddr,
+    headers: HeaderMap,
     request: &LoginRequest,
 ) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
     use axum::Json;
@@ -336,8 +343,12 @@ async fn handle_sso_login(
         .clone()
         .unwrap_or_else(|| format!("SSO_{}", Uuid::new_v4().to_string().replace('-', "")));
 
-    // Generate secure access token
-    let access_token_value = format!("syt_{}", Uuid::new_v4().simple());
+    // Extract client metadata for device and session tracking
+    let client_ip = addr.ip().to_string();
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_owned());
 
     // Create JWT token for API authentication
     let access_token = state
@@ -355,8 +366,8 @@ async fn handle_sso_login(
         "user_id": user_info.user_id,
         "display_name": request.initial_device_display_name.clone().unwrap_or_else(|| "SSO Login".to_string()),
         "created_at": Utc::now(),
-        "last_seen_ip": "unknown", // Would be extracted from request in full implementation
-        "last_seen_user_agent": "unknown", // Would be extracted from request in full implementation
+        "last_seen_ip": client_ip,
+        "last_seen_user_agent": user_agent.as_deref().unwrap_or("unknown")
     });
 
     let _: Option<serde_json::Value> = state
@@ -384,6 +395,8 @@ async fn handle_sso_login(
 /// Handle application service login for bridges and bots
 async fn handle_application_service_login(
     state: AppState,
+    addr: SocketAddr,
+    headers: HeaderMap,
     request: &LoginRequest,
 ) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
     use axum::Json;
@@ -420,8 +433,12 @@ async fn handle_application_service_login(
         .clone()
         .unwrap_or_else(|| format!("AS_{}", Uuid::new_v4().to_string().replace('-', "")));
 
-    // Generate secure access token
-    let access_token_value = format!("syt_{}", Uuid::new_v4().simple());
+    // Extract client metadata for device and session tracking
+    let client_ip = addr.ip().to_string();
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_owned());
 
     // Create JWT token for API authentication
     let access_token = state
@@ -440,8 +457,8 @@ async fn handle_application_service_login(
         "display_name": request.initial_device_display_name.clone()
             .unwrap_or_else(|| format!("Application Service: {}", app_service.id)),
         "created_at": Utc::now(),
-        "last_seen_ip": "unknown", // Would be extracted from request in full implementation
-        "last_seen_user_agent": "unknown", // Would be extracted from request in full implementation
+        "last_seen_ip": client_ip,
+        "last_seen_user_agent": user_agent.as_deref().unwrap_or("unknown"),
         "application_service_id": app_service.id.clone(),
     });
 

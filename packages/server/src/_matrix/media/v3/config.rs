@@ -1,9 +1,26 @@
-use axum::{Json, http::StatusCode};
-use serde_json::{Value, json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::Json,
+};
+use serde::Serialize;
 
-/// GET /_matrix/media/v3/config
-pub async fn get() -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "m.upload.size": 50000000
-    })))
+use crate::AppState;
+
+#[derive(Serialize)]
+pub struct MediaConfigResponse {
+    #[serde(rename = "m.upload.size")]
+    pub upload_size: u64,
+}
+
+pub async fn get_media_config(
+    State(_state): State<AppState>,
+) -> Result<Json<MediaConfigResponse>, StatusCode> {
+    // Return media configuration
+    // 50MB upload limit (50 * 1024 * 1024 bytes)
+    const MAX_UPLOAD_SIZE: u64 = 50 * 1024 * 1024;
+    
+    Ok(Json(MediaConfigResponse {
+        upload_size: MAX_UPLOAD_SIZE,
+    }))
 }

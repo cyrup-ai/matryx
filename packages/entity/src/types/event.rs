@@ -2,9 +2,23 @@ use crate::types::EventContent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Parameters for creating a PDU event
+#[derive(Debug, Clone)]
+pub struct PduParams {
+    pub event_id: String,
+    pub sender: String,
+    pub origin_server_ts: i64,
+    pub event_type: String,
+    pub room_id: String,
+    pub content: EventContent,
+    pub auth_events: Vec<String>,
+    pub depth: i64,
+    pub prev_events: Vec<String>,
+}
+
 /// Event - Matrix spec compliant PDU (Persistent Data Unit)
 /// Source: Matrix server-server API specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Event {
     /// Unique event identifier
     pub event_id: String,
@@ -105,30 +119,20 @@ impl Event {
         }
     }
 
-    pub fn new_pdu(
-        event_id: String,
-        sender: String,
-        origin_server_ts: i64,
-        event_type: String,
-        room_id: String,
-        content: EventContent,
-        auth_events: Vec<String>,
-        depth: i64,
-        prev_events: Vec<String>,
-    ) -> Self {
+    pub fn new_pdu(params: PduParams) -> Self {
         Self {
-            event_id,
-            sender,
-            origin_server_ts,
-            event_type,
-            room_id,
-            content,
+            event_id: params.event_id,
+            sender: params.sender,
+            origin_server_ts: params.origin_server_ts,
+            event_type: params.event_type,
+            room_id: params.room_id,
+            content: params.content,
             state_key: None,
             unsigned: None,
-            auth_events: Some(auth_events),
-            depth: Some(depth),
+            auth_events: Some(params.auth_events),
+            depth: Some(params.depth),
             hashes: None,
-            prev_events: Some(prev_events),
+            prev_events: Some(params.prev_events),
             signatures: None,
             soft_failed: None,
             received_ts: None,

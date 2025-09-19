@@ -120,12 +120,15 @@ pub async fn get(
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
-    // Build response with appropriate headers
+    // Build response with appropriate headers and security headers
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .header("Content-Length", content_length.to_string())
-        .header("Cache-Control", "public, max-age=31536000, immutable"); // 1 year cache
+        .header("Cache-Control", "public, max-age=31536000, immutable") // 1 year cache
+        .header("Content-Security-Policy", 
+            "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
+        .header("Cross-Origin-Resource-Policy", "cross-origin");
 
     // Add Content-Disposition header if upload name is available
     if let Some(name) = upload_name {

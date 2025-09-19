@@ -120,7 +120,9 @@ impl StateResolver {
 
             let (resolved_event, rejected, soft_failed) = if events.len() == 1 {
                 // No conflict for this state key
-                (events.into_iter().next().unwrap(), Vec::new(), Vec::new())
+                let resolved_event = events.into_iter().next()
+                    .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty state event collection".to_string()))?;
+                (resolved_event, Vec::new(), Vec::new())
             } else {
                 // Resolve conflict using authorization rules
                 self.resolve_state_key_conflict_with_tracking(room_id, events, power_event.as_ref())
@@ -194,8 +196,10 @@ impl StateResolver {
         }
 
         if valid_events.len() == 1 {
+            let resolved_event = valid_events.into_iter().next()
+                .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty valid events collection".to_string()))?;
             return Ok((
-                valid_events.into_iter().next().unwrap(),
+                resolved_event,
                 rejected_events,
                 soft_failed_events,
             ));
@@ -250,7 +254,8 @@ impl StateResolver {
         }
 
         // For other state events, return the event with highest authority
-        Ok(sorted_events.into_iter().next().unwrap())
+        sorted_events.into_iter().next()
+            .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty sorted events collection".to_string()))
     }
 
     /// Resolve membership event conflicts with special membership rules
@@ -289,7 +294,8 @@ impl StateResolver {
         // Default to most recent event
         let mut sorted = conflicting_events;
         sorted.sort_by(|a, b| b.origin_server_ts.cmp(&a.origin_server_ts));
-        Ok(sorted.into_iter().next().unwrap())
+        sorted.into_iter().next()
+            .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty conflicting events collection".to_string()))
     }
 
     /// Build the authorization event chain for the resolved state

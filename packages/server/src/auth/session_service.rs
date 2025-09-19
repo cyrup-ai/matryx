@@ -239,7 +239,7 @@ impl MatrixSessionService {
     }
 
     /// Fetch server's public key for signature verification
-    async fn get_server_public_key(
+    pub async fn get_server_public_key(
         &self,
         server_name: &str,
         key_id: &str,

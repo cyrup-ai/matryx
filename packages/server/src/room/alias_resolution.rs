@@ -3,10 +3,21 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
+use reqwest::Client;
+use url::Url;
+use chrono::Utc;
 
 use crate::state::AppState;
 use matryx_entity::types::Room;
 use matryx_surrealdb::repository::RoomRepository;
+
+/// Response structure for federation directory queries
+#[derive(Debug, Deserialize)]
+struct DirectoryResponse {
+    room_id: String,
+    servers: Vec<String>,
+}
 
 /// Room Alias Resolution System for Matrix room discovery
 ///
@@ -61,7 +72,7 @@ impl RoomAliasResolver {
     /// # Errors
     /// * `StatusCode::BAD_REQUEST` - Invalid alias format
     /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database query error
-    pub async fn resolve_alias(&self, alias: &str) -> Result<Option<String>, StatusCode> {
+    pub async fn resolve_alias(&self, alias: &str, state: &AppState) -> Result<Option<String>, StatusCode> {
         debug!("Resolving room alias: {}", alias);
 
         // Validate alias format
@@ -76,7 +87,7 @@ impl RoomAliasResolver {
         if server_name == self.homeserver_name {
             self.resolve_local_alias(&localpart).await
         } else {
-            self.resolve_remote_alias(alias, &server_name).await
+            self.resolve_remote_alias(alias, &server_name, state).await
         }
     }
 
@@ -423,17 +434,169 @@ impl RoomAliasResolver {
     /// * `Result<Option<String>, StatusCode>` - None (requires federation)
     ///
     /// # Note
-    /// Future implementation may include caching of resolved remote aliases
-    /// for performance optimization.
+    /// Includes caching of resolved remote aliases for performance optimization.
     async fn resolve_remote_alias(
         &self,
         alias: &str,
         server_name: &str,
+        state: &AppState,
     ) -> Result<Option<String>, StatusCode> {
-        debug!("Remote alias resolution required for {} on server {}", alias, server_name);
+        debug!("Resolving remote alias {} on server {}", alias, server_name);
 
-        // TODO: Implement federation API call to resolve remote alias
-        // For now, return None to indicate federation is required
+        // SUBTASK7: Check cache first
+        if let Some(cached_room_id) = self.get_cached_alias_resolution(alias).await? {
+            debug!("Found cached resolution for alias {}: {}", alias, cached_room_id);
+            return Ok(Some(cached_room_id));
+        }
+
+        // SUBTASK4: Query federation directory
+        match self.query_federation_directory(alias, server_name, state).await? {
+            Some(directory_response) => {
+                let room_id = directory_response.room_id;
+                
+                // Cache successful resolution (TTL: 1 hour)
+                if let Err(e) = self.cache_alias_resolution(alias, &room_id, 3600).await {
+                    warn!("Failed to cache alias resolution for {}: {:?}", alias, e);
+                }
+
+                debug!("Resolved remote alias {} to room {}", alias, room_id);
+                Ok(Some(room_id))
+            },
+            None => {
+                debug!("Remote alias {} not found on server {}", alias, server_name);
+                Ok(None)
+            }
+        }
+    }
+
+    /// SUBTASK5: Extract server name from room alias format (#localpart:server.com)
+    fn extract_server_name(&self, alias: &str) -> Result<String, StatusCode> {
+        if !alias.starts_with('#') {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        
+        if let Some(colon_pos) = alias.rfind(':') {
+            let server_name = &alias[colon_pos + 1..];
+            if server_name.is_empty() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            
+            // Basic server name validation
+            if server_name.contains(' ') || server_name.contains('\n') {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            
+            Ok(server_name.to_string())
+        } else {
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
+
+    /// SUBTASK4 & SUBTASK8: Query federation directory endpoint for alias resolution
+    async fn query_federation_directory(
+        &self,
+        alias: &str,
+        server_name: &str,
+        state: &AppState,
+    ) -> Result<Option<DirectoryResponse>, StatusCode> {
+        // Build federation request URL
+        let base_url = format!("https://{}/_matrix/federation/v1/query/directory", server_name);
+        let mut url = Url::parse(&base_url)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        
+        url.query_pairs_mut()
+            .append_pair("room_alias", alias);
+
+        // Create HTTP request
+        let request = state.http_client
+            .get(url.as_str())
+            .header("User-Agent", format!("Matrix/{}", env!("CARGO_PKG_VERSION")));
+
+        // Sign request with X-Matrix authentication (SUBTASK8)
+        let signed_request = state.event_signer
+            .sign_federation_request(request, &state.homeserver_name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Execute request
+        let response = signed_request
+            .send()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        match response.status().as_u16() {
+            200 => {
+                let directory_response: DirectoryResponse = response
+                    .json()
+                    .await
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                Ok(Some(directory_response))
+            },
+            404 => Ok(None), // Alias not found
+            403 => Err(StatusCode::FORBIDDEN),
+            _ => Err(StatusCode::BAD_GATEWAY),
+        }
+    }
+
+    /// SUBTASK7: Cache alias resolution result
+    async fn cache_alias_resolution(
+        &self,
+        alias: &str,
+        room_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), StatusCode> {
+        let cache_key = format!("alias_resolution:{}", alias);
+        let cache_value = serde_json::json!({
+            "room_id": room_id,
+            "cached_at": chrono::Utc::now().timestamp(),
+            "ttl": ttl_seconds
+        });
+
+        let query = "
+            INSERT INTO alias_cache (cache_key, cache_value, expires_at) 
+            VALUES ($key, $value, time::now() + duration::from_secs($ttl))
+            ON DUPLICATE KEY UPDATE 
+            cache_value = $value, expires_at = time::now() + duration::from_secs($ttl)
+        ";
+
+        self.db
+            .query(query)
+            .bind(("key", cache_key))
+            .bind(("value", cache_value))
+            .bind(("ttl", ttl_seconds as i64))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(())
+    }
+
+    /// SUBTASK7: Check cache for existing alias resolution
+    async fn get_cached_alias_resolution(&self, alias: &str) -> Result<Option<String>, StatusCode> {
+        let cache_key = format!("alias_resolution:{}", alias);
+        let query = "
+            SELECT cache_value FROM alias_cache 
+            WHERE cache_key = $key AND expires_at > time::now()
+            LIMIT 1
+        ";
+
+        let mut result = self.db
+            .query(query)
+            .bind(("key", cache_key))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let cache_records: Vec<serde_json::Value> = result
+            .take(0)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(cache_record) = cache_records.first() {
+            if let Some(cache_value) = cache_record.get("cache_value") {
+                if let Some(room_id) = cache_value.get("room_id").and_then(|v| v.as_str()) {
+                    return Ok(Some(room_id.to_string()));
+                }
+            }
+        }
+
         Ok(None)
     }
 

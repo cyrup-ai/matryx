@@ -1,17 +1,6 @@
 use axum::{Json, http::StatusCode};
-use serde_json::{Value, json};
-
-/// GET /_matrix/client/v3/account/3pid
-pub async fn get() -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "threepids": []
-    })))
-}
-
-/// POST /_matrix/client/v3/account/3pid
-pub async fn post(Json(_payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({})))
-}
+// Re-export the implementations from the 3pid module
+pub use crate::_matrix::client::v3::account::threepid_3pid::{get_threepids as get, add_threepid as post};
 
 pub mod add;
 pub mod bind;

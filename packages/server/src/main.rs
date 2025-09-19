@@ -14,6 +14,7 @@ use tower_http::cors::CorsLayer;
 mod _matrix;
 mod _well_known;
 mod auth;
+mod config;
 mod federation;
 mod room;
 mod state;
@@ -24,12 +25,19 @@ use crate::auth::{
     middleware::auth_middleware,
     middleware::require_auth_middleware,
 };
+use crate::config::ServerConfig;
 use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
+
+    // Initialize server configuration
+    ServerConfig::init().map_err(|e| {
+        tracing::error!("Failed to initialize server configuration: {}", e);
+        std::process::exit(1);
+    })?;
 
     // Initialize SurrealDB connection
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "memory".to_string());
@@ -58,8 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e: std::env::VarError| format!("Failed to initialize JWT secret: {}", e))?;
 
-    let homeserver_name = std::env::var("HOMESERVER_NAME")
-        .map_err(|_| "HOMESERVER_NAME environment variable is required")?;
+    let homeserver_name = ServerConfig::get().homeserver_name.clone();
 
     let session_service = Arc::new(MatrixSessionService::new(jwt_secret, homeserver_name.clone()));
 
@@ -115,6 +122,7 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v3/login", get(_matrix::client::v3::login::get).post(_matrix::client::v3::login::post))
         .route("/v3/logout", post(_matrix::client::v3::logout::post))
         .route("/v3/logout/all", post(_matrix::client::v3::logout::all::post))
+        .route("/v3/register", post(_matrix::client::v3::register::post))
         .route("/media/v1/create", post(_matrix::media::v1::create::post))
         .route("/media/v3/upload", post(_matrix::media::v3::upload::post))
         .route("/media/v3/upload/:server_name/:media_id", put(_matrix::media::v3::upload::by_server_name::by_media_id::put))

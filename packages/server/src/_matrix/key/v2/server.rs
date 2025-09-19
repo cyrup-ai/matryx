@@ -5,7 +5,7 @@ use std::env;
 use tracing::{error, info};
 
 use crate::AppState;
-use crate::utils::canonical_json::to_canonical_json;
+use matryx_entity::utils::canonical_json;
 
 #[derive(serde::Deserialize)]
 struct SigningKeyRecord {
@@ -189,7 +189,7 @@ fn build_canonical_server_json(
         "valid_until_ts": valid_until_ms
     });
 
-    Ok(to_canonical_json(&server_object)?)
+    Ok(canonical_json(&server_object)?)
 }
 
 /// Sign canonical JSON with Ed25519 private key

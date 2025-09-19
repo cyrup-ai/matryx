@@ -721,7 +721,16 @@ mod tests {
     }
 
     fn create_test_engine() -> EventSigningEngine {
-        // Create minimal test instance - would need proper setup in real tests
-        todo!("Implement test setup with mock dependencies")
+        use matryx_surrealdb::test_utils::create_test_db;
+        use std::sync::Arc;
+
+        let test_db = create_test_db();
+        let session_service = Arc::new(MatrixSessionService::with_db(
+            b"test_secret".to_vec(),
+            "test.example.org".to_string(),
+            test_db.clone(),
+        ));
+
+        EventSigningEngine::new(session_service, test_db, "test.example.org".to_string())
     }
 }

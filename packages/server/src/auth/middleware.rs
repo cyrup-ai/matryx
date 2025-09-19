@@ -28,8 +28,14 @@ pub async fn auth_middleware(
 
     let matrix_auth = if let Some(auth_header) = auth_header {
         if auth_header.starts_with("Bearer ") {
-            let token = auth_header.strip_prefix("Bearer ").ok_or(StatusCode::BAD_REQUEST)?;
-            validate_access_token(token).await?
+            // Use secure authentication validation
+            match extract_matrix_auth(request.headers(), &session_service).await {
+                Ok(auth) => auth,
+                Err(e) => {
+                    tracing::warn!("Authentication failed: {}", e);
+                    return Err(e.into());
+                }
+            }
         } else {
             // Missing proper token format - return MissingAuthorization error
             return Err(StatusCode::UNAUTHORIZED);
@@ -53,52 +59,7 @@ pub async fn require_auth_middleware(request: Request, next: Next) -> Result<Res
     Ok(next.run(request).await)
 }
 
-async fn validate_access_token(token: &str) -> Result<MatrixAuth, StatusCode> {
-    // For JWT tokens, validate using SessionService
-    if !token.starts_with("syt_") {
-        let jwt_secret = std::env::var("JWT_SECRET").map(|s| s.into_bytes()).map_err(|_| {
-            tracing::error!("JWT_SECRET environment variable not set");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let homeserver_name = std::env::var("HOMESERVER_NAME").map_err(|_| {
-            tracing::error!("HOMESERVER_NAME environment variable not set");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-        let session_service = MatrixSessionService::new(jwt_secret, homeserver_name);
 
-        match session_service.validate_access_token(token).await {
-            Ok(matrix_access_token) => {
-                // Access the fields to ensure they're used
-                let _token_field = &matrix_access_token.token;
-                let _user_id_field = &matrix_access_token.user_id;
-                let _device_id_field = &matrix_access_token.device_id;
-
-                Ok(MatrixAuth::User(matrix_access_token))
-            },
-            Err(crate::auth::MatrixAuthError::SessionExpired) => Err(StatusCode::UNAUTHORIZED),
-            Err(crate::auth::MatrixAuthError::UnknownToken) => Err(StatusCode::UNAUTHORIZED),
-            Err(crate::auth::MatrixAuthError::JwtError(_)) => Err(StatusCode::UNAUTHORIZED),
-            Err(crate::auth::MatrixAuthError::MissingToken) => Err(StatusCode::UNAUTHORIZED),
-            Err(crate::auth::MatrixAuthError::Forbidden) => Err(StatusCode::FORBIDDEN),
-            Err(crate::auth::MatrixAuthError::InvalidSignature) => Err(StatusCode::UNAUTHORIZED),
-            Err(crate::auth::MatrixAuthError::MissingAuthorization) => {
-                Err(StatusCode::UNAUTHORIZED)
-            },
-            Err(crate::auth::MatrixAuthError::DatabaseError(_)) => {
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            },
-            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        }
-    } else {
-        // For opaque tokens starting with "syt_", would need database lookup
-        // For now, construct and use the MissingToken error variant
-        let _missing_token_error = MatrixAuthError::MissingToken;
-        let _forbidden_error = MatrixAuthError::Forbidden;
-        let _database_error =
-            MatrixAuthError::DatabaseError("Database connection failed".to_string());
-        Err(StatusCode::UNAUTHORIZED)
-    }
-}
 
 async fn validate_server_signature(
     x_matrix_header: &str,
@@ -188,9 +149,12 @@ async fn validate_server_signature(
     }
 }
 
-/// Extract Matrix authentication from headers
+/// Extract Matrix authentication from headers with proper database validation
 /// Used in endpoints that need to validate authentication manually
-pub fn extract_matrix_auth(headers: &HeaderMap) -> Result<MatrixAuth, MatrixAuthError> {
+pub async fn extract_matrix_auth(
+    headers: &HeaderMap,
+    session_service: &MatrixSessionService,
+) -> Result<MatrixAuth, MatrixAuthError> {
     let auth_header = headers
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -198,25 +162,11 @@ pub fn extract_matrix_auth(headers: &HeaderMap) -> Result<MatrixAuth, MatrixAuth
 
     if auth_header.starts_with("Bearer ") {
         let token = auth_header.strip_prefix("Bearer ").ok_or(MatrixAuthError::MissingToken)?;
-        // For now, create a basic MatrixAuth::User from the token
-        // In a real implementation, this would validate against database
-        if token.starts_with("syt_") {
-            // Matrix opaque token format - requires database validation
-            // This should not be used directly without database validation
-            tracing::error!(
-                "Attempted to validate opaque token without database connection in extract_matrix_auth"
-            );
-            Err(MatrixAuthError::DatabaseError(
-                "Database validation required for opaque tokens".to_string(),
-            ))
-        } else {
-            // JWT token format - would need SessionService validation
-            // This function should not handle JWT validation directly
-            tracing::error!(
-                "Attempted to validate JWT token without proper SessionService in extract_matrix_auth"
-            );
-            Err(MatrixAuthError::UnknownToken)
-        }
+        
+        // Use existing validation infrastructure
+        let access_token = session_service.validate_access_token(token).await?;
+        
+        Ok(MatrixAuth::User(access_token))
     } else {
         Err(MatrixAuthError::MissingToken)
     }

@@ -12,7 +12,7 @@ workspace = true
 matryx_entity = { path = "../entity" }
 
 # Database
-surrealdb = { path = "../../forks/surrealdb/crates/sdk", features = ["kv-surrealkv"] }
+surrealdb = { path = "../../forks/surrealdb/crates/sdk", features = ["kv-mem", "kv-surrealkv"], version = "3.0.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -32,6 +32,7 @@ anyhow = "1.0.99"
 # Time utilities
 chrono = { version = "0.4.41", features = ["serde"] }
 uuid = "1.18.0"
+async-trait = "0.1.89"
 
 
 [dev-dependencies]

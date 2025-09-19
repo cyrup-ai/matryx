@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -8,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::config::ServerConfig;
 use crate::room::{JoinRulesValidator, PowerLevelValidator, RoomAliasResolver};
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState, Room};
@@ -31,10 +33,11 @@ use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 pub struct LiveMembershipService {
     db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
-    membership_repo: Arc<MembershipRepository<surrealdb::Surreal<surrealdb::engine::any::Any>>>,
+    membership_repo: Arc<MembershipRepository<surrealdb::engine::any::Any>>,
     join_rules_validator: Arc<JoinRulesValidator>,
     power_level_validator: Arc<PowerLevelValidator>,
     alias_resolver: Arc<RoomAliasResolver>,
+    homeserver_name: String,
 }
 
 /// Real-time membership update event
@@ -92,10 +95,9 @@ impl LiveMembershipService {
         // Initialize authorization components
         let join_rules_validator = Arc::new(JoinRulesValidator::new(db.clone()));
         let power_level_validator = Arc::new(PowerLevelValidator::new(db.clone()));
-        let alias_resolver = Arc::new(RoomAliasResolver::new(
-            db.clone(),
-            "localhost".to_string(), // TODO: Get from config
-        ));
+        let homeserver_name = ServerConfig::get().homeserver_name.clone();
+
+        let alias_resolver = Arc::new(RoomAliasResolver::new(db.clone(), homeserver_name.clone()));
 
         Self {
             db,
@@ -104,6 +106,7 @@ impl LiveMembershipService {
             join_rules_validator,
             power_level_validator,
             alias_resolver,
+            homeserver_name,
         }
     }
 
@@ -293,7 +296,11 @@ impl LiveMembershipService {
             room_id: membership.room_id.clone(),
             user_id: membership.user_id.clone(),
             membership_state: membership.membership.clone(),
-            event_id: format!("${}:{}", chrono::Utc::now().timestamp_millis(), "localhost"), // Generate event ID
+            event_id: Some(format!(
+                "${}:{}",
+                chrono::Utc::now().timestamp_millis(),
+                &self.homeserver_name
+            )), // Generate event ID
             sender: membership.invited_by.clone(),
             reason: None, // TODO: Extract from event content
             timestamp: chrono::Utc::now().timestamp_millis(),
@@ -604,6 +611,7 @@ impl Clone for LiveMembershipService {
             join_rules_validator: self.join_rules_validator.clone(),
             power_level_validator: self.power_level_validator.clone(),
             alias_resolver: self.alias_resolver.clone(),
+            homeserver_name: self.homeserver_name.clone(),
         }
     }
 }

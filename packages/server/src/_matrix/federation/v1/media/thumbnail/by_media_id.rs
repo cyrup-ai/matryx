@@ -6,8 +6,9 @@ use axum::{
 };
 use serde::Deserialize;
 use tracing::{debug, error, warn};
-use tokio::fs::File;
+use tokio::fs::{File, create_dir_all};
 use tokio_util::io::ReaderStream;
+use image::{ImageFormat, imageops::FilterType};
 
 use crate::state::AppState;
 use crate::auth::verify_x_matrix_auth;
@@ -240,6 +241,9 @@ async fn serve_thumbnail_file(
         .header("Content-Type", content_type)
         .header("Content-Length", content_length.to_string())
         .header("Cache-Control", "public, max-age=31536000, immutable")
+        .header("Content-Security-Policy", 
+            "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
+        .header("Cross-Origin-Resource-Policy", "cross-origin")
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Methods", "GET, OPTIONS")
         .header("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -252,18 +256,102 @@ async fn serve_thumbnail_file(
     Ok(response)
 }
 
-/// Generate thumbnail for media (placeholder implementation)
+/// Generate thumbnail for media with image processing
 async fn generate_thumbnail(
-    _state: &AppState,
-    _media_id: &str,
-    _original_path: &str,
-    _content_type: &str,
-    _width: u32,
-    _height: u32,
-    _method: &str,
-    _animated: bool,
+    state: &AppState,
+    media_id: &str,
+    original_path: &str,
+    content_type: &str,
+    width: u32,
+    height: u32,
+    method: &str,
+    animated: bool,
 ) -> Result<(String, String, u64), Box<dyn std::error::Error + Send + Sync>> {
-    // TODO: Implement actual thumbnail generation using image processing library
-    // For now, return an error to indicate thumbnails need to be pre-generated
-    Err("Thumbnail generation not yet implemented - thumbnails must be pre-generated".into())
+    // SUBTASK6: Validate thumbnail size limits
+    const MAX_THUMBNAIL_SIZE: u32 = 2048;
+    const MIN_THUMBNAIL_SIZE: u32 = 1;
+    
+    if width < MIN_THUMBNAIL_SIZE || height < MIN_THUMBNAIL_SIZE {
+        return Err(format!("Thumbnail size {}x{} too small (minimum {}x{})", 
+                          width, height, MIN_THUMBNAIL_SIZE, MIN_THUMBNAIL_SIZE).into());
+    }
+    
+    if width > MAX_THUMBNAIL_SIZE || height > MAX_THUMBNAIL_SIZE {
+        warn!("Oversized thumbnail request: {}x{} for media {}", width, height, media_id);
+        return Err(format!("Thumbnail size {}x{} exceeds maximum {}x{}", 
+                          width, height, MAX_THUMBNAIL_SIZE, MAX_THUMBNAIL_SIZE).into());
+    }
+
+    // SUBTASK2: Load source image and implement core thumbnail generation
+    let img = image::open(original_path)
+        .map_err(|e| format!("Failed to load image {}: {}", original_path, e))?;
+
+    // Resize based on method with high-quality filter
+    let thumbnail = match method {
+        "crop" => img.resize_to_fill(width, height, FilterType::Lanczos3),
+        "scale" => img.resize(width, height, FilterType::Lanczos3),
+        _ => return Err(format!("Invalid scaling method: {}", method).into()),
+    };
+
+    // SUBTASK3: Generate thumbnail file path and create directory structure
+    let thumbnail_dir = format!("media/thumbnails/{}", &media_id[0..2]);
+    create_dir_all(&thumbnail_dir).await
+        .map_err(|e| format!("Failed to create thumbnail directory {}: {}", thumbnail_dir, e))?;
+    
+    let thumbnail_filename = format!("{}_{}_{}x{}_{}.png", 
+                                   media_id, method, width, height, 
+                                   if animated { "animated" } else { "static" });
+    let thumbnail_path = format!("{}/{}", thumbnail_dir, thumbnail_filename);
+
+    // SUBTASK4: Implement format detection and conversion
+    let output_content_type = match content_type {
+        "image/png" | "image/gif" => "image/png", // Preserve transparency
+        _ => "image/jpeg", // Optimize for photos
+    };
+
+    // Save thumbnail with appropriate format
+    if output_content_type == "image/png" {
+        thumbnail.save_with_format(&thumbnail_path, ImageFormat::Png)
+            .map_err(|e| format!("Failed to save PNG thumbnail {}: {}", thumbnail_path, e))?;
+    } else {
+        thumbnail.save_with_format(&thumbnail_path, ImageFormat::Jpeg)
+            .map_err(|e| format!("Failed to save JPEG thumbnail {}: {}", thumbnail_path, e))?;
+    }
+
+    // Get file metadata
+    let metadata = tokio::fs::metadata(&thumbnail_path).await
+        .map_err(|e| format!("Failed to get thumbnail metadata {}: {}", thumbnail_path, e))?;
+    let file_size = metadata.len();
+
+    // SUBTASK5: Store thumbnail record in database
+    let insert_query = "
+        INSERT INTO thumbnails (
+            thumbnail_id, media_id, width, height, method, animated,
+            file_path, content_type, content_length, created_at
+        ) VALUES (
+            $thumbnail_id, $media_id, $width, $height, $method, $animated,
+            $file_path, $content_type, $content_length, time::now()
+        )
+    ";
+    
+    let thumbnail_id = format!("{}_{}_{}x{}_{}", media_id, method, width, height, animated);
+    
+    state.db
+        .query(insert_query)
+        .bind(("thumbnail_id", thumbnail_id))
+        .bind(("media_id", media_id))
+        .bind(("width", width as i64))
+        .bind(("height", height as i64))
+        .bind(("method", method))
+        .bind(("animated", animated))
+        .bind(("file_path", thumbnail_path.clone()))
+        .bind(("content_type", output_content_type))
+        .bind(("content_length", file_size as i64))
+        .await
+        .map_err(|e| format!("Failed to store thumbnail record: {}", e))?;
+
+    debug!("Generated thumbnail: {} ({}x{}, {}, {} bytes)", 
+           thumbnail_path, width, height, method, file_size);
+
+    Ok((thumbnail_path, output_content_type.to_string(), file_size))
 }

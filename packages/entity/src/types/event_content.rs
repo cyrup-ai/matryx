@@ -6,6 +6,8 @@ use crate::types::{
     KnockMembershipEventContent,
     LeaveMembershipEventContent,
     MembershipEventContent,
+    ServerNoticeContent,
+    StickerContent,
     ThirdPartyInviteEventContent,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,12 @@ pub enum EventContent {
 
     /// Authentication content
     Authentication(AuthenticationContent),
+
+    /// Sticker content (m.sticker)
+    Sticker(StickerContent),
+
+    /// Server notice content (m.server_notice)
+    ServerNotice(ServerNoticeContent),
 
     /// Generic fallback for unknown event types
     Unknown(serde_json::Value),

@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use axum::http::StatusCode;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+use crate::federation::state_resolution::{StateResolutionError, StateResolver};
 use crate::room::membership_errors::{MembershipError, MembershipResult};
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState, Room};
@@ -28,6 +29,7 @@ pub struct MembershipValidator {
     room_repo: Arc<RoomRepository>,
     membership_repo: Arc<MembershipRepository<surrealdb::engine::any::Any>>,
     event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    state_resolver: Arc<StateResolver>,
 }
 
 impl MembershipValidator {
@@ -37,17 +39,19 @@ impl MembershipValidator {
     /// * `db` - SurrealDB connection for efficient validation queries
     ///
     /// # Returns
-    /// * `MembershipValidator` - Ready-to-use validator with conflict detection
+    /// * `MembershipValidator` - Ready-to-use validator with Matrix State Resolution v2
     pub fn new(db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>) -> Self {
         let room_repo = Arc::new(RoomRepository::new((*db).clone()));
         let membership_repo = Arc::new(MembershipRepository::new((*db).clone()));
         let event_repo = Arc::new(EventRepository::new((*db).clone()));
+        let state_resolver = Arc::new(StateResolver::new(event_repo.clone(), room_repo.clone()));
 
         Self {
             db,
             room_repo,
             membership_repo,
             event_repo,
+            state_resolver,
         }
     }
 
@@ -98,7 +102,10 @@ impl MembershipValidator {
 
         info!(
             "Membership transition validation passed: {} -> {} for user {} in room {}",
-            from_membership.unwrap_or("none"), to_membership, user_id, room_id
+            from_membership.unwrap_or("none"),
+            to_membership,
+            user_id,
+            room_id
         );
         Ok(())
     }
@@ -107,10 +114,12 @@ impl MembershipValidator {
     fn validate_membership_state_value(&self, membership: &str) -> MembershipResult<()> {
         match membership {
             "join" | "leave" | "invite" | "ban" | "knock" => Ok(()),
-            _ => Err(MembershipError::InvalidEvent {
-                event_id: None,
-                reason: format!("Invalid membership state: {}", membership),
-            }),
+            _ => {
+                Err(MembershipError::InvalidEvent {
+                    event_id: None,
+                    reason: format!("Invalid membership state: {}", membership),
+                })
+            },
         }
     }
 
@@ -198,7 +207,8 @@ impl MembershipValidator {
         // Consider events from the last 30 seconds as potentially conflicting
         let recent_threshold = chrono::Utc::now().timestamp_millis() - 30_000;
 
-        let mut response = self.db
+        let mut response = self
+            .db
             .query(query)
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -224,8 +234,7 @@ impl MembershipValidator {
             for conflicting_event in recent_events {
                 debug!(
                     "Conflicting event: {} at timestamp {}",
-                    conflicting_event.event_id, 
-                    conflicting_event.origin_server_ts.unwrap_or(0)
+                    conflicting_event.event_id, conflicting_event.origin_server_ts
                 );
             }
         }
@@ -245,33 +254,33 @@ impl MembershipValidator {
 
         let is_valid_transition = match (from_state, to) {
             // Valid transitions from leave state
-            ("leave", "join") => true,    // Join room
-            ("leave", "invite") => true,  // Invite user  
-            ("leave", "ban") => true,     // Ban user
-            ("leave", "knock") => true,   // Knock on room
+            ("leave", "join") => true,   // Join room
+            ("leave", "invite") => true, // Invite user
+            ("leave", "ban") => true,    // Ban user
+            ("leave", "knock") => true,  // Knock on room
 
-            // Valid transitions from join state  
-            ("join", "leave") => true,    // Leave room
-            ("join", "ban") => true,      // Ban joined user
-            ("join", "invite") => false,  // Cannot invite already joined user
-            ("join", "knock") => false,   // Cannot knock when already joined
+            // Valid transitions from join state
+            ("join", "leave") => true,   // Leave room
+            ("join", "ban") => true,     // Ban joined user
+            ("join", "invite") => false, // Cannot invite already joined user
+            ("join", "knock") => false,  // Cannot knock when already joined
 
             // Valid transitions from invite state
-            ("invite", "join") => true,   // Accept invite
-            ("invite", "leave") => true,  // Reject invite or leave
-            ("invite", "ban") => true,    // Ban invited user
+            ("invite", "join") => true,  // Accept invite
+            ("invite", "leave") => true, // Reject invite or leave
+            ("invite", "ban") => true,   // Ban invited user
 
             // Valid transitions from ban state
-            ("ban", "leave") => true,     // Unban user (transition to leave)
-            ("ban", "invite") => false,   // Cannot invite banned user
-            ("ban", "join") => false,     // Cannot join when banned
-            ("ban", "ban") => true,       // Re-ban (idempotent)
+            ("ban", "leave") => true,   // Unban user (transition to leave)
+            ("ban", "invite") => false, // Cannot invite banned user
+            ("ban", "join") => false,   // Cannot join when banned
+            ("ban", "ban") => true,     // Re-ban (idempotent)
 
             // Valid transitions from knock state
-            ("knock", "invite") => true,  // Approve knock with invite
-            ("knock", "leave") => true,   // Withdraw knock
-            ("knock", "ban") => true,     // Ban knocking user
-            ("knock", "join") => false,   // Cannot join directly from knock
+            ("knock", "invite") => true, // Approve knock with invite
+            ("knock", "leave") => true,  // Withdraw knock
+            ("knock", "ban") => true,    // Ban knocking user
+            ("knock", "join") => false,  // Cannot join directly from knock
 
             // Idempotent transitions (same state)
             (same_from, same_to) if same_from == same_to => true,
@@ -314,7 +323,7 @@ impl MembershipValidator {
             self.validate_invite_edge_cases(room_id, user_id, event).await?;
         }
 
-        // Validate knock edge cases  
+        // Validate knock edge cases
         if to_membership == "knock" {
             self.validate_knock_edge_cases(room_id, user_id, event).await?;
         }
@@ -373,7 +382,7 @@ impl MembershipValidator {
                         current_membership: "join".to_string(),
                         requested_membership: "knock".to_string(),
                     });
-                }
+                },
                 MembershipState::Invite => {
                     return Err(MembershipError::MembershipAlreadyExists {
                         user_id: user_id.to_string(),
@@ -381,8 +390,8 @@ impl MembershipValidator {
                         current_membership: "invite".to_string(),
                         requested_membership: "knock".to_string(),
                     });
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
@@ -472,10 +481,12 @@ impl MembershipValidator {
         user_id.starts_with('@') && user_id.contains(':') && user_id.len() > 3
     }
 
-    /// Detect and resolve membership state conflicts using timestamps
+    /// Resolve membership state conflicts using Matrix State Resolution v2
     ///
-    /// When multiple membership changes occur simultaneously, use event timestamps
-    /// and origin server information to determine the correct final state.
+    /// Implements the complete Matrix state resolution algorithm v2 for membership
+    /// conflicts, handling power events, auth chains, and proper authorization rules.
+    /// This replaces the simple timestamp-based approach with Matrix specification
+    /// compliant state resolution.
     pub async fn resolve_membership_conflicts(
         &self,
         room_id: &str,
@@ -494,41 +505,723 @@ impl MembershipValidator {
         }
 
         debug!(
-            "Resolving {} conflicting membership events for user {} in room {}",
+            "Resolving {} conflicting membership events for user {} in room {} using Matrix State Resolution v2",
             conflicting_events.len(),
             user_id,
             room_id
         );
 
-        // Sort events by timestamp (primary) and event ID (secondary for tie-breaking)
-        let mut sorted_events = conflicting_events;
-        sorted_events.sort_by(|a, b| {
-            let ts_a = a.origin_server_ts.unwrap_or(0);
-            let ts_b = b.origin_server_ts.unwrap_or(0);
-            
-            match ts_a.cmp(&ts_b) {
-                std::cmp::Ordering::Equal => a.event_id.cmp(&b.event_id),
-                other => other,
-            }
-        });
+        // Get current room power levels for state resolution
+        let power_event = self.get_current_power_levels_event(room_id).await?;
 
-        // The event with the latest timestamp wins
-        let winning_event = sorted_events.into_iter().last().unwrap();
+        // Use Matrix State Resolution v2 algorithm
+        let resolved_state = self
+            .state_resolver
+            .resolve_state_v2(room_id, conflicting_events.clone(), power_event)
+            .await
+            .map_err(|e| {
+                match e {
+                    StateResolutionError::DatabaseError(db_err) => {
+                        MembershipError::database_error("state resolution", &db_err.to_string())
+                    },
+                    StateResolutionError::InvalidStateEvent(msg) => {
+                        MembershipError::InvalidEvent {
+                            event_id: None,
+                            reason: format!("State resolution failed: {}", msg),
+                        }
+                    },
+                    StateResolutionError::CircularDependency => {
+                        MembershipError::InconsistentRoomState {
+                            room_id: room_id.to_string(),
+                            details: "Circular dependency in authorization events".to_string(),
+                        }
+                    },
+                    StateResolutionError::MissingAuthEvent(event_id) => {
+                        MembershipError::InvalidEvent {
+                            event_id: Some(event_id),
+                            reason: "Missing required authorization event".to_string(),
+                        }
+                    },
+                    StateResolutionError::InvalidAuthorization(msg) => {
+                        MembershipError::InsufficientPermissions {
+                            action: "membership change".to_string(),
+                            required_level: 0,
+                            user_level: -1,
+                            room_id: room_id.to_string(),
+                        }
+                    },
+                }
+            })?;
 
+        // Extract the resolved membership event for this user
+        let membership_state_key = ("m.room.member".to_string(), user_id.to_string());
+        let winning_event = resolved_state
+            .state_events
+            .get(&membership_state_key)
+            .ok_or_else(|| {
+                MembershipError::InternalError {
+                    context: "state resolution".to_string(),
+                    error: format!(
+                        "No membership event found for user {} after resolution",
+                        user_id
+                    ),
+                }
+            })?
+            .clone();
+
+        // Log resolution results
         info!(
-            "Conflict resolved: event {} wins for user {} in room {}",
-            winning_event.event_id, user_id, room_id
+            "Matrix State Resolution v2 completed for user {} in room {}: event {} selected",
+            user_id, room_id, winning_event.event_id
         );
 
+        if !resolved_state.rejected_events.is_empty() {
+            debug!(
+                "State resolution rejected {} events: {:?}",
+                resolved_state.rejected_events.len(),
+                resolved_state
+                    .rejected_events
+                    .iter()
+                    .map(|e| &e.event_id)
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        if !resolved_state.soft_failed_events.is_empty() {
+            debug!(
+                "State resolution soft-failed {} events: {:?}",
+                resolved_state.soft_failed_events.len(),
+                resolved_state
+                    .soft_failed_events
+                    .iter()
+                    .map(|e| &e.event_id)
+                    .collect::<Vec<_>>()
+            );
+        }
+
         Ok(winning_event)
+    }
+
+    /// Get the current power levels event for the room
+    ///
+    /// Retrieves the current m.room.power_levels event needed for proper
+    /// state resolution calculations.
+    async fn get_current_power_levels_event(
+        &self,
+        room_id: &str,
+    ) -> MembershipResult<Option<Event>> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+              AND event_type = 'm.room.power_levels'
+              AND state_key = ''
+            ORDER BY depth DESC 
+            LIMIT 1
+        ";
+
+        let mut response = self
+            .db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| MembershipError::database_error("get power levels", &e.to_string()))?;
+
+        let power_events: Vec<Event> = response
+            .take(0)
+            .map_err(|e| MembershipError::database_error("power levels parsing", &e.to_string()))?;
+
+        Ok(power_events.into_iter().next())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::federation::state_resolution::{ResolvedState, StateResolutionError, StateResolver};
+    use matryx_entity::types::{Event, Membership, MembershipState, Room};
+    use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
+    use mockall::predicate::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tokio_test;
 
-    // Tests would be implemented here following Rust testing best practices  
-    // Using expect() in tests (never unwrap()) for proper error messages
-    // These tests would cover all validation scenarios, edge cases, and conflict resolution
+    // Test fixtures
+    fn create_test_event(
+        event_type: &str,
+        sender: &str,
+        room_id: &str,
+        state_key: Option<&str>,
+        content: serde_json::Value,
+    ) -> Event {
+        Event {
+            event_id: format!("${}", uuid::Uuid::new_v4()),
+            event_type: event_type.to_string(),
+            sender: sender.to_string(),
+            room_id: room_id.to_string(),
+            state_key: state_key.map(|s| s.to_string()),
+            content: matryx_entity::EventContent::Unknown(content),
+            origin_server_ts: chrono::Utc::now().timestamp_millis(),
+            unsigned: None,
+            redacts: None,
+            prev_events: Some(vec![]),
+            depth: Some(1),
+            auth_events: Some(vec![]),
+            hashes: Some(HashMap::new()),
+            signatures: Some(HashMap::new()),
+            outlier: Some(false),
+            received_ts: Some(chrono::Utc::now().timestamp_millis()),
+            rejected_reason: None,
+            soft_failed: Some(false),
+        }
+    }
+
+    fn create_membership_event(
+        sender: &str,
+        room_id: &str,
+        user_id: &str,
+        membership: &str,
+    ) -> Event {
+        let content = json!({
+            "membership": membership
+        });
+        create_test_event("m.room.member", sender, room_id, Some(user_id), content)
+    }
+
+    fn create_test_membership(
+        user_id: &str,
+        room_id: &str,
+        membership: MembershipState,
+    ) -> Membership {
+        Membership {
+            user_id: user_id.to_string(),
+            room_id: room_id.to_string(),
+            membership,
+            reason: None,
+            invited_by: None,
+            display_name: None,
+            avatar_url: None,
+            updated_at: Some(chrono::Utc::now()),
+            is_direct: Some(false),
+            third_party_invite: None,
+            join_authorised_via_users_server: None,
+        }
+    }
+
+    // Setup helper for creating validator with mocked dependencies
+    async fn setup_test_validator() -> MembershipValidator {
+        // Use in-memory database for testing
+        let db = Arc::new(
+            surrealdb::Surreal::new::<surrealdb::engine::any::Any>(
+                surrealdb::engine::any::connect("memory").await.unwrap(),
+            )
+            .unwrap(),
+        );
+        MembershipValidator::new(db)
+    }
+
+    mod constructor_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_new_creates_validator_with_dependencies() {
+            let validator = setup_test_validator().await;
+
+            // Validator should be created successfully - just test that we can access it
+            assert_eq!(validator.is_valid_matrix_user_id("@test:example.com"), true);
+        }
+    }
+
+    mod membership_state_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_validate_membership_state_value_valid_states() {
+            let validator = setup_test_validator().await;
+
+            let valid_states = ["join", "leave", "invite", "ban", "knock"];
+            for state in &valid_states {
+                let result = validator.validate_membership_state_value(state);
+                assert!(result.is_ok(), "State '{}' should be valid", state);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_state_value_invalid_states() {
+            let validator = setup_test_validator().await;
+
+            let invalid_states = ["invalid", "joined", "banned", "", "JOIN"];
+            for state in &invalid_states {
+                let result = validator.validate_membership_state_value(state);
+                assert!(result.is_err(), "State '{}' should be invalid", state);
+
+                if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                    assert!(reason.contains("Invalid membership state"));
+                } else {
+                    panic!("Expected InvalidEvent error for state '{}'", state);
+                }
+            }
+        }
+    }
+
+    mod event_format_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_valid_event() {
+            let validator = setup_test_validator().await;
+            let event = create_membership_event(
+                "@alice:example.com",
+                "!room:example.com",
+                "@bob:example.com",
+                "join",
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_ok(), "Valid membership event should pass validation");
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_wrong_event_type() {
+            let validator = setup_test_validator().await;
+            let mut event = create_membership_event(
+                "@alice:example.com",
+                "!room:example.com",
+                "@bob:example.com",
+                "join",
+            );
+            event.event_type = "m.room.message".to_string();
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Wrong event type should fail validation");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Event type must be m.room.member"));
+            } else {
+                panic!("Expected InvalidEvent error for wrong event type");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_missing_state_key() {
+            let validator = setup_test_validator().await;
+            let mut event = create_membership_event(
+                "@alice:example.com",
+                "!room:example.com",
+                "@bob:example.com",
+                "join",
+            );
+            event.state_key = None;
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Missing state_key should fail validation");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Membership event must have state_key"));
+            } else {
+                panic!("Expected InvalidEvent error for missing state_key");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_invalid_user_id() {
+            let validator = setup_test_validator().await;
+            let event = create_membership_event(
+                "@alice:example.com",
+                "!room:example.com",
+                "invalid_user_id",
+                "join",
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Invalid user ID should fail validation");
+
+            match result {
+                Err(MembershipError::InvalidMatrixId { expected_type, .. }) => {
+                    assert_eq!(expected_type, "user");
+                },
+                _ => panic!("Expected InvalidMatrixId error for invalid user ID"),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_missing_membership_field() {
+            let validator = setup_test_validator().await;
+            let content = json!({
+                "not_membership": "join"
+            });
+            let event = create_test_event(
+                "m.room.member",
+                "@alice:example.com",
+                "!room:example.com",
+                Some("@bob:example.com"),
+                content,
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Missing membership field should fail validation");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Membership event must have membership field"));
+            } else {
+                panic!("Expected InvalidEvent error for missing membership field");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_non_string_membership() {
+            let validator = setup_test_validator().await;
+            let content = json!({
+                "membership": 123
+            });
+            let event = create_test_event(
+                "m.room.member",
+                "@alice:example.com",
+                "!room:example.com",
+                Some("@bob:example.com"),
+                content,
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Non-string membership should fail validation");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Membership field must be string"));
+            } else {
+                panic!("Expected InvalidEvent error for non-string membership");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_with_valid_reason() {
+            let validator = setup_test_validator().await;
+            let content = json!({
+                "membership": "leave",
+                "reason": "User requested to leave"
+            });
+            let event = create_test_event(
+                "m.room.member",
+                "@alice:example.com",
+                "!room:example.com",
+                Some("@bob:example.com"),
+                content,
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_ok(), "Event with valid reason should pass validation");
+        }
+
+        #[tokio::test]
+        async fn test_validate_membership_event_format_with_invalid_reason() {
+            let validator = setup_test_validator().await;
+            let content = json!({
+                "membership": "leave",
+                "reason": 123
+            });
+            let event = create_test_event(
+                "m.room.member",
+                "@alice:example.com",
+                "!room:example.com",
+                Some("@bob:example.com"),
+                content,
+            );
+
+            let result = validator.validate_membership_event_format(&event);
+            assert!(result.is_err(), "Event with non-string reason should fail validation");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Reason field must be string"));
+            } else {
+                panic!("Expected InvalidEvent error for non-string reason");
+            }
+        }
+    }
+
+    mod state_transition_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_validate_state_transition_rules_valid_transitions() {
+            let validator = setup_test_validator().await;
+
+            let valid_transitions = vec![
+                // From leave
+                (None, "join"),
+                (Some("leave"), "join"),
+                (Some("leave"), "invite"),
+                (Some("leave"), "ban"),
+                (Some("leave"), "knock"),
+                // From join
+                (Some("join"), "leave"),
+                (Some("join"), "ban"),
+                // From invite
+                (Some("invite"), "join"),
+                (Some("invite"), "leave"),
+                (Some("invite"), "ban"),
+                // From ban
+                (Some("ban"), "leave"),
+                (Some("ban"), "ban"),
+                // From knock
+                (Some("knock"), "invite"),
+                (Some("knock"), "leave"),
+                (Some("knock"), "ban"),
+                // Idempotent transitions
+                (Some("join"), "join"),
+                (Some("leave"), "leave"),
+                (Some("invite"), "invite"),
+            ];
+
+            for (from, to) in valid_transitions {
+                let result = validator.validate_state_transition_rules(
+                    from,
+                    to,
+                    "@user:example.com",
+                    "!room:example.com",
+                );
+                assert!(result.is_ok(), "Transition {:?} -> {} should be valid", from, to);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_state_transition_rules_invalid_transitions() {
+            let validator = setup_test_validator().await;
+
+            let invalid_transitions = vec![
+                // Invalid from join
+                (Some("join"), "invite"),
+                (Some("join"), "knock"),
+                // Invalid from invite
+                // No invalid transitions from invite currently
+                // Invalid from ban
+                (Some("ban"), "invite"),
+                (Some("ban"), "join"),
+                // Invalid from knock
+                (Some("knock"), "join"),
+            ];
+
+            for (from, to) in invalid_transitions {
+                let result = validator.validate_state_transition_rules(
+                    from,
+                    to,
+                    "@user:example.com",
+                    "!room:example.com",
+                );
+                assert!(result.is_err(), "Transition {:?} -> {} should be invalid", from, to);
+
+                match result {
+                    Err(MembershipError::InvalidMembershipTransition {
+                        from: error_from,
+                        to: error_to,
+                        ..
+                    }) => {
+                        let expected_from = from.unwrap_or("leave");
+                        assert_eq!(error_from, expected_from);
+                        assert_eq!(error_to, to);
+                    },
+                    _ => {
+                        panic!(
+                            "Expected InvalidMembershipTransition error for {:?} -> {}",
+                            from, to
+                        )
+                    },
+                }
+            }
+        }
+    }
+
+    mod self_targeting_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_validate_self_targeting_rules_valid_self_actions() {
+            let validator = setup_test_validator().await;
+
+            // User can target themselves for join, leave, knock
+            let valid_self_actions = ["join", "leave", "knock"];
+            for action in &valid_self_actions {
+                let event = create_membership_event(
+                    "@user:example.com",
+                    "!room:example.com",
+                    "@user:example.com",
+                    action,
+                );
+                let result =
+                    validator.validate_self_targeting_rules("@user:example.com", &event, action);
+                assert!(result.is_ok(), "Self-action '{}' should be valid", action);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_self_targeting_rules_self_ban_prohibited() {
+            let validator = setup_test_validator().await;
+
+            let event = create_membership_event(
+                "@user:example.com",
+                "!room:example.com",
+                "@user:example.com",
+                "ban",
+            );
+            let result =
+                validator.validate_self_targeting_rules("@user:example.com", &event, "ban");
+
+            assert!(result.is_err(), "Self-ban should be prohibited");
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Users cannot ban themselves"));
+            } else {
+                panic!("Expected InvalidEvent error for self-ban");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_self_targeting_rules_non_self_sender_prohibited() {
+            let validator = setup_test_validator().await;
+
+            let event = create_membership_event(
+                "@alice:example.com",
+                "!room:example.com",
+                "@bob:example.com",
+                "join",
+            );
+            let result =
+                validator.validate_self_targeting_rules("@bob:example.com", &event, "join");
+
+            assert!(result.is_err(), "Non-self sender should be prohibited for self-targeting");
+            match result {
+                Err(MembershipError::InsufficientPermissions {
+                    action,
+                    required_level,
+                    user_level,
+                    ..
+                }) => {
+                    assert!(action.contains("change membership to join"));
+                    assert_eq!(required_level, 100);
+                    assert_eq!(user_level, 0);
+                },
+                _ => panic!("Expected InsufficientPermissions error for non-self sender"),
+            }
+        }
+    }
+
+    mod matrix_user_id_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_is_valid_matrix_user_id_valid_ids() {
+            let validator = setup_test_validator().await;
+
+            let valid_ids = [
+                "@user:example.com",
+                "@alice:matrix.org",
+                "@bob123:server.example.org",
+                "@test-user:test.example.com",
+            ];
+
+            for user_id in &valid_ids {
+                assert!(
+                    validator.is_valid_matrix_user_id(user_id),
+                    "User ID '{}' should be valid",
+                    user_id
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_is_valid_matrix_user_id_invalid_ids() {
+            let validator = setup_test_validator().await;
+
+            let invalid_ids = [
+                "user:example.com", // Missing @
+                "@user",            // Missing :
+                "@:",               // Empty parts
+                "@@::",             // Double symbols
+                "@",                // Too short
+                "user",             // No symbols at all
+            ];
+
+            for user_id in &invalid_ids {
+                assert!(
+                    !validator.is_valid_matrix_user_id(user_id),
+                    "User ID '{}' should be invalid",
+                    user_id
+                );
+            }
+        }
+    }
+
+    mod third_party_invite_validation_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_validate_third_party_invite_content_valid() {
+            let validator = setup_test_validator().await;
+
+            let valid_tpi = json!({
+                "signed": {
+                    "token": "some_token_value",
+                    "signatures": {}
+                }
+            });
+
+            let result = validator.validate_third_party_invite_content(&valid_tpi);
+            assert!(result.is_ok(), "Valid third-party invite should pass validation");
+        }
+
+        #[tokio::test]
+        async fn test_validate_third_party_invite_content_missing_signed() {
+            let validator = setup_test_validator().await;
+
+            let invalid_tpi = json!({
+                "not_signed": {}
+            });
+
+            let result = validator.validate_third_party_invite_content(&invalid_tpi);
+            assert!(result.is_err(), "Third-party invite without signed field should fail");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Third-party invite must have signed field"));
+            } else {
+                panic!("Expected InvalidEvent error for missing signed field");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_validate_third_party_invite_content_missing_token() {
+            let validator = setup_test_validator().await;
+
+            let invalid_tpi = json!({
+                "signed": {
+                    "not_token": "value"
+                }
+            });
+
+            let result = validator.validate_third_party_invite_content(&invalid_tpi);
+            assert!(result.is_err(), "Third-party invite without token should fail");
+
+            if let Err(MembershipError::InvalidEvent { reason, .. }) = result {
+                assert!(reason.contains("Third-party invite signed field must have token"));
+            } else {
+                panic!("Expected InvalidEvent error for missing token");
+            }
+        }
+    }
+
+    // Integration tests that would require more complex mocking
+    mod integration_tests {
+        use super::*;
+
+        #[tokio::test]
+        #[ignore] // Requires full database mocking
+        async fn test_validate_membership_transition_full_flow() {
+            // This would test the complete validate_membership_transition flow
+            // with all validation steps integrated together
+            // Requires comprehensive mocking of database operations
+        }
+
+        #[tokio::test]
+        #[ignore] // Requires state resolver mocking  
+        async fn test_resolve_membership_conflicts_state_resolution() {
+            // This would test the Matrix State Resolution v2 integration
+            // for resolving membership conflicts
+            // Requires mocking the StateResolver and its dependencies
+        }
+    }
 }

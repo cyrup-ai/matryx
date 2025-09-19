@@ -25,6 +25,9 @@ futures = "0.3.31"
 tokio-tungstenite = "0.24"
 url = "2.5"
 base64 = "0.22.1"
+futures-util = "0.3.31"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+surrealdb = { path = "../../forks/surrealdb/crates/sdk" }
 
 [lib]
 name = "matryx_client"

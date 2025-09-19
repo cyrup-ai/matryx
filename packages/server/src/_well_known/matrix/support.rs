@@ -4,28 +4,20 @@
 //! Returns information about how to contact the server administrator for support.
 //! This is an optional endpoint that helps users find support when things go wrong.
 
+use crate::config::ServerConfig;
 use axum::{http::StatusCode, response::Json};
 use serde_json::{Value, json};
 use std::env;
-use tracing::warn;
 
 /// Matrix server support information
 pub async fn get() -> Result<Json<Value>, StatusCode> {
-    // Get configuration from environment variables with reasonable defaults
-    let homeserver_name = env::var("HOMESERVER_NAME").unwrap_or_else(|_| {
-        warn!("HOMESERVER_NAME environment variable not set, using 'localhost'");
-        "localhost".to_string()
-    });
+    // Get configuration from centralized ServerConfig
+    let config = ServerConfig::get();
+    let homeserver_name = &config.homeserver_name;
+    let admin_email = &config.admin_email;
 
-    let admin_email = env::var("MATRIX_ADMIN_EMAIL").unwrap_or_else(|_| {
-        warn!("MATRIX_ADMIN_EMAIL environment variable not set, using default");
-        format!("admin@{}", homeserver_name)
-    });
-
-    let support_page = env::var("MATRIX_SUPPORT_PAGE").unwrap_or_else(|_| {
-        warn!("MATRIX_SUPPORT_PAGE environment variable not set, using default");
-        format!("https://{}/support", homeserver_name)
-    });
+    let support_page = env::var("MATRIX_SUPPORT_PAGE")
+        .unwrap_or_else(|_| format!("https://{}/support", homeserver_name));
 
     // Return standard Matrix support information
     // This provides contact information for users who need help

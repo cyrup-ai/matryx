@@ -1,13 +1,15 @@
+use crate::config::ServerConfig;
 use axum::{Json, extract::Path, http::StatusCode};
 use serde_json::{Value, json};
 
 /// GET /_matrix/client/v3/events/{eventId}
 pub async fn get(Path(_event_id): Path<String>) -> Result<Json<Value>, StatusCode> {
+    let config = ServerConfig::get();
     Ok(Json(json!({
         "content": {},
         "event_id": _event_id,
         "origin_server_ts": 1234567890,
-        "sender": "@example:localhost",
+        "sender": format!("@example:{}", config.homeserver_name),
         "type": "m.room.message"
     })))
 }

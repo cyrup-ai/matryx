@@ -1,5 +1,5 @@
 Review surrealdb 3.0 livequery functionality
-./forks/surrealb 
+./forks/surrealb
 
 Review the project architecture:
 ./packages/entity
@@ -12,17 +12,23 @@ contains the surrealdb schema for matryx
 uses a repository pattern for all surrealdb access
 
 ./packages/server
-contains the matryx homeserver 
+contains the matryx homeserver
 with all routes laid out in a sparse one file per route fashion
 
 ./packages/client
 contains a livequery client for the homeserver
-with all routes laid out in a sparse one file per route fashion 
+with all routes laid out in a sparse one file per route fashion
 
 CURRENT OBJECTIVE:
 
 complete the outstanding requirements from:
 
-- /Volumes/samsung_t9/maxtryx/spec/server/*.md
+- /Volumes/samsung_t9/maxtryx/spec/client/01_foundation_api.md
+- /Volumes/samsung_t9/maxtryx/spec/client/02_rooms_users.md
+- /Volumes/samsung_t9/maxtryx/spec/client/03_messaging_communication.md
+- /Volumes/samsung_t9/maxtryx/spec/client/04_security_encryption.md
+- /Volumes/samsung_t9/maxtryx/spec/client/05_advanced_features.md
+- /Volumes/samsung_t9/maxtryx/spec/client/06_user_experience.md
+- /Volumes/samsung_t9/maxtryx/spec/client/07_relationship_features.md
 
 deeply read and understand the current codebase implementation and plan out next steps.

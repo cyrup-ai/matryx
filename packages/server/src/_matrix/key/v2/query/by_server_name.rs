@@ -9,7 +9,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
-use crate::utils::canonical_json::to_canonical_json;
+use matryx_entity::utils::canonical_json;
 
 /// GET /_matrix/key/v2/query/{serverName}
 ///
@@ -161,7 +161,7 @@ async fn create_notary_signature(
         obj.remove("signatures");
     }
 
-    let canonical_json = to_canonical_json(&canonical_data)?;
+    let canonical_json = canonical_json(&canonical_data)?;
 
     // Sign the canonical JSON using existing patterns
     let signature = sign_canonical_json(&canonical_json, &signing_key.private_key)?;

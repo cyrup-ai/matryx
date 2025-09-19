@@ -1128,6 +1128,112 @@ DEFINE FIELD pdus ON TABLE backfill_response TYPE array<object> DEFAULT [];
 DEFINE INDEX backfill_response_origin_idx ON TABLE backfill_response COLUMNS origin;
 
 -- =====================================================
+-- SERVER SIGNING KEYS AND CRYPTOGRAPHIC INFRASTRUCTURE
+-- =====================================================
+
+-- Server signing keys table for Ed25519 federation signing and verification
+DEFINE TABLE server_signing_keys SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE true -- Server keys are public for verification
+        FOR create, update, delete WHERE $auth.admin = true;
+
+DEFINE FIELD key_id ON TABLE server_signing_keys TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD server_name ON TABLE server_signing_keys TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD private_key ON TABLE server_signing_keys TYPE option<string>; -- Only present for our own keys
+DEFINE FIELD public_key ON TABLE server_signing_keys TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD created_at ON TABLE server_signing_keys TYPE datetime DEFAULT time::now();
+DEFINE FIELD fetched_at ON TABLE server_signing_keys TYPE option<datetime>; -- For remote keys
+DEFINE FIELD expires_at ON TABLE server_signing_keys TYPE option<datetime>;
+DEFINE FIELD is_active ON TABLE server_signing_keys TYPE bool DEFAULT true;
+DEFINE FIELD valid_until_ts ON TABLE server_signing_keys TYPE option<int>; -- Matrix timestamp
+DEFINE FIELD signatures ON TABLE server_signing_keys TYPE option<object>; -- For remote key verification
+
+DEFINE INDEX server_keys_server_key_idx ON TABLE server_signing_keys COLUMNS server_name, key_id UNIQUE;
+DEFINE INDEX server_keys_server_idx ON TABLE server_signing_keys COLUMNS server_name;
+DEFINE INDEX server_keys_active_idx ON TABLE server_signing_keys COLUMNS server_name, is_active;
+DEFINE INDEX server_keys_expires_idx ON TABLE server_signing_keys COLUMNS expires_at;
+
+-- User access tokens table for Matrix client authentication
+DEFINE TABLE user_access_tokens SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE user_id = $auth.user_id OR $auth.admin = true
+        FOR create, update, delete WHERE user_id = $auth.user_id OR $auth.admin = true;
+
+DEFINE FIELD token ON TABLE user_access_tokens TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE user_access_tokens TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
+DEFINE FIELD device_id ON TABLE user_access_tokens TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD created_at ON TABLE user_access_tokens TYPE datetime DEFAULT time::now();
+DEFINE FIELD expires_at ON TABLE user_access_tokens TYPE option<datetime>;
+DEFINE FIELD last_used_at ON TABLE user_access_tokens TYPE option<datetime>;
+DEFINE FIELD is_active ON TABLE user_access_tokens TYPE bool DEFAULT true;
+
+DEFINE INDEX user_tokens_token_idx ON TABLE user_access_tokens COLUMNS token UNIQUE;
+DEFINE INDEX user_tokens_user_idx ON TABLE user_access_tokens COLUMNS user_id;
+DEFINE INDEX user_tokens_user_device_idx ON TABLE user_access_tokens COLUMNS user_id, device_id;
+DEFINE INDEX user_tokens_expires_idx ON TABLE user_access_tokens COLUMNS expires_at;
+
+-- Federation transactions cache for deduplication and reliability
+DEFINE TABLE federation_transactions SCHEMAFULL
+    PERMISSIONS
+        FOR select, create, update, delete WHERE $auth.admin = true;
+
+DEFINE FIELD transaction_key ON TABLE federation_transactions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD origin_server ON TABLE federation_transactions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD transaction_id ON TABLE federation_transactions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD result ON TABLE federation_transactions TYPE object DEFAULT {};
+DEFINE FIELD status ON TABLE federation_transactions TYPE string DEFAULT 'processed' ASSERT $value IN ['processing', 'processed', 'failed'];
+DEFINE FIELD created_at ON TABLE federation_transactions TYPE datetime DEFAULT time::now();
+DEFINE FIELD expires_at ON TABLE federation_transactions TYPE datetime DEFAULT (time::now() + duration::hours(24));
+
+DEFINE INDEX federation_tx_key_idx ON TABLE federation_transactions COLUMNS transaction_key UNIQUE;
+DEFINE INDEX federation_tx_server_idx ON TABLE federation_transactions COLUMNS origin_server;
+DEFINE INDEX federation_tx_expires_idx ON TABLE federation_transactions COLUMNS expires_at;
+
+-- Server capabilities and configuration
+DEFINE TABLE server_config SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE true -- Public server information
+        FOR create, update, delete WHERE $auth.admin = true;
+
+DEFINE FIELD key ON TABLE server_config TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD value ON TABLE server_config TYPE flexible; -- Can be string, number, boolean, object, array
+DEFINE FIELD description ON TABLE server_config TYPE option<string>;
+DEFINE FIELD updated_at ON TABLE server_config TYPE datetime DEFAULT time::now();
+DEFINE FIELD is_public ON TABLE server_config TYPE bool DEFAULT false; -- Whether exposed in server discovery
+
+DEFINE INDEX server_config_key_idx ON TABLE server_config COLUMNS key UNIQUE;
+DEFINE INDEX server_config_public_idx ON TABLE server_config COLUMNS is_public;
+
+-- Initialize default server configuration
+UPSERT server_config SET 
+    key = 'server_name',
+    value = 'localhost:8008',
+    description = 'Homeserver domain name',
+    is_public = true
+WHERE key = 'server_name';
+
+UPSERT server_config SET 
+    key = 'server_version',
+    value = 'matryx/1.0.0',
+    description = 'Server implementation version',
+    is_public = true
+WHERE key = 'server_version';
+
+UPSERT server_config SET 
+    key = 'supported_room_versions',
+    value = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+    description = 'Supported Matrix room versions',
+    is_public = true
+WHERE key = 'supported_room_versions';
+
+UPSERT server_config SET 
+    key = 'default_room_version',
+    value = '10',
+    description = 'Default room version for new rooms',
+    is_public = true
+WHERE key = 'default_room_version';
+
+-- =====================================================
 -- MATRIX PROTOCOL COMPLIANCE SUMMARY
 -- =====================================================
 -- This schema is now fully aligned with Matrix specification as source of truth
@@ -1136,9 +1242,402 @@ DEFINE INDEX backfill_response_origin_idx ON TABLE backfill_response COLUMNS ori
 -- UserPresenceUpdate, PushRule, RoomKeyBackup, TransactionResult, EventTemplate,
 -- OneTimeKeyObject, and federation entities (SendJoinRoomState, PublishedRoomsChunk, etc.)
 --
+-- Server cryptographic infrastructure: server_signing_keys, user_access_tokens,
+-- federation_transactions, server_config tables with proper indexing and permissions
+--
 -- LiveQuery events provide real-time Matrix /sync endpoint support
 -- Permissions follow Matrix security model for room membership and device access
--- Indexes optimized for Matrix protocol query patterns
+-- Indexes optimized for Matrix protocol query patterns and federation performance
 --
 -- All tables match corresponding entity definitions in packages/entity/src/types
 -- Schema serves as single source of truth for SurrealDB 3.0 Matrix homeserver implementation
+
+-- =====================================================
+-- ADVANCED MATRIX FEATURES SCHEMA EXTENSION
+-- =====================================================
+-- Push Notifications, Search, Third-Party Integration, 
+-- Public Room Directory, and Server Administration
+
+-- Push rules storage
+DEFINE TABLE push_rules SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE user_id = $auth.user_id
+        FOR create, update, delete WHERE user_id = $auth.user_id;
+
+DEFINE FIELD id ON TABLE push_rules TYPE string;
+DEFINE FIELD user_id ON TABLE push_rules TYPE string;
+DEFINE FIELD rule_id ON TABLE push_rules TYPE string;
+DEFINE FIELD kind ON TABLE push_rules TYPE string; -- override, content, room, sender, underride
+DEFINE FIELD priority ON TABLE push_rules TYPE int;
+DEFINE FIELD conditions ON TABLE push_rules TYPE array<object>;
+DEFINE FIELD actions ON TABLE push_rules TYPE array<object>;
+DEFINE FIELD enabled ON TABLE push_rules TYPE bool DEFAULT true;
+DEFINE FIELD default ON TABLE push_rules TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON TABLE push_rules TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX push_rules_user_rules ON TABLE push_rules COLUMNS user_id, kind, priority;
+DEFINE INDEX push_rules_rule_lookup ON TABLE push_rules COLUMNS user_id, rule_id UNIQUE;
+
+-- Pushers (devices registered for notifications)
+DEFINE TABLE pushers SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE user_id = $auth.user_id
+        FOR create, update, delete WHERE user_id = $auth.user_id;
+
+DEFINE FIELD id ON TABLE pushers TYPE string;
+DEFINE FIELD user_id ON TABLE pushers TYPE string;
+DEFINE FIELD pusher_id ON TABLE pushers TYPE string;
+DEFINE FIELD kind ON TABLE pushers TYPE string; -- http, email, etc.
+DEFINE FIELD app_id ON TABLE pushers TYPE string;
+DEFINE FIELD app_display_name ON TABLE pushers TYPE string;
+DEFINE FIELD device_display_name ON TABLE pushers TYPE string;
+DEFINE FIELD profile_tag ON TABLE pushers TYPE option<string>;
+DEFINE FIELD lang ON TABLE pushers TYPE string;
+DEFINE FIELD data ON TABLE pushers TYPE object; -- gateway URL, format, etc.
+DEFINE FIELD created_at ON TABLE pushers TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX pushers_user_pushers ON TABLE pushers COLUMNS user_id;
+DEFINE INDEX pushers_pusher_lookup ON TABLE pushers COLUMNS user_id, pusher_id UNIQUE;
+
+-- Search index metadata
+DEFINE TABLE search_index SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD event_id ON TABLE search_index TYPE string;
+DEFINE FIELD room_id ON TABLE search_index TYPE string;
+DEFINE FIELD sender ON TABLE search_index TYPE string;
+DEFINE FIELD event_type ON TABLE search_index TYPE string;
+DEFINE FIELD content_body ON TABLE search_index TYPE option<string>;
+DEFINE FIELD content_msgtype ON TABLE search_index TYPE option<string>;
+DEFINE FIELD origin_server_ts ON TABLE search_index TYPE datetime;
+
+DEFINE INDEX search_index_room_events ON TABLE search_index COLUMNS room_id, origin_server_ts;
+DEFINE INDEX search_index_content_search ON TABLE search_index COLUMNS content_body;
+DEFINE INDEX search_index_event_lookup ON TABLE search_index COLUMNS event_id UNIQUE;
+
+-- Third-party protocols
+DEFINE TABLE thirdparty_protocols SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD protocol_id ON TABLE thirdparty_protocols TYPE string;
+DEFINE FIELD display_name ON TABLE thirdparty_protocols TYPE string;
+DEFINE FIELD avatar_url ON TABLE thirdparty_protocols TYPE option<string>;
+DEFINE FIELD user_fields ON TABLE thirdparty_protocols TYPE array<object>;
+DEFINE FIELD location_fields ON TABLE thirdparty_protocols TYPE array<object>;
+DEFINE FIELD instances ON TABLE thirdparty_protocols TYPE array<object>;
+DEFINE FIELD created_at ON TABLE thirdparty_protocols TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX thirdparty_protocols_lookup ON TABLE thirdparty_protocols COLUMNS protocol_id UNIQUE;
+
+-- Third-party locations (rooms/channels)
+DEFINE TABLE thirdparty_locations SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD protocol ON TABLE thirdparty_locations TYPE string;
+DEFINE FIELD alias ON TABLE thirdparty_locations TYPE string;
+DEFINE FIELD fields ON TABLE thirdparty_locations TYPE object;
+DEFINE FIELD created_at ON TABLE thirdparty_locations TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX thirdparty_locations_protocol_alias ON TABLE thirdparty_locations COLUMNS protocol, alias;
+
+-- Third-party users
+DEFINE TABLE thirdparty_users SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD protocol ON TABLE thirdparty_users TYPE string;
+DEFINE FIELD userid ON TABLE thirdparty_users TYPE string;
+DEFINE FIELD fields ON TABLE thirdparty_users TYPE object;
+DEFINE FIELD created_at ON TABLE thirdparty_users TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX thirdparty_users_protocol_user ON TABLE thirdparty_users COLUMNS protocol, userid;
+
+-- Public rooms directory
+DEFINE TABLE public_rooms SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true OR $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.room_id AND membership = 'join');
+
+DEFINE FIELD room_id ON TABLE public_rooms TYPE string;
+DEFINE FIELD name ON TABLE public_rooms TYPE option<string>;
+DEFINE FIELD topic ON TABLE public_rooms TYPE option<string>;
+DEFINE FIELD canonical_alias ON TABLE public_rooms TYPE option<string>;
+DEFINE FIELD num_joined_members ON TABLE public_rooms TYPE int DEFAULT 0;
+DEFINE FIELD avatar_url ON TABLE public_rooms TYPE option<string>;
+DEFINE FIELD world_readable ON TABLE public_rooms TYPE bool DEFAULT false;
+DEFINE FIELD guest_can_join ON TABLE public_rooms TYPE bool DEFAULT false;
+DEFINE FIELD join_rule ON TABLE public_rooms TYPE string DEFAULT 'invite';
+DEFINE FIELD room_type ON TABLE public_rooms TYPE option<string>;
+DEFINE FIELD created_at ON TABLE public_rooms TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE public_rooms TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX public_rooms_room_search ON TABLE public_rooms COLUMNS name, topic;
+DEFINE INDEX public_rooms_member_count ON TABLE public_rooms COLUMNS num_joined_members DESC;
+DEFINE INDEX public_rooms_room_type_filter ON TABLE public_rooms COLUMNS room_type;
+DEFINE INDEX public_rooms_room_lookup ON TABLE public_rooms COLUMNS room_id UNIQUE;
+
+-- LiveQuery events for advanced features
+DEFINE EVENT push_rules_changed ON TABLE push_rules WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM push_rules WHERE user_id = $after.user_id OR user_id = $before.user_id
+);
+
+DEFINE EVENT pushers_changed ON TABLE pushers WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM pushers WHERE user_id = $after.user_id OR user_id = $before.user_id
+);
+
+DEFINE EVENT public_rooms_changed ON TABLE public_rooms WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM public_rooms
+);
+
+DEFINE EVENT search_index_changed ON TABLE search_index WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM search_index WHERE room_id = $after.room_id OR room_id = $before.room_id
+);
+-- User profiles table for User Experience API
+DEFINE TABLE user_profiles SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id = user_id OR $auth.is_admin = true
+        FOR create, update, delete WHERE $auth.user_id = user_id OR $auth.is_admin = true;
+
+DEFINE FIELD user_id ON TABLE user_profiles TYPE string ASSERT $value != "";
+DEFINE FIELD display_name ON TABLE user_profiles TYPE option<string>;
+DEFINE FIELD avatar_url ON TABLE user_profiles TYPE option<string>;
+DEFINE FIELD created_at ON TABLE user_profiles TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE user_profiles TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX user_profiles_lookup ON TABLE user_profiles COLUMNS user_id UNIQUE;
+
+-- Account data table for client configuration
+DEFINE TABLE account_data SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id = user_id OR $auth.is_admin = true
+        FOR create, update, delete WHERE $auth.user_id = user_id OR $auth.is_admin = true;
+
+DEFINE FIELD id ON TABLE account_data TYPE string ASSERT $value != "";
+DEFINE FIELD user_id ON TABLE account_data TYPE string ASSERT $value != "";
+DEFINE FIELD room_id ON TABLE account_data TYPE option<string>;
+DEFINE FIELD data_type ON TABLE account_data TYPE string ASSERT $value != "";
+DEFINE FIELD content ON TABLE account_data TYPE object;
+DEFINE FIELD created_at ON TABLE account_data TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON TABLE account_data TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX account_data_user_lookup ON TABLE account_data COLUMNS user_id, room_id, data_type UNIQUE;
+
+-- Room tags table for room organization
+DEFINE TABLE room_tags SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id = user_id OR $auth.is_admin = true
+        FOR create, update, delete WHERE $auth.user_id = user_id OR $auth.is_admin = true;
+
+DEFINE FIELD id ON TABLE room_tags TYPE string ASSERT $value != "";
+DEFINE FIELD user_id ON TABLE room_tags TYPE string ASSERT $value != "";
+DEFINE FIELD room_id ON TABLE room_tags TYPE string ASSERT $value != "";
+DEFINE FIELD tag ON TABLE room_tags TYPE string ASSERT $value != "";
+DEFINE FIELD tag_order ON TABLE room_tags TYPE option<float>;
+DEFINE FIELD created_at ON TABLE room_tags TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX room_tags_user_room_lookup ON TABLE room_tags COLUMNS user_id, room_id, tag UNIQUE;
+
+-- Media files table for media storage
+DEFINE TABLE media_files SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.user_id = uploaded_by OR $auth.is_admin = true;
+
+DEFINE FIELD media_id ON TABLE media_files TYPE string ASSERT $value != "";
+DEFINE FIELD server_name ON TABLE media_files TYPE string ASSERT $value != "";
+DEFINE FIELD content_type ON TABLE media_files TYPE string ASSERT $value != "";
+DEFINE FIELD content_length ON TABLE media_files TYPE int ASSERT $value > 0;
+DEFINE FIELD file_path ON TABLE media_files TYPE string ASSERT $value != "";
+DEFINE FIELD upload_name ON TABLE media_files TYPE option<string>;
+DEFINE FIELD uploaded_by ON TABLE media_files TYPE string ASSERT $value != "";
+DEFINE FIELD created_at ON TABLE media_files TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX media_files_lookup ON TABLE media_files COLUMNS server_name, media_id UNIQUE;
+
+-- Third-party identifiers table
+DEFINE TABLE user_threepids SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id = user_id OR $auth.is_admin = true
+        FOR create, update, delete WHERE $auth.user_id = user_id OR $auth.is_admin = true;
+
+DEFINE FIELD id ON TABLE user_threepids TYPE string ASSERT $value != "";
+DEFINE FIELD user_id ON TABLE user_threepids TYPE string ASSERT $value != "";
+DEFINE FIELD medium ON TABLE user_threepids TYPE string ASSERT $value IN ['email', 'msisdn'];
+DEFINE FIELD address ON TABLE user_threepids TYPE string ASSERT $value != "";
+DEFINE FIELD validated_at ON TABLE user_threepids TYPE option<datetime>;
+DEFINE FIELD added_at ON TABLE user_threepids TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX user_threepids_lookup ON TABLE user_threepids COLUMNS user_id, medium, address UNIQUE;
+
+-- LiveQuery events for User Experience API
+DEFINE EVENT user_profiles_changed ON TABLE user_profiles WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM user_profiles WHERE user_id = $after.user_id OR user_id = $before.user_id
+);
+
+DEFINE EVENT account_data_changed ON TABLE account_data WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM account_data WHERE user_id = $after.user_id OR user_id = $before.user_id
+);
+
+DEFINE EVENT room_tags_changed ON TABLE room_tags WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM room_tags WHERE user_id = $after.user_id OR user_id = $before.user_id
+);
+
+DEFINE EVENT media_files_changed ON TABLE media_files WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM media_files WHERE media_id = $after.media_id OR media_id = $before.media_id
+);-- Relationship Features API Database Schema Extensions
+
+-- Space relationships
+DEFINE TABLE space_children SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.parent_room_id AND membership = 'join');
+
+DEFINE FIELD parent_room_id ON TABLE space_children TYPE string ASSERT $value != "";
+DEFINE FIELD child_room_id ON TABLE space_children TYPE string ASSERT $value != "";
+DEFINE FIELD order_value ON TABLE space_children TYPE option<string>;
+DEFINE FIELD suggested ON TABLE space_children TYPE bool DEFAULT false;
+DEFINE FIELD via ON TABLE space_children TYPE array<string>;
+DEFINE FIELD created_at ON TABLE space_children TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX space_hierarchy ON TABLE space_children COLUMNS parent_room_id, child_room_id UNIQUE;
+
+-- Thread relationships  
+DEFINE TABLE event_threads SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.room_id AND membership = 'join')
+        FOR create, update, delete WHERE $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.room_id AND membership = 'join');
+
+DEFINE FIELD thread_root_id ON TABLE event_threads TYPE string ASSERT $value != "";
+DEFINE FIELD event_id ON TABLE event_threads TYPE string ASSERT $value != "";
+DEFINE FIELD room_id ON TABLE event_threads TYPE string ASSERT $value != "";
+DEFINE FIELD thread_depth ON TABLE event_threads TYPE int DEFAULT 0;
+DEFINE FIELD created_at ON TABLE event_threads TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX thread_events ON TABLE event_threads COLUMNS thread_root_id, event_id UNIQUE;
+
+-- Reaction aggregations
+DEFINE TABLE event_reactions SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.room_id AND membership = 'join')
+        FOR create, update, delete WHERE $auth.user_id = user_id;
+
+DEFINE FIELD event_id ON TABLE event_reactions TYPE string ASSERT $value != "";
+DEFINE FIELD room_id ON TABLE event_reactions TYPE string ASSERT $value != "";
+DEFINE FIELD reaction_key ON TABLE event_reactions TYPE string ASSERT $value != "";
+DEFINE FIELD user_id ON TABLE event_reactions TYPE string ASSERT $value != "";
+DEFINE FIELD created_at ON TABLE event_reactions TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX reaction_aggregation ON TABLE event_reactions COLUMNS event_id, reaction_key, user_id UNIQUE;
+
+-- User search index
+DEFINE TABLE user_search_index SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD user_id ON TABLE user_search_index TYPE string ASSERT $value != "";
+DEFINE FIELD display_name ON TABLE user_search_index TYPE option<string>;
+DEFINE FIELD search_vector ON TABLE user_search_index TYPE option<string>;
+DEFINE FIELD last_active ON TABLE user_search_index TYPE option<datetime>;
+DEFINE FIELD updated_at ON TABLE user_search_index TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX user_search_lookup ON TABLE user_search_index COLUMNS user_id UNIQUE;
+
+-- Content reports
+DEFINE TABLE content_reports SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE $auth.is_admin = true OR $auth.user_id = reporter_user_id
+        FOR create WHERE $auth.user_id = reporter_user_id
+        FOR update, delete WHERE $auth.is_admin = true;
+
+DEFINE FIELD id ON TABLE content_reports TYPE string ASSERT $value != "";
+DEFINE FIELD reporter_user_id ON TABLE content_reports TYPE string ASSERT $value != "";
+DEFINE FIELD reported_user_id ON TABLE content_reports TYPE option<string>;
+DEFINE FIELD room_id ON TABLE content_reports TYPE option<string>;
+DEFINE FIELD event_id ON TABLE content_reports TYPE option<string>;
+DEFINE FIELD reason ON TABLE content_reports TYPE string ASSERT $value != "";
+DEFINE FIELD score ON TABLE content_reports TYPE option<int>;
+DEFINE FIELD status ON TABLE content_reports TYPE string DEFAULT 'pending';
+DEFINE FIELD created_at ON TABLE content_reports TYPE datetime DEFAULT time::now();
+DEFINE FIELD resolved_at ON TABLE content_reports TYPE option<datetime>;
+
+DEFINE INDEX report_status ON TABLE content_reports COLUMNS status, created_at;
+DEFINE INDEX content_reports_lookup ON TABLE content_reports COLUMNS id UNIQUE;
+
+-- Room upgrades/tombstones
+DEFINE TABLE room_tombstones SCHEMAFULL
+    PERMISSIONS 
+        FOR select WHERE true
+        FOR create, update, delete WHERE $auth.user_id IN (SELECT user_id FROM room_members WHERE room_id = $parent.old_room_id AND membership = 'join');
+
+DEFINE FIELD old_room_id ON TABLE room_tombstones TYPE string ASSERT $value != "";
+DEFINE FIELD new_room_id ON TABLE room_tombstones TYPE string ASSERT $value != "";
+DEFINE FIELD upgrade_version ON TABLE room_tombstones TYPE string ASSERT $value != "";
+DEFINE FIELD created_by ON TABLE room_tombstones TYPE string ASSERT $value != "";
+DEFINE FIELD created_at ON TABLE room_tombstones TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX room_tombstones_lookup ON TABLE room_tombstones COLUMNS old_room_id UNIQUE;
+
+-- LiveQuery events for Relationship Features
+DEFINE EVENT space_children_changed ON TABLE space_children WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM space_children WHERE parent_room_id = $after.parent_room_id OR parent_room_id = $before.parent_room_id
+);
+
+DEFINE EVENT event_threads_changed ON TABLE event_threads WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM event_threads WHERE thread_root_id = $after.thread_root_id OR thread_root_id = $before.thread_root_id
+);
+
+DEFINE EVENT event_reactions_changed ON TABLE event_reactions WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM event_reactions WHERE event_id = $after.event_id OR event_id = $before.event_id
+);
+
+DEFINE EVENT content_reports_changed ON TABLE content_reports WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN (
+    LIVE SELECT * FROM content_reports WHERE status = 'pending'
+);
+
+-- =====================================================
+-- 3PID VALIDATION SESSIONS
+-- =====================================================
+
+-- Third-party identifier validation sessions
+DEFINE TABLE third_party_sessions SCHEMAFULL
+    PERMISSIONS
+        FOR select, create, update WHERE $auth.user_id != NONE
+        FOR delete WHERE $auth.admin = true;
+
+DEFINE FIELD session_id ON TABLE third_party_sessions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD client_secret ON TABLE third_party_sessions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD medium ON TABLE third_party_sessions TYPE string ASSERT $value IN ["email", "msisdn"];
+DEFINE FIELD address ON TABLE third_party_sessions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD verification_token ON TABLE third_party_sessions TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD verified ON TABLE third_party_sessions TYPE bool DEFAULT false;
+DEFINE FIELD expires_at ON TABLE third_party_sessions TYPE int ASSERT $value > 0;
+DEFINE FIELD user_id ON TABLE third_party_sessions TYPE option<string>;
+DEFINE FIELD created_at ON TABLE third_party_sessions TYPE int DEFAULT time::now();
+
+DEFINE INDEX session_id_idx ON TABLE third_party_sessions COLUMNS session_id UNIQUE;
+DEFINE INDEX client_secret_idx ON TABLE third_party_sessions COLUMNS client_secret;
+DEFINE INDEX address_idx ON TABLE third_party_sessions COLUMNS address;
+DEFINE INDEX expires_at_idx ON TABLE third_party_sessions COLUMNS expires_at;
+
+-- User 3PIDs table for storing verified third-party identifiers
+DEFINE TABLE user_3pids SCHEMAFULL
+    PERMISSIONS
+        FOR select, create, update WHERE $auth.user_id != NONE
+        FOR delete WHERE $auth.admin = true;
+
+DEFINE FIELD user_id ON TABLE user_3pids TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
+DEFINE FIELD medium ON TABLE user_3pids TYPE string ASSERT $value IN ["email", "msisdn"];
+DEFINE FIELD address ON TABLE user_3pids TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD validated_at ON TABLE user_3pids TYPE int ASSERT $value > 0;
+DEFINE FIELD added_at ON TABLE user_3pids TYPE int ASSERT $value > 0;
+
+DEFINE INDEX user_3pids_user_idx ON TABLE user_3pids COLUMNS user_id;
+DEFINE INDEX user_3pids_address_idx ON TABLE user_3pids COLUMNS medium, address UNIQUE;

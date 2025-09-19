@@ -214,21 +214,70 @@ impl EventSigner {
     /// Generate a new signing key for this server
     ///
     /// Creates a new Ed25519 key pair and stores it in the database
-    /// for use in signing outgoing events.
-    ///
-    /// Note: This is a placeholder implementation that would need proper key generation
-    /// integration with the session service once the appropriate public methods are available.
+    /// for use in signing outgoing events. Integrates with MatrixSessionService
+    /// for secure key generation and storage.
     pub async fn generate_new_signing_key(
         &self,
         key_name: Option<&str>,
     ) -> Result<String, EventSigningError> {
+        use base64::{Engine as _, engine::general_purpose};
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use rand::rngs::OsRng;
+
+        let db = &self.signing_engine.db;
+
+        // Generate Ed25519 key pair using cryptographically secure random number generator
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let verifying_key: VerifyingKey = (&signing_key).into();
+
+        // Create key ID with base64-encoded key prefix for uniqueness
         let key_id = format!(
             "ed25519:{}",
-            key_name.unwrap_or(&format!("k{}", chrono::Utc::now().timestamp()))
+            key_name.unwrap_or(&general_purpose::STANDARD.encode(&verifying_key.to_bytes()[..8]))
         );
 
-        // TODO: Implement proper key generation once session service provides public methods
-        info!("Generated new signing key: {}", key_id);
+        // Encode keys for database storage
+        let private_key_b64 = general_purpose::STANDARD.encode(signing_key.to_bytes());
+        let public_key_b64 = general_purpose::STANDARD.encode(verifying_key.to_bytes());
+
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::days(365); // 1 year validity
+
+        // Store the new signing key in the database with proper metadata
+        let query = "
+            CREATE server_signing_keys CONTENT {
+                key_id: $key_id,
+                server_name: $server_name,
+                private_key: $private_key,
+                public_key: $public_key,
+                created_at: $created_at,
+                expires_at: $expires_at,
+                is_active: true
+            }
+        ";
+
+        db.query(query)
+            .bind(("key_id", key_id.clone()))
+            .bind(("server_name", self.homeserver_name.clone()))
+            .bind(("private_key", private_key_b64))
+            .bind(("public_key", public_key_b64))
+            .bind(("created_at", now))
+            .bind(("expires_at", expires_at))
+            .await
+            .map_err(|e| {
+                EventSigningError::DatabaseError(
+                    matryx_surrealdb::repository::error::RepositoryError::Validation {
+                        field: "key_generation".to_string(),
+                        message: format!("Failed to store new signing key: {}", e),
+                    },
+                )
+            })?;
+
+        info!(
+            "Generated and stored new signing key: {} for server {} (expires: {})",
+            key_id, self.homeserver_name, expires_at
+        );
+
         Ok(key_id)
     }
 
@@ -268,8 +317,10 @@ mod tests {
             room_id: "!room:example.org".to_string(),
             sender: "@user:example.org".to_string(),
             event_type: "m.room.message".to_string(),
-            origin_server_ts: Some(chrono::Utc::now().timestamp_millis() as u64),
-            content: json!({"msgtype": "m.text", "body": "test"}),
+            origin_server_ts: chrono::Utc::now().timestamp_millis(),
+            content: matryx_entity::EventContent::Unknown(
+                json!({"msgtype": "m.text", "body": "test"}),
+            ),
             ..Default::default()
         };
 
@@ -282,7 +333,21 @@ mod tests {
     }
 
     fn create_test_signer() -> EventSigner {
-        // Create minimal test instance - would need proper setup in real tests
-        todo!("Implement test setup with mock dependencies")
+        use matryx_surrealdb::test_utils::create_test_db;
+        use std::sync::Arc;
+
+        let test_db = create_test_db();
+        let session_service = Arc::new(MatrixSessionService::with_db(
+            b"test_secret".to_vec(),
+            "test.example.org".to_string(),
+            test_db.clone(),
+        ));
+
+        EventSigner::new(
+            session_service,
+            test_db,
+            "test.example.org".to_string(),
+            "ed25519:test".to_string(),
+        )
     }
 }

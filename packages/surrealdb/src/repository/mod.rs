@@ -9,6 +9,7 @@ pub mod push_rule;
 pub mod room;
 pub mod session;
 pub mod third_party_invite;
+pub mod third_party_validation_session;
 pub mod transaction;
 pub mod user;
 

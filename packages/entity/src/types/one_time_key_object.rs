@@ -18,3 +18,9 @@ impl OneTimeKeyObject {
         Self { keys: HashMap::new(), signatures: None }
     }
 }
+
+impl Default for OneTimeKeyObject {
+    fn default() -> Self {
+        Self::new()
+    }
+}

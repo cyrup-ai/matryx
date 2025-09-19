@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::federation::pdu_validator::{PduValidator, ValidationResult};
 use crate::state::AppState;
+use crate::utils::canonical_json::to_canonical_json;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
@@ -20,6 +22,132 @@ struct XMatrixAuth {
     origin: String,
     key_id: String,
     signature: String,
+}
+
+/// Signature data extracted from third-party invite
+#[derive(Debug, Clone)]
+struct SignatureData {
+    server_name: String,
+    key_id: String,
+    signature: String,
+}
+
+/// Extract signature data from third-party invite
+fn extract_signature_data(
+    signed_object: &Value,
+    identity_server: &str,
+) -> Result<SignatureData, StatusCode> {
+    let signatures = signed_object
+        .get("signatures")
+        .and_then(|s| s.as_object())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let server_signatures = signatures
+        .get(identity_server)
+        .and_then(|s| s.as_object())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Find Ed25519 signature
+    let (key_id, signature_b64) = server_signatures
+        .iter()
+        .find(|(k, _)| k.starts_with("ed25519:"))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let signature_str = signature_b64
+        .as_str()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    Ok(SignatureData {
+        server_name: identity_server.to_string(),
+        key_id: key_id.clone(),
+        signature: signature_str.to_string(),
+    })
+}
+
+/// Fetch identity server public key
+async fn fetch_identity_server_key(
+    http_client: &Client,
+    identity_server: &str,
+    key_id: &str,
+) -> Result<String, StatusCode> {
+    let url = format!("https://{}/_matrix/identity/api/v1/pubkey/{}", identity_server, key_id);
+    
+    let response = http_client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Failed to fetch identity server key: {:?}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+
+    if !response.status().is_success() {
+        error!("Identity server returned error: {}", response.status());
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let key_data: Value = response
+        .json()
+        .await
+        .map_err(|e| {
+            error!("Failed to parse identity server key response: {:?}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let public_key = key_data
+        .get("public_key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| {
+            error!("Invalid public key format in identity server response");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    Ok(public_key.to_string())
+}
+
+/// Verify third-party invite signature using existing infrastructure
+async fn verify_third_party_invite_signature(
+    state: &AppState,
+    signed_object: &Value,
+    identity_server: &str,
+) -> Result<bool, StatusCode> {
+    // Extract signature data
+    let signature_data = extract_signature_data(signed_object, identity_server)?;
+
+    // Fetch public key from identity server
+    let public_key = fetch_identity_server_key(
+        &state.http_client, 
+        &signature_data.server_name, 
+        &signature_data.key_id
+    ).await?;
+
+    // Create canonical JSON without signatures
+    let mut canonical_object = signed_object.clone();
+    if let Some(obj) = canonical_object.as_object_mut() {
+        obj.remove("signatures");
+    }
+
+    let canonical_json = to_canonical_json(&canonical_object)
+        .map_err(|e| {
+            error!("Failed to create canonical JSON: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Use existing Ed25519 verification from MatrixSessionService
+    match state.session_service.verify_ed25519_signature(
+        &signature_data.signature,
+        &canonical_json,
+        &public_key,
+    ) {
+        Ok(_) => {
+            debug!("Third-party invite signature verified successfully");
+            Ok(true)
+        },
+        Err(e) => {
+            warn!("Third-party invite signature verification failed: {:?}", e);
+            Ok(false)
+        }
+    }
 }
 
 /// Parse X-Matrix authentication header
@@ -414,9 +542,7 @@ async fn verify_third_party_invite_signature(
         return Err("No public keys found in third-party invite event".into());
     };
 
-    // Verify the signature using the identity server's public keys
-    // This is a simplified verification - in a real implementation, you would
-    // use cryptographic libraries to verify the Ed25519 signature
+    // Get the signed object from third-party invite
     let signed_object = third_party_invite
         .get("signed")
         .ok_or("Missing signed object in third-party invite")?;
@@ -428,15 +554,47 @@ async fn verify_third_party_invite_signature(
         return Ok(false);
     }
 
-    // For now, we'll do basic validation of the signature structure
-    // In production, you would verify the actual cryptographic signature
-    let has_valid_signature_structure = signed_object
+    // Extract identity server from the signatures
+    let signatures = signed_object
         .get("signatures")
         .and_then(|s| s.as_object())
-        .map(|sigs| !sigs.is_empty())
-        .unwrap_or(false);
+        .ok_or("Missing signatures in third-party invite")?;
 
-    Ok(has_valid_signature_structure && !public_keys.is_empty())
+    // Find the first identity server with Ed25519 signatures
+    let identity_server = signatures
+        .keys()
+        .find(|server| {
+            signatures
+                .get(*server)
+                .and_then(|sigs| sigs.as_object())
+                .map(|sigs| sigs.keys().any(|k| k.starts_with("ed25519:")))
+                .unwrap_or(false)
+        })
+        .ok_or("No Ed25519 signatures found")?;
+
+    // Verify the cryptographic signature
+    match verify_third_party_invite_signature(state, signed_object, identity_server).await {
+        Ok(true) => {
+            info!("Third-party invite signature verified successfully");
+            Ok(true)
+        },
+        Ok(false) => {
+            warn!("Third-party invite signature verification failed");
+            Ok(false)
+        },
+        Err(StatusCode::BAD_REQUEST) => {
+            warn!("Invalid third-party invite signature format");
+            Ok(false)
+        },
+        Err(StatusCode::SERVICE_UNAVAILABLE) => {
+            error!("Identity server unavailable for key fetching");
+            Ok(false)
+        },
+        Err(_) => {
+            error!("Unexpected error during signature verification");
+            Ok(false)
+        },
+    }
 }
 
 /// Check if a user is authorized to invite users to a room

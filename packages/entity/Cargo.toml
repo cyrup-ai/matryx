@@ -17,6 +17,9 @@ chrono = { version = "0.4.41", features = ["serde"] }
 # Cryptography
 bcrypt = "0.17.1"
 
+# Error handling
+thiserror = "2.0.16"
+
 [lib]
 name = "matryx_entity"
 path = "src/lib.rs"
