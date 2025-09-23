@@ -16,7 +16,14 @@ pub struct PduParams {
     pub depth: i64,
 }
 
-/// Persistent Data Unit - core Matrix federation event structure
+/// Persistent Data Unit (PDU) - Matrix federation event structure
+///
+/// PDUs represent room events that are stored permanently in the room's history.
+/// They are the fundamental building blocks of Matrix rooms and are exchanged
+/// between homeservers during federation to maintain consistent room state.
+///
+/// **Matrix Specification:** Server-Server API Event Format
+/// **Purpose:** Permanent room events (messages, state changes, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PDU {
     /// Event content

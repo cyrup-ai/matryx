@@ -27,7 +27,7 @@ use surrealdb::engine::any::Any;
 pub struct JoinRulesValidator {
     db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
-    membership_repo: Arc<MembershipRepository<Any>>,
+    membership_repo: Arc<MembershipRepository>,
 }
 
 impl JoinRulesValidator {
@@ -393,8 +393,8 @@ impl JoinRulesValidator {
 
     /// Get allow conditions for restricted rooms from join_rules state event
     ///
-    /// Queries the room's m.room.join_rules state event to extract the allow
-    /// conditions that define which rooms/spaces grant access.
+    /// Uses RoomRepository to get the room's m.room.join_rules state event
+    /// and extract allow conditions that define which rooms/spaces grant access.
     ///
     /// # Arguments
     /// * `room_id` - The room ID to get allow conditions for
@@ -403,36 +403,19 @@ impl JoinRulesValidator {
     /// * `Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>>` - Allow conditions array
     ///
     /// # Errors
-    /// * Database query errors
+    /// * Repository errors
     /// * JSON parsing errors for malformed join_rules events
     async fn get_restricted_allow_conditions(
         &self,
         room_id: &str,
     ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let query = "
-            SELECT content
-            FROM event
-            WHERE room_id = $room_id 
-              AND event_type = 'm.room.join_rules'
-              AND state_key = ''
-            ORDER BY depth DESC, origin_server_ts DESC
-            LIMIT 1
-        ";
+        // Use RoomRepository to get the join_rules state event
+        match self.room_repo.get_room_state_event(room_id, "m.room.join_rules", "").await {
+            Ok(Some(join_rules_event)) => {
+                // Extract allow conditions from the event content
+                let content_value = serde_json::to_value(&join_rules_event.content)
+                    .map_err(|e| format!("Failed to serialize join rules content: {}", e))?;
 
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .await
-            .map_err(|e| format!("Database query failed for join rules: {}", e))?;
-
-        let content: Option<Value> = response
-            .take(0)
-            .map_err(|e| format!("Failed to parse join rules query result: {}", e))?;
-
-        match content {
-            Some(content_value) => {
-                // Extract allow conditions from the join_rules content
                 let allow_conditions = content_value
                     .get("allow")
                     .and_then(|v| v.as_array())
@@ -446,13 +429,14 @@ impl JoinRulesValidator {
                 );
                 Ok(allow_conditions)
             },
-            None => {
+            Ok(None) => {
                 debug!(
                     "No join_rules event found for room {}, defaulting to empty allow list",
                     room_id
                 );
                 Ok(vec![])
             },
+            Err(e) => Err(format!("Failed to get join rules for room {}: {:?}", room_id, e).into()),
         }
     }
 

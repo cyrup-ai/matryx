@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::{
@@ -5,6 +6,8 @@ use axum::{
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
 };
+use chrono::{DateTime, Utc};
+use matryx_entity::{DeviceInfo, DeviceKeys};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
@@ -15,21 +18,66 @@ use crate::{
 };
 use matryx_surrealdb::repository::{RepositoryError, device::DeviceRepository};
 
-/// Matrix Client-Server API v1.11 device information response
-#[derive(Serialize)]
-pub struct DeviceInfo {
-    pub device_id: String,
-    pub display_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_seen_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_seen_ts: Option<u64>,
+/// Extract device ID from Matrix authentication
+fn extract_device_id_from_auth(auth: &MatrixAuth) -> Option<String> {
+    match auth {
+        MatrixAuth::User(token_info) => Some(token_info.device_id.clone()),
+        _ => None,
+    }
 }
 
-/// Matrix Client-Server API v1.11 devices list response  
+/// Device trust level enumeration
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum TrustLevel {
+    #[serde(rename = "unverified")]
+    Unverified,
+    #[serde(rename = "cross_signed")]
+    CrossSigned,
+    #[serde(rename = "verified")]
+    Verified,
+    #[serde(rename = "blacklisted")]
+    Blacklisted,
+}
+
+impl Default for TrustLevel {
+    fn default() -> Self {
+        TrustLevel::Unverified
+    }
+}
+
+/// Client API Device Information - different from federation DeviceInfo
+#[derive(Serialize, Clone, Debug)]
+pub struct ClientDeviceInfo {
+    pub device_id: String,
+    pub display_name: Option<String>,
+    pub last_seen_ip: Option<String>,
+    pub last_seen_ts: Option<u64>,
+    pub user_id: String,
+    pub created_ts: u64,
+    pub device_keys: Option<DeviceKeys>,
+    pub trust_level: TrustLevel,
+    pub is_deleted: bool,
+}
+
+/// Matrix Client-Server API v1.11 devices list response
 #[derive(Serialize)]
 pub struct DevicesResponse {
-    pub devices: Vec<DeviceInfo>,
+    pub devices: Vec<ClientDeviceInfo>,
+}
+
+/// Device registration request
+#[derive(Deserialize)]
+pub struct DeviceRegistrationRequest {
+    pub device_id: String,
+    pub initial_device_display_name: Option<String>,
+    pub initial_device_keys: Option<DeviceKeys>,
+}
+
+/// Device registration response
+#[derive(Serialize)]
+pub struct DeviceRegistrationResponse {
+    pub device_id: String,
+    pub access_token: String,
 }
 
 /// Matrix Client-Server API v1.11 Section 5.5.1
@@ -50,12 +98,12 @@ pub async fn get(
     let start_time = std::time::Instant::now();
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Device list failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
 
-    let user_id = match auth {
+    let user_id = match &auth {
         MatrixAuth::User(token_info) => {
             if token_info.is_expired() {
                 warn!("Device list failed - access token expired for user");
@@ -78,6 +126,13 @@ pub async fn get(
     // Create device repository
     let device_repo = DeviceRepository::new(state.db.clone());
 
+    // Update current device activity
+    if let Some(current_device_id) = extract_device_id_from_auth(&auth) {
+        let _ = device_repo
+            .update_device_activity(&current_device_id, &user_id, Some(addr.ip().to_string()))
+            .await;
+    }
+
     // Get all devices for the user
     let devices = match device_repo.get_by_user(&user_id).await {
         Ok(devices) => devices,
@@ -97,14 +152,19 @@ pub async fn get(
     };
 
     // Convert to Matrix API format
-    let device_infos: Vec<DeviceInfo> = devices
+    let device_infos: Vec<ClientDeviceInfo> = devices
         .into_iter()
         .map(|device| {
-            DeviceInfo {
-                device_id: device.device_id,
-                display_name: device.display_name,
-                last_seen_ip: device.last_seen_ip,
+            ClientDeviceInfo {
+                device_id: device.device_id.clone(),
+                display_name: device.display_name.clone(),
+                last_seen_ip: device.last_seen_ip.clone(),
                 last_seen_ts: device.last_seen_ts.map(|ts| ts as u64),
+                user_id: device.user_id.clone(),
+                created_ts: device.created_at.timestamp() as u64,
+                device_keys: device.device_keys.and_then(|keys| serde_json::from_value(keys).ok()),
+                trust_level: TrustLevel::default(),
+                is_deleted: false,
             }
         })
         .collect();
@@ -119,6 +179,67 @@ pub async fn get(
     let response = DevicesResponse { devices: device_infos };
 
     Ok(Json(response))
+}
+
+/// Enhanced device registration with automatic key setup
+pub async fn register_device_with_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<DeviceRegistrationRequest>,
+) -> Result<Json<DeviceRegistrationResponse>, StatusCode> {
+    let auth = extract_matrix_auth(&headers, &state.session_service)
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let user_id = match auth {
+        MatrixAuth::User(token_info) => token_info.user_id.clone(),
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
+
+    let device_repo = DeviceRepository::new(state.db.clone());
+
+    // Create device with initial metadata
+    let device_info = matryx_entity::types::Device {
+        device_id: request.device_id.clone(),
+        user_id: user_id.clone(),
+        display_name: request.initial_device_display_name.clone(),
+        last_seen_ip: None,
+        last_seen_ts: Some(chrono::Utc::now().timestamp()),
+        created_at: chrono::Utc::now(),
+        hidden: Some(false),
+        device_keys: request
+            .initial_device_keys
+            .as_ref()
+            .map(|k| serde_json::to_value(k).ok())
+            .flatten(),
+        one_time_keys: None,
+        fallback_keys: None,
+        user_agent: None,
+        initial_device_display_name: request.initial_device_display_name.clone(),
+    };
+
+    let initial_keys = request.initial_device_keys.map(|keys| {
+        matryx_entity::types::DeviceKey {
+            user_id: keys.user_id,
+            device_id: keys.device_id,
+            algorithms: keys.algorithms,
+            keys: keys.keys,
+            signatures: keys.signatures,
+            unsigned: None,
+        }
+    });
+
+    let created_device = device_repo
+        .create_device_with_metadata(device_info, initial_keys)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Generate access token (placeholder implementation)
+    let access_token = format!("syt_{}_{}", user_id, chrono::Utc::now().timestamp());
+
+    info!("Device registration completed for user: {} device: {}", user_id, request.device_id);
+
+    Ok(Json(DeviceRegistrationResponse { device_id: created_device.device_id, access_token }))
 }
 
 pub mod by_device_id;

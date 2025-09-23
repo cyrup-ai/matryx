@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::Serialize;
-use tracing::error;
+use tracing::{error, info, warn};
 
 use crate::{
     AppState,
@@ -16,76 +16,68 @@ pub struct RoomAliasesResponse {
     aliases: Vec<String>,
 }
 
-async fn verify_room_membership(
-    state: &AppState,
-    room_id: &str,
-    user_id: &str,
-) -> Result<(), StatusCode> {
-    let query = "SELECT membership FROM membership WHERE room_id = $room_id AND user_id = $user_id";
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let membership: Option<String> =
-        response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match membership.as_deref() {
-        Some("join") => Ok(()),
-        _ => Err(StatusCode::FORBIDDEN),
-    }
-}
-
 /// GET /_matrix/client/v3/rooms/{roomId}/aliases
 pub async fn get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(room_id): Path<String>,
 ) -> Result<Json<RoomAliasesResponse>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
-        error!("Authentication failed: {}", e);
+    // Extract and validate Matrix authentication
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
+        warn!("Room aliases request failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
 
     let user_id = match auth {
         MatrixAuth::User(token_info) => {
             if token_info.is_expired() {
+                warn!("Room aliases request failed - access token expired for user");
                 return Err(StatusCode::UNAUTHORIZED);
             }
             token_info.user_id.clone()
         },
-        _ => return Err(StatusCode::FORBIDDEN),
+        MatrixAuth::Server(_) => {
+            // Server-to-server requests are allowed for federation
+            "server".to_string()
+        },
+        MatrixAuth::Anonymous => {
+            warn!("Room aliases request failed - anonymous authentication not allowed");
+            return Err(StatusCode::UNAUTHORIZED);
+        },
     };
 
-    // Verify user is member of room
-    verify_room_membership(&state, &room_id, &user_id).await?;
+    info!("Processing room aliases request for room: {} by user: {}", room_id, user_id);
 
-    let query = "
-        SELECT alias 
-        FROM room_aliases 
-        WHERE room_id = $room_id 
-          AND server_name = $server_name
-        ORDER BY created_at ASC
-    ";
+    // Validate room ID format
+    if !room_id.starts_with('!') {
+        warn!("Room aliases request failed - invalid room ID format: {}", room_id);
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id))
-        .bind(("server_name", state.homeserver_name.clone()))
-        .await
-        .map_err(|e| {
-            error!("Database query failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let aliases: Vec<String> = response.take(0).map_err(|e| {
-        error!("Failed to parse query result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(RoomAliasesResponse { aliases }))
+    // Use RoomOperationsService to get room aliases with all validation
+    match state.room_operations.get_room_aliases(&room_id, &user_id).await {
+        Ok(aliases_response) => {
+            info!(
+                "Successfully retrieved {} aliases for room {}",
+                aliases_response.aliases.len(),
+                room_id
+            );
+            Ok(Json(RoomAliasesResponse { aliases: aliases_response.aliases }))
+        },
+        Err(e) => {
+            error!("Failed to get room aliases for room {}: {}", room_id, e);
+            match e {
+                matryx_surrealdb::repository::error::RepositoryError::NotFound { .. } => {
+                    Err(StatusCode::NOT_FOUND)
+                },
+                matryx_surrealdb::repository::error::RepositoryError::Unauthorized { .. } => {
+                    Err(StatusCode::FORBIDDEN)
+                },
+                matryx_surrealdb::repository::error::RepositoryError::Validation { .. } => {
+                    Err(StatusCode::BAD_REQUEST)
+                },
+                _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        },
+    }
 }

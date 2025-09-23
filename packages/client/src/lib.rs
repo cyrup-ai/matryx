@@ -6,6 +6,7 @@
 pub mod _matrix;
 pub mod device;
 pub mod realtime;
+pub mod repositories;
 pub mod sync;
 
 use anyhow::Result;
@@ -39,17 +40,6 @@ impl Default for ClientConfig {
             sync_timeout_secs: 30,
         }
     }
-}
-
-/// Authentication credentials for Matrix client
-#[derive(Debug, Clone)]
-pub struct Credentials {
-    /// Matrix user ID
-    pub user_id: String,
-    /// Access token
-    pub access_token: String,
-    /// Device ID
-    pub device_id: Option<String>,
 }
 
 /// Matrix client state
@@ -457,7 +447,7 @@ pub struct TimelineUpdates {
 }
 
 // Re-export commonly used types from matryx_entity
-pub use matryx_entity::{Event, MembershipState, Room, Session, User};
+pub use matryx_entity::{Credentials, Event, MembershipState, Room, Session, User};
 
 #[cfg(test)]
 mod tests {

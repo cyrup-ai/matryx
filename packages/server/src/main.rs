@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     http::StatusCode,
-    middleware,
+    middleware as axum_middleware,
     routing::{delete, get, post, put},
 };
 use std::net::SocketAddr;
@@ -14,10 +14,25 @@ use tower_http::cors::CorsLayer;
 mod _matrix;
 mod _well_known;
 mod auth;
+mod cache;
 mod config;
+mod crypto;
+mod error;
+mod event_replacements;
 mod federation;
+mod mentions;
+mod metrics;
+mod middleware;
+mod monitoring;
+mod performance;
+mod push;
+mod reactions;
+mod response;
 mod room;
+mod security;
+mod server_notices;
 mod state;
+mod threading;
 mod utils;
 
 use crate::auth::{
@@ -26,6 +41,15 @@ use crate::auth::{
     middleware::require_auth_middleware,
 };
 use crate::config::ServerConfig;
+use crate::middleware::{
+    RateLimitConfig,
+    RateLimitService,
+    TransactionConfig,
+    TransactionService,
+    create_cors_layer,
+    rate_limit_middleware,
+    transaction_id_middleware,
+};
 use crate::state::AppState;
 
 #[tokio::main]
@@ -40,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Initialize SurrealDB connection
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "memory".to_string());
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "surrealkv://data/matrix.db".to_string());
 
     let db = any::connect(&db_url)
         .await
@@ -66,15 +90,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(|e: std::env::VarError| format!("Failed to initialize JWT secret: {}", e))?;
 
-    let homeserver_name = ServerConfig::get().homeserver_name.clone();
+    let config = ServerConfig::get();
+    let homeserver_name = config.homeserver_name.clone();
 
-    let session_service = Arc::new(MatrixSessionService::new(jwt_secret, homeserver_name.clone()));
+    // Create repository instances
+    let session_repo = matryx_surrealdb::repository::SessionRepository::new(db.clone());
+    let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(db.clone());
+
+    let session_service = Arc::new(MatrixSessionService::new(
+        jwt_secret,
+        homeserver_name.clone(),
+        session_repo,
+        key_server_repo,
+    ));
+
+    // Create HTTP client
+    let http_client = Arc::new(reqwest::Client::new());
+
+    // Create event signer
+    let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
+        session_service.clone(),
+        db.clone(),
+        homeserver_name.clone(),
+        "ed25519:auto".to_string(),
+    ));
+
+    // Initialize rate limiting service
+    let rate_limit_config = RateLimitConfig::from_env();
+    let rate_limit_service = Arc::new(
+        RateLimitService::new(Some(rate_limit_config.requests_per_minute))
+            .map_err(|e| format!("Failed to create rate limiting service: {}", e))?,
+    );
+
+    // Initialize transaction service
+    let transaction_service = Arc::new(TransactionService::new(db.clone()));
 
     // Create application state
-    let app_state = AppState::new(db, session_service, homeserver_name);
+    let app_state =
+        AppState::new(db, session_service, homeserver_name, config, http_client, event_signer);
 
     // Build our application with routes
-    let app = create_router(app_state);
+    let app = create_router(app_state, rate_limit_service, transaction_service);
 
     // Run it
     let addr = SocketAddr::from(([127, 0, 0, 1], 8008));
@@ -90,11 +146,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn create_router(app_state: AppState) -> Router {
+fn create_router(
+    app_state: AppState,
+    rate_limit_service: Arc<RateLimitService>,
+    transaction_service: Arc<TransactionService>,
+) -> Router {
     Router::new()
-        // Well-known endpoints (no auth required)
-        .route("/.well-known/matrix/client", get(_well_known::matrix::client::get))
-        .route("/.well-known/matrix/server", get(_well_known::matrix::server::get))
         // Client-Server API endpoints with authentication middleware
         .nest("/_matrix/client", create_client_routes())
         // Server-Server API endpoints with authentication middleware
@@ -107,15 +164,16 @@ fn create_router(app_state: AppState) -> Router {
         .nest("/.well-known", create_well_known_routes())
         // Add application state first
         .with_state(app_state.clone())
-        // Apply authentication middleware to all Matrix endpoints
-        // Remove middleware layer temporarily to fix compilation
-        .layer(CorsLayer::permissive())
+        // Apply middleware layers as specified in task
+        .layer(create_cors_layer())
+        .layer(axum_middleware::from_fn_with_state(rate_limit_service, rate_limit_middleware))
+        .layer(axum_middleware::from_fn_with_state(transaction_service, transaction_id_middleware))
         .fallback(handler_404)
 }
 
 fn create_client_routes() -> Router<AppState> {
     Router::new()
-        .layer(middleware::from_fn(require_auth_middleware))
+        .layer(axum_middleware::from_fn(require_auth_middleware))
         // Client API endpoints
         .route("/versions", get(_matrix::client::versions::get))
         .route("/v3/endpoint", post(_matrix::client::v3::endpoint::post))
@@ -255,7 +313,7 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v3/sendToDevice/:event_type/:txn_id", put(_matrix::client::v3::send_to_device::by_event_type::by_txn_id::put))
         .route("/v3/thirdparty/location/:alias", get(_matrix::client::v3::thirdparty::location::by_alias::get))
         .route("/v3/thirdparty/user/:userid", get(_matrix::client::v3::thirdparty::user::by_userid::get))
-        .route("/v3/user/:user_id/filter/:filter_id", post(_matrix::client::v3::user::by_user_id::filter::by_filter_id::post))
+        .route("/v3/user/:user_id/filter/:filter_id", get(_matrix::client::v3::user::by_user_id::filter::by_filter_id::get))
         .route("/v3/user/:user_id/report", post(_matrix::client::v3::user::by_user_id::report::post))
         .route("/v3/user/:user_id/rooms/:room_id/tags/:tag", get(_matrix::client::v3::user::by_user_id::rooms::by_room_id::tags::by_tag::get))
         .route("/v3/users/:user_id", get(_matrix::client::v3::users::by_user_id::get))
@@ -443,7 +501,15 @@ fn create_identity_routes() -> Router<AppState> {
 }
 
 fn create_well_known_routes() -> Router<AppState> {
-    Router::new().route("/matrix/support", get(_well_known::matrix::support::get))
+    Router::new()
+        // Matrix client auto-discovery endpoint
+        .route("/matrix/client", get(_well_known::matrix::client::get))
+        // Matrix server discovery endpoint
+        .route("/matrix/server", get(_well_known::matrix::server::get))
+        // Matrix support contact information endpoint
+        .route("/matrix/support", get(_well_known::matrix::support::get))
+        // Matrix identity server discovery endpoint
+        .route("/matrix/identity_server", get(_well_known::matrix::identity_server::get))
 }
 
 async fn handler_404() -> (StatusCode, &'static str) {

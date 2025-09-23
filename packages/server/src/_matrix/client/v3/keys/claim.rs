@@ -3,6 +3,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -24,7 +25,7 @@ pub async fn post(
     headers: HeaderMap,
     Json(request): Json<KeysClaimRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Keys claim failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, authenticate_user};
+use crate::auth::{MatrixAuthError, extract_matrix_auth};
 use crate::state::AppState;
 
 #[derive(Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub struct Protocol {
     pub instances: Vec<ProtocolInstance>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FieldType {
     pub regexp: String,
     pub placeholder: String,
@@ -43,13 +43,17 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<HashMap<String, Protocol>>, StatusCode> {
     // Authenticate user
-    let auth_result = authenticate_user(&state, &headers).await;
-    let user_id = match auth_result {
-        Ok(user_id) => user_id,
+    let auth_result = extract_matrix_auth(&headers, &state.session_service).await;
+    let matrix_auth = match auth_result {
+        Ok(auth) => auth,
         Err(MatrixAuthError::MissingToken) => return Err(StatusCode::UNAUTHORIZED),
-        Err(MatrixAuthError::InvalidToken) => return Err(StatusCode::UNAUTHORIZED),
-        Err(MatrixAuthError::ExpiredToken) => return Err(StatusCode::UNAUTHORIZED),
+        Err(MatrixAuthError::MissingAuthorization) => return Err(StatusCode::UNAUTHORIZED),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+
+    let user_id = match matrix_auth {
+        crate::auth::MatrixAuth::User(user_auth) => user_auth.user_id,
+        _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
     info!("Third-party protocols request from user {} at {}", user_id, addr);
@@ -102,7 +106,7 @@ pub async fn get(
             .collect();
 
         // Build field_types map
-        let mut field_types = HashMap::new();
+        let mut field_types: HashMap<String, FieldType> = HashMap::new();
         for field in &user_field_types {
             field_types.insert(format!("user.{}", field.placeholder), field.clone());
         }

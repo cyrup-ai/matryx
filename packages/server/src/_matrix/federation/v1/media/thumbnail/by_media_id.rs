@@ -12,6 +12,13 @@ use image::{ImageFormat, imageops::FilterType};
 
 use crate::state::AppState;
 use crate::auth::verify_x_matrix_auth;
+use matryx_surrealdb::repository::{
+    media::MediaRepository,
+    media_service::MediaService,
+    room::RoomRepository,
+    membership::MembershipRepository,
+};
+use std::sync::Arc;
 
 /// Query parameters for thumbnail download
 #[derive(Debug, Deserialize)]
@@ -35,7 +42,7 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     // Verify X-Matrix authentication
-    let auth_result = verify_x_matrix_auth(&headers, &state.server_name, &state.signing_key).await;
+    let auth_result = verify_x_matrix_auth(&headers, &state.homeserver_name, state.event_signer.get_default_key_id()).await;
     let _x_matrix_auth = auth_result.map_err(|e| {
         warn!("X-Matrix authentication failed for thumbnail download: {}", e);
         StatusCode::UNAUTHORIZED
@@ -64,151 +71,55 @@ pub async fn get(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Query original media metadata
-    let media_query = "
-        SELECT 
-            media_id, 
-            content_type, 
-            file_path, 
-            upload_name,
-            created_at
-        FROM media 
-        WHERE media_id = $media_id
-        LIMIT 1
-    ";
+    // Create MediaService instance
+    let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    
+    let media_service = MediaService::new(media_repo, room_repo, membership_repo);
 
-    let mut media_result = state
-        .db
-        .query(media_query)
-        .bind(("media_id", media_id.clone()))
-        .await
-        .map_err(|e| {
-            error!("Database query failed for media lookup: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let media_records: Vec<serde_json::Value> = media_result.take(0).map_err(|e| {
-        error!("Failed to parse media query result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let media_record = media_records.first().ok_or_else(|| {
-        debug!("Media not found: {}", media_id);
-        StatusCode::NOT_FOUND
-    })?;
-
-    let original_content_type = media_record
-        .get("content_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("application/octet-stream");
-
-    // Check if media type supports thumbnailing
-    if !is_thumbnailable_content_type(original_content_type) {
-        debug!("Media type {} not thumbnailable: {}", original_content_type, media_id);
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Look for existing thumbnail
-    let thumbnail_query = "
-        SELECT 
-            thumbnail_id,
-            content_type,
-            content_length,
-            file_path,
-            width,
-            height,
+    // Generate thumbnail using MediaService
+    let thumbnail_result = media_service
+        .generate_thumbnail(
+            &media_id,
+            &state.homeserver_name,
+            query.width,
+            query.height,
             method,
-            animated
-        FROM thumbnails 
-        WHERE media_id = $media_id 
-        AND width = $width 
-        AND height = $height 
-        AND method = $method
-        AND animated = $animated
-        LIMIT 1
-    ";
-
-    let animated = query.animated.unwrap_or(false);
-    let mut thumbnail_result = state
-        .db
-        .query(thumbnail_query)
-        .bind(("media_id", media_id.clone()))
-        .bind(("width", query.width as i64))
-        .bind(("height", query.height as i64))
-        .bind(("method", method.to_string()))
-        .bind(("animated", animated))
+        )
         .await
         .map_err(|e| {
-            error!("Database query failed for thumbnail lookup: {}", e);
+            debug!("Failed to generate thumbnail for {}: {}", media_id, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let thumbnail_records: Vec<serde_json::Value> = thumbnail_result.take(0).map_err(|e| {
-        error!("Failed to parse thumbnail query result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if let Some(thumbnail_record) = thumbnail_records.first() {
-        // Serve existing thumbnail
-        let content_type = thumbnail_record
-            .get("content_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("image/jpeg");
-
-        let content_length = thumbnail_record
-            .get("content_length")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        let file_path = thumbnail_record
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                error!("Missing file_path for thumbnail: {}", media_id);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        debug!(
-            "Serving existing thumbnail: media={}, size={}x{}, path={}",
-            media_id, query.width, query.height, file_path
-        );
-
-        return serve_thumbnail_file(file_path, content_type, content_length).await;
-    }
-
-    // Generate thumbnail on-demand if not found
     debug!(
-        "Generating thumbnail on-demand: media={}, size={}x{}, method={}",
-        media_id, query.width, query.height, method
+        "Serving federation thumbnail: media={}, size={}x{}, type={}",
+        media_id, thumbnail_result.width, thumbnail_result.height, thumbnail_result.content_type
     );
 
-    let original_file_path = media_record
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            error!("Missing file_path for original media: {}", media_id);
+    // Create response body from thumbnail content
+    let body = Body::from(thumbnail_result.thumbnail);
+
+    // Build response with appropriate headers
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", thumbnail_result.content_type)
+        .header("Content-Length", thumbnail_result.thumbnail.len().to_string())
+        .header("Cache-Control", "public, max-age=31536000, immutable")
+        .header("Content-Security-Policy", 
+            "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
+        .header("Cross-Origin-Resource-Policy", "cross-origin")
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        .body(body)
+        .map_err(|e| {
+            error!("Failed to build thumbnail response: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Generate and serve thumbnail
-    match generate_thumbnail(
-        &state,
-        &media_id,
-        original_file_path,
-        original_content_type,
-        query.width,
-        query.height,
-        method,
-        animated,
-    ).await {
-        Ok((thumbnail_path, thumbnail_content_type, thumbnail_size)) => {
-            serve_thumbnail_file(&thumbnail_path, &thumbnail_content_type, thumbnail_size).await
-        },
-        Err(e) => {
-            error!("Failed to generate thumbnail for {}: {}", media_id, e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
+    Ok(response)
 }
 
 /// Check if content type supports thumbnail generation

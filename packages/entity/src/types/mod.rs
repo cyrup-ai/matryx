@@ -5,6 +5,7 @@
 
 pub mod account_data;
 pub mod account_data_content;
+pub mod account_data_sync;
 pub mod auth_chain_response;
 pub mod authentication_content;
 pub mod authentication_data;
@@ -16,6 +17,9 @@ pub mod backfill_response;
 pub mod backup_auth_data;
 pub mod broadcast_event;
 pub mod cipher_text;
+pub mod client_config;
+pub mod client_credentials;
+pub mod connection_status;
 pub mod cross_signing_key;
 pub mod cross_signing_upload_request;
 pub mod crypto_device;
@@ -97,6 +101,7 @@ pub mod pdu;
 pub mod power_levels;
 pub mod presence_edu;
 pub mod presence_update;
+pub mod profile_response;
 pub mod public_keys;
 pub mod public_rooms_filter;
 pub mod public_rooms_filter_request;
@@ -115,6 +120,7 @@ pub mod push_rule_enabled_get_response;
 pub mod push_rule_enabled_update_request;
 pub mod push_rules_event;
 pub mod push_rules_get_response;
+pub mod pusher;
 pub mod qr_reciprocate_start;
 pub mod query;
 pub mod query_criteria;
@@ -123,6 +129,7 @@ pub mod query_response;
 pub mod rate_limit_response;
 pub mod read_receipt_metadata;
 pub mod receipt_edu;
+pub mod report;
 pub mod room;
 pub mod room_account_data;
 pub mod room_alias_mapping;
@@ -151,9 +158,9 @@ pub mod send_leave_v1_response;
 pub mod send_leave_v2_response;
 pub mod send_to_device_request;
 pub mod server_details;
-pub mod server_notice_content;
 pub mod server_info;
 pub mod server_keys_response;
+pub mod server_notice_content;
 pub mod session;
 pub mod session_data;
 pub mod signature_error;
@@ -174,8 +181,10 @@ pub mod space_parent_event;
 pub mod state_retrieval_request;
 pub mod sticker_content;
 pub mod stripped_state_event;
+pub mod sync;
 pub mod tag_collection;
 pub mod third_party_bind_request;
+pub mod third_party_id;
 pub mod third_party_invite;
 pub mod third_party_invite_data;
 pub mod third_party_invite_event;
@@ -183,6 +192,7 @@ pub mod third_party_invite_event_content;
 pub mod third_party_invite_request;
 pub mod third_party_signed;
 pub mod third_party_validation_session;
+pub mod thread_summary;
 pub mod to_device;
 pub mod to_device_message;
 pub mod transaction;
@@ -194,8 +204,12 @@ pub mod unsigned_data;
 pub mod unsigned_device_info;
 pub mod update_device_request;
 pub mod user;
+pub mod user_directory_response;
+pub mod user_info;
 pub mod user_presence_update;
+pub mod user_profile;
 pub mod user_read_receipt;
+
 pub mod verification_accept;
 pub mod verification_cancel;
 pub mod verification_done;
@@ -223,6 +237,9 @@ pub use backfill_response::BackfillResponse;
 pub use backup_auth_data::BackupAuthData;
 pub use broadcast_event::BroadcastEvent;
 pub use cipher_text::CipherText;
+pub use client_config::RealtimeConfig;
+pub use client_credentials::{Credentials, RealtimeCredentials};
+pub use connection_status::ConnectionStatus;
 pub use cross_signing_key::CrossSigningKey;
 pub use cross_signing_upload_request::CrossSigningUploadRequest;
 pub use crypto_device::CryptoDevice;
@@ -254,7 +271,7 @@ pub use event_template::EventTemplate;
 pub use exchange_third_party_invite_request::ExchangeThirdPartyInviteRequest;
 pub use federation_edu::FederationEDU;
 pub use federation_transaction::FederationTransaction;
-pub use filter::Filter;
+pub use filter::MatrixFilter;
 pub use flow_information::FlowInformation;
 pub use global_account_data::GlobalAccountData;
 pub use history_visibility_event::HistoryVisibilityEvent;
@@ -301,7 +318,7 @@ pub use one_time_key_object::OneTimeKeyObject;
 pub use open_id_error_response::OpenIdErrorResponse;
 pub use open_id_user_info_response::OpenIdUserInfoResponse;
 pub use pdu::PDU;
-pub use power_levels::PowerLevels;
+pub use power_levels::{NotificationPowerLevels, PowerLevels};
 pub use presence_edu::PresenceEDU;
 pub use presence_update::PresenceUpdate;
 pub use public_keys::PublicKeys;
@@ -322,6 +339,7 @@ pub use push_rule_enabled_get_response::PushRuleEnabledGetResponse;
 pub use push_rule_enabled_update_request::PushRuleEnabledUpdateRequest;
 pub use push_rules_event::PushRulesEvent;
 pub use push_rules_get_response::PushRulesGetResponse;
+pub use pusher::{Pusher, PusherData};
 pub use qr_reciprocate_start::QRReciprocateStart;
 pub use query::Query;
 pub use query_criteria::QueryCriteria;
@@ -358,9 +376,9 @@ pub use send_leave_v1_response::SendLeaveV1Response;
 pub use send_leave_v2_response::SendLeaveV2Response;
 pub use send_to_device_request::SendToDeviceRequest;
 pub use server_details::ServerDetails;
-pub use server_notice_content::{ServerNoticeContent, UsageLimitReachedNotice};
 pub use server_info::ServerInfo;
 pub use server_keys_response::ServerKeysResponse;
+pub use server_notice_content::{ServerNoticeContent, UsageLimitReachedNotice};
 pub use session::Session;
 pub use session_data::SessionData;
 pub use signature_error::SignatureError;
@@ -381,6 +399,7 @@ pub use space_parent_event::SpaceParentEvent;
 pub use state_retrieval_request::StateRetrievalRequest;
 pub use sticker_content::{StickerContent, StickerImageInfo, ThumbnailInfo};
 pub use stripped_state_event::StrippedStateEvent;
+pub use sync::*;
 pub use tag_collection::TagCollection;
 pub use third_party_bind_request::ThirdPartyBindRequest;
 pub use third_party_invite::ThirdPartyInvite;
@@ -389,6 +408,7 @@ pub use third_party_invite_event::ThirdPartyInviteEvent;
 pub use third_party_invite_event_content::ThirdPartyInviteEventContent;
 pub use third_party_invite_request::ThirdPartyInviteRequest;
 pub use third_party_signed::ThirdPartySigned;
+pub use thread_summary::ThreadSummary;
 pub use to_device::ToDevice;
 pub use to_device_message::ToDeviceMessage;
 pub use transaction::Transaction;
@@ -400,8 +420,10 @@ pub use unsigned_data::UnsignedData;
 pub use unsigned_device_info::UnsignedDeviceInfo;
 pub use update_device_request::UpdateDeviceRequest;
 pub use user::User;
+pub use user_directory_response::{UserDirectoryEntry, UserDirectoryResponse};
 pub use user_presence_update::UserPresenceUpdate;
 pub use user_read_receipt::UserReadReceipt;
+
 pub use verification_accept::VerificationAccept;
 pub use verification_cancel::VerificationCancel;
 pub use verification_done::VerificationDone;
@@ -414,3 +436,26 @@ pub use verification_request_to_device::VerificationRequestToDevice;
 pub use verification_start::VerificationStart;
 pub use verify_key::VerifyKey;
 pub use well_known_server_response::WellKnownServerResponse;
+
+// User profile and info types
+pub use user_info::UserInfo;
+pub use user_profile::UserProfile;
+
+// Account data sync types
+pub use account_data_sync::{AccountDataEvent, AccountDataSync};
+
+// Report types
+pub use report::{Report, ReportStatus};
+
+// Third-party identifier types
+pub use third_party_id::{ThirdPartyId, ThirdPartyMedium};
+
+// Profile management response types
+pub use profile_response::{
+    ProfileResponse,
+    TagsResponse,
+    ThirdPartyIdInfo,
+    ThirdPartyOperation,
+    ThirdPartyResponse,
+    WhoAmIResponse,
+};

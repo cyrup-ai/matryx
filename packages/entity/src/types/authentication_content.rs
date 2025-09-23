@@ -37,7 +37,13 @@ pub enum AuthenticationContent {
         session: Option<String>,
     },
 
-    /// Dummy authentication (m.login.dummy) - always succeeds
+    /// No-op authentication (m.login.dummy) - Matrix specification authentication type
+    ///
+    /// This authentication flow always succeeds and requires no additional parameters.
+    /// It is commonly used in registration flows where no actual authentication is needed.
+    ///
+    /// **Matrix Specification Reference:** Client-Server API Authentication Types
+    /// **Specification Behavior:** Always returns success without credential validation
     #[serde(rename = "m.login.dummy")]
     Dummy {
         /// Session ID for multi-stage auth

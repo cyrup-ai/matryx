@@ -27,7 +27,7 @@ use surrealdb::engine::any::Any;
 pub struct PowerLevelValidator {
     db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
-    membership_repo: Arc<MembershipRepository<Any>>,
+    membership_repo: Arc<MembershipRepository>,
 }
 
 impl PowerLevelValidator {
@@ -382,8 +382,8 @@ impl PowerLevelValidator {
 
     /// Get the current power levels configuration for a room
     ///
-    /// Queries the room's m.room.power_levels state event to get the current
-    /// power level configuration. Falls back to Matrix defaults if no event exists.
+    /// Uses RoomRepository to get the current power level configuration.
+    /// Falls back to Matrix defaults if no event exists.
     ///
     /// # Arguments
     /// * `room_id` - The room to get power levels for
@@ -392,40 +392,30 @@ impl PowerLevelValidator {
     /// * `Result<Value, StatusCode>` - The power levels configuration object
     ///
     /// # Errors
-    /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database query error
+    /// * `StatusCode::INTERNAL_SERVER_ERROR` - Repository error
     async fn get_room_power_levels(&self, room_id: &str) -> Result<Value, StatusCode> {
-        let query = "
-            SELECT content
-            FROM event 
-            WHERE room_id = $room_id 
-              AND event_type = 'm.room.power_levels'
-              AND state_key = ''
-            ORDER BY depth DESC, origin_server_ts DESC
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .await
-            .map_err(|e| {
-                error!("Failed to query power levels for room {}: {}", room_id, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        let power_levels: Option<Value> = response.take(0).map_err(|e| {
-            error!("Failed to parse power levels query result for room {}: {}", room_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        match power_levels {
-            Some(levels) => {
+        match self.room_repo.get_room_power_levels(room_id).await {
+            Ok(power_levels) => {
                 debug!("Found power levels configuration for room {}", room_id);
-                Ok(levels)
+
+                // Convert PowerLevels struct to JSON Value for compatibility
+                let power_levels_json = serde_json::json!({
+                    "users": power_levels.users,
+                    "users_default": power_levels.users_default,
+                    "events": power_levels.events,
+                    "events_default": power_levels.events_default,
+                    "state_default": power_levels.state_default,
+                    "ban": power_levels.ban,
+                    "kick": power_levels.kick,
+                    "redact": power_levels.redact,
+                    "invite": power_levels.invite
+                });
+
+                Ok(power_levels_json)
             },
-            None => {
-                debug!("No power levels event found for room {}, using Matrix defaults", room_id);
+            Err(e) => {
+                error!("Failed to get power levels for room {}: {:?}", room_id, e);
+                debug!("No power levels found for room {}, using Matrix defaults", room_id);
                 Ok(self.get_default_power_levels())
             },
         }

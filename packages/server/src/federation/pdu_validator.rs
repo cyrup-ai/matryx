@@ -18,7 +18,12 @@ use crate::federation::event_signing::EventSigningEngine;
 use crate::state::AppState;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::error::RepositoryError;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_surrealdb::repository::{
+    EventRepository,
+    FederationRepository,
+    KeyServerRepository,
+    RoomRepository,
+};
 
 /// Errors that can occur during PDU validation
 #[derive(Debug, thiserror::Error)]
@@ -86,9 +91,11 @@ enum DeduplicationResult {
 
 /// PDU Validator implementing Matrix Server-Server API validation pipeline
 pub struct PduValidator {
-    session_service: Arc<MatrixSessionService>,
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    session_service: Arc<MatrixSessionService<surrealdb::engine::any::Any>>,
+    event_repo: Arc<EventRepository>,
     room_repo: Arc<RoomRepository>,
+    federation_repo: Arc<FederationRepository>,
+    key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
     authorization_engine: AuthorizationEngine,
     event_signing_engine: EventSigningEngine,
     db: surrealdb::Surreal<surrealdb::engine::any::Any>,
@@ -97,9 +104,11 @@ pub struct PduValidator {
 
 impl PduValidator {
     pub fn new(
-        session_service: Arc<MatrixSessionService>,
-        event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+        session_service: Arc<MatrixSessionService<surrealdb::engine::any::Any>>,
+        event_repo: Arc<EventRepository>,
         room_repo: Arc<RoomRepository>,
+        federation_repo: Arc<FederationRepository>,
+        key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
         homeserver_name: String,
     ) -> Self {
@@ -111,6 +120,8 @@ impl PduValidator {
             session_service,
             event_repo,
             room_repo,
+            federation_repo,
+            key_server_repo,
             authorization_engine,
             event_signing_engine,
             db,
@@ -122,11 +133,15 @@ impl PduValidator {
     pub fn from_app_state(state: &AppState) -> Self {
         let event_repo = Arc::new(EventRepository::new(state.db.clone()));
         let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+        let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
+        let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
 
         Self::new(
             state.session_service.clone(),
             event_repo,
             room_repo,
+            federation_repo,
+            key_server_repo,
             state.db.clone(),
             state.homeserver_name.clone(),
         )
@@ -326,26 +341,11 @@ impl PduValidator {
 
         let content_hash = self.compute_sha256_content_hash(&event_json)?;
 
-        // Query for events with same content hash in the same room
-        let query = "
-            SELECT * FROM events 
-            WHERE room_id = $room_id 
-              AND content_hash = $content_hash 
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", event.room_id.clone()))
-            .bind(("content_hash", content_hash.clone()))
+        // Query for events with same content hash in the same room using federation repository
+        self.federation_repo
+            .find_event_by_content_hash(&event.room_id, &content_hash)
             .await
-            .map_err(|e| PduValidationError::DatabaseError(e.into()))?;
-
-        let existing_events: Vec<Event> =
-            response.take(0).map_err(|e| PduValidationError::DatabaseError(e.into()))?;
-
-        Ok(existing_events.into_iter().next())
+            .map_err(|e| PduValidationError::DatabaseError(e.into()))
     }
 
     /// Check for state key-based deduplication
@@ -358,31 +358,15 @@ impl PduValidator {
             None => return Ok(None),
         };
 
-        // Query for most recent state event with same type and state_key
-        let query = "
-            SELECT * FROM events 
-            WHERE room_id = $room_id 
-              AND event_type = $event_type 
-              AND state_key = $state_key 
-              AND soft_failed != true
-            ORDER BY origin_server_ts DESC 
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", event.room_id.clone()))
-            .bind(("event_type", event.event_type.clone()))
-            .bind(("state_key", state_key.clone()))
+        // Query for most recent state event with same type and state_key using federation repository
+        let existing_event = self
+            .federation_repo
+            .get_current_state_event(&event.room_id, &event.event_type, &state_key)
             .await
             .map_err(|e| PduValidationError::DatabaseError(e.into()))?;
 
-        let existing_events: Vec<Event> =
-            response.take(0).map_err(|e| PduValidationError::DatabaseError(e.into()))?;
-
         // Check if content is identical (true duplicate)
-        if let Some(existing_event) = existing_events.into_iter().next() {
+        if let Some(existing_event) = existing_event {
             if self.events_have_identical_content(event, &existing_event) {
                 return Ok(Some(existing_event));
             }
@@ -399,33 +383,22 @@ impl PduValidator {
         const TEMPORAL_WINDOW_MS: i64 = 1000; // 1 second window
 
         // Query for recent events from same sender with identical content
-        let query = "
-            SELECT * FROM events 
-            WHERE room_id = $room_id 
-              AND sender = $sender 
-              AND event_type = $event_type
-              AND origin_server_ts >= $start_time 
-              AND origin_server_ts <= $end_time
-            ORDER BY origin_server_ts DESC 
-            LIMIT 5
-        ";
-
         let start_time = event.origin_server_ts - TEMPORAL_WINDOW_MS;
         let end_time = event.origin_server_ts + TEMPORAL_WINDOW_MS;
 
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", event.room_id.clone()))
-            .bind(("sender", event.sender.clone()))
-            .bind(("event_type", event.event_type.clone()))
-            .bind(("start_time", start_time))
-            .bind(("end_time", end_time))
+        // Query for recent events using federation repository
+        let recent_events = self
+            .federation_repo
+            .find_recent_events_by_sender(
+                &event.room_id,
+                &event.sender,
+                &event.event_type,
+                start_time,
+                end_time,
+                Some(5),
+            )
             .await
             .map_err(|e| PduValidationError::DatabaseError(e.into()))?;
-
-        let recent_events: Vec<Event> =
-            response.take(0).map_err(|e| PduValidationError::DatabaseError(e.into()))?;
 
         // Check for identical content in temporal window
         for existing_event in recent_events {
@@ -580,17 +553,25 @@ impl PduValidator {
         // Room v5 includes all v4 validations
         self.validate_room_v4_format(event, pdu)?;
 
-        // Integer validation for timestamps and depth
-        if event.origin_server_ts > i64::MAX as i64 {
+        // Validate reasonable bounds for timestamps and depth
+        // Note: Both fields are already i64, so i64::MAX comparisons are always false
+        // Instead, validate against reasonable Matrix limits
+        if event.origin_server_ts < 0 {
             return Err(PduValidationError::InvalidFormat(
-                "Origin server timestamp exceeds maximum integer value".to_string(),
+                "Origin server timestamp cannot be negative".to_string(),
             ));
         }
 
         if let Some(depth) = event.depth {
-            if depth > i64::MAX {
+            if depth < 0 {
                 return Err(PduValidationError::InvalidFormat(
-                    "Event depth exceeds maximum integer value".to_string(),
+                    "Event depth cannot be negative".to_string(),
+                ));
+            }
+            // Validate against reasonable depth limit (Matrix spec suggests ~2^53)
+            if depth > 9_007_199_254_740_991 {
+                return Err(PduValidationError::InvalidFormat(
+                    "Event depth exceeds reasonable maximum".to_string(),
                 ));
             }
         }
@@ -1387,30 +1368,14 @@ impl PduValidator {
         // 4. Return the base64-encoded Ed25519 public key
 
         // Temporary implementation - query local server keys
-        let query = "
-            SELECT public_key 
-            FROM server_signing_keys 
-            WHERE server_name = $server_name 
-              AND key_id = $key_id 
-              AND is_active = true
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .bind(("key_id", key_id.to_string()))
+        // Get server signing key using key server repository
+        let public_key = self
+            .key_server_repo
+            .get_server_signing_key(server_name, key_id)
             .await
             .map_err(|e| {
                 PduValidationError::CryptoError(format!("Failed to query server keys: {}", e))
             })?;
-
-        let public_key: Option<String> = response.take(0).map_err(|e| {
-            PduValidationError::CryptoError(format!(
-                "Failed to parse server key query result: {}",
-                e
-            ))
-        })?;
 
         match public_key {
             Some(key) => {
@@ -1623,26 +1588,12 @@ impl PduValidator {
         key_id: &str,
         public_key: &str,
     ) -> Result<(), PduValidationError> {
-        let query = "
-            CREATE server_signing_keys SET
-                server_name = $server_name,
-                key_id = $key_id,
-                public_key = $public_key,
-                fetched_at = $fetched_at,
-                is_active = true,
-                expires_at = $expires_at
-        ";
-
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24); // Cache for 24 hours
+        let fetched_at = chrono::Utc::now();
 
-        let _response = self
-            .db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .bind(("key_id", key_id.to_string()))
-            .bind(("public_key", public_key.to_string()))
-            .bind(("fetched_at", chrono::Utc::now()))
-            .bind(("expires_at", expires_at))
+        // Cache server signing key using key server repository
+        self.key_server_repo
+            .cache_server_signing_key(server_name, key_id, public_key, fetched_at, expires_at)
             .await
             .map_err(|e| {
                 PduValidationError::CryptoError(format!("Failed to cache server key: {}", e))

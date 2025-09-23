@@ -4,8 +4,9 @@ use axum::{
     response::Json,
 };
 use chrono::Utc;
-use rand::{thread_rng, Rng};
+use rand;
 use rand::distributions::Alphanumeric;
+use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -14,15 +15,15 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    AppState,
     auth::MatrixSessionService,
     config::server_config::{EmailConfig, SmsConfig},
-    database::SurrealRepository,
-    AppState,
 };
 use matryx_entity::types::third_party_validation_session::ThirdPartyValidationSession;
+use matryx_surrealdb::repository::ProfileManagementService;
 use matryx_surrealdb::repository::third_party_validation_session::{
-    ThirdPartyValidationSessionRepository, 
-    ThirdPartyValidationSessionRepositoryTrait
+    ThirdPartyValidationSessionRepository,
+    ThirdPartyValidationSessionRepositoryTrait,
 };
 
 #[derive(Serialize)]
@@ -76,51 +77,38 @@ pub async fn get_threepids(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    // Query user's third-party identifiers
-    let query = "SELECT * FROM user_threepids WHERE user_id = $user_id";
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(token_info.user_id));
+    let profile_service = ProfileManagementService::new(state.db.clone());
 
-    let result = state.database
-        .query(query, Some(params))
+    // Get user's third-party identifiers using ProfileManagementService
+    let threepids = match profile_service
+        .manage_third_party_ids(
+            &token_info.user_id,
+            matryx_entity::types::ThirdPartyOperation::List,
+        )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut threepids = Vec::new();
-
-    if let Some(threepid_rows) = result.first() {
-        for row in threepid_rows {
-            if let (Some(medium), Some(address), validated_at, added_at) = (
-                row.get("medium").and_then(|v| v.as_str()),
-                row.get("address").and_then(|v| v.as_str()),
-                row.get("validated_at").and_then(|v| v.as_str()),
-                row.get("added_at").and_then(|v| v.as_str()),
-            ) {
-                // Convert timestamps to Unix epoch
-                let validated_timestamp = validated_at
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                    .map(|dt| dt.timestamp() as u64)
-                    .unwrap_or(0);
-
-                let added_timestamp = added_at
-                    .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                    .map(|dt| dt.timestamp() as u64)
-                    .unwrap_or(0);
-
-                threepids.push(ThreePid {
-                    medium: medium.to_string(),
-                    address: address.to_string(),
-                    validated_at: validated_timestamp,
-                    added_at: added_timestamp,
-                });
-            }
-        }
-    }
+    {
+        Ok(response) => {
+            response
+                .threepids
+                .into_iter()
+                .map(|tp| {
+                    ThreePid {
+                        medium: tp.medium,
+                        address: tp.address,
+                        validated_at: tp.validated_at.unwrap_or(0) as u64,
+                        added_at: tp.added_at as u64,
+                    }
+                })
+                .collect()
+        },
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
 
     Ok(Json(ThreePidsResponse { threepids }))
 }
@@ -138,29 +126,24 @@ pub async fn add_threepid(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Validate session and get verified 3PID
-    let session = validate_3pid_session(
-        &request.sid,
-        &request.client_secret,
-        state,
-    ).await?;
+    let session = validate_3pid_session(&request.sid, &request.client_secret, &state).await?;
 
     // Associate 3PID with user account
-    associate_3pid_with_account(&token_info.user_id, &session, state).await?;
+    associate_3pid_with_account(&token_info.user_id, &session, &state).await?;
 
     // Clean up session
     let repo = ThirdPartyValidationSessionRepository::new(state.db.clone());
-    repo.delete_session(&request.sid)
-        .await
-        .map_err(|e| {
-            error!("Failed to cleanup session: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    repo.delete_session(&request.sid).await.map_err(|e| {
+        error!("Failed to cleanup session: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     info!("3PID successfully added to account: {} -> {}", session.address, token_info.user_id);
     Ok(Json(json!({})))
@@ -168,11 +151,7 @@ pub async fn add_threepid(
 
 /// Generate secure verification token
 fn generate_verification_token() -> String {
-    thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect()
+    thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect()
 }
 
 /// Generate numeric verification code for SMS
@@ -186,6 +165,63 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Create a new 3PID validation session
+async fn create_3pid_session(
+    medium: &str,
+    address: &str,
+    client_secret: &str,
+    state: &AppState,
+) -> Result<ThirdPartyValidationSession, StatusCode> {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // Generate unique session ID
+    let session_id = Uuid::new_v4().to_string();
+
+    // Generate verification token (6-digit code for simplicity)
+    let verification_token = format!("{:06}", rand::random::<u32>() % 1000000);
+
+    // Session expires in 1 hour
+    let expires_at = Utc::now().timestamp() + 3600;
+
+    // Create session
+    let session = ThirdPartyValidationSession::new(
+        session_id,
+        client_secret.to_string(),
+        medium.to_string(),
+        address.to_string(),
+        verification_token.clone(),
+        expires_at,
+    );
+
+    // Save to database
+    let repo = ThirdPartyValidationSessionRepository::new(state.db.clone());
+    repo.create_session(&session).await.map_err(|e| {
+        error!("Failed to create 3PID session: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Send verification message based on medium
+    match medium {
+        "email" => {
+            send_verification_email(address, &verification_token, state).await?;
+        },
+        "msisdn" => {
+            send_verification_sms(address, &verification_token, state).await?;
+        },
+        _ => {
+            error!("Unsupported 3PID medium: {}", medium);
+            return Err(StatusCode::BAD_REQUEST);
+        },
+    }
+
+    info!(
+        "Created 3PID validation session {} for {} address: {}",
+        session.session_id, medium, address
+    );
+    Ok(session)
+}
+
 /// Validate 3PID session
 async fn validate_3pid_session(
     session_id: &str,
@@ -193,8 +229,9 @@ async fn validate_3pid_session(
     state: &AppState,
 ) -> Result<ThirdPartyValidationSession, StatusCode> {
     let repo = ThirdPartyValidationSessionRepository::new(state.db.clone());
-    
-    let session = repo.get_session_by_id_and_secret(session_id, client_secret)
+
+    let session = repo
+        .get_session_by_id_and_secret(session_id, client_secret)
         .await
         .map_err(|e| {
             error!("Failed to query 3PID session: {:?}", e);
@@ -226,56 +263,25 @@ async fn associate_3pid_with_account(
     session: &ThirdPartyValidationSession,
     state: &AppState,
 ) -> Result<(), StatusCode> {
-    // Check for existing 3PID associations
-    let check_query = r#"
-        SELECT user_id FROM user_3pids 
-        WHERE medium = $medium AND address = $address
-    "#;
+    let profile_service = ProfileManagementService::new(state.db.clone());
 
-    let mut result = state.db
-        .query(check_query)
-        .bind(("medium", &session.medium))
-        .bind(("address", &session.address))
-        .await
-        .map_err(|e| {
-            error!("Failed to check existing 3PID: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Add 3PID to user account using ProfileManagementService
+    let operation = matryx_entity::types::ThirdPartyOperation::Add {
+        medium: session.medium.clone(),
+        address: session.address.clone(),
+        validated: true,
+    };
 
-    let existing: Vec<Value> = result.take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if !existing.is_empty() {
-        warn!("3PID already associated with another account: {}", session.address);
-        return Err(StatusCode::CONFLICT);
+    match profile_service.manage_third_party_ids(user_id, operation).await {
+        Ok(_) => {
+            info!("3PID associated with account: {} -> {}", session.address, user_id);
+            Ok(())
+        },
+        Err(_) => {
+            error!("Failed to associate 3PID with account: {}", session.address);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        },
     }
-
-    // Add 3PID to user account
-    let insert_query = r#"
-        CREATE user_3pids SET
-            user_id = $user_id,
-            medium = $medium,
-            address = $address,
-            validated_at = $validated_at,
-            added_at = $added_at
-    "#;
-
-    let now = Utc::now().timestamp();
-    state.db
-        .query(insert_query)
-        .bind(("user_id", user_id))
-        .bind(("medium", &session.medium))
-        .bind(("address", &session.address))
-        .bind(("validated_at", now))
-        .bind(("added_at", now))
-        .await
-        .map_err(|e| {
-            error!("Failed to associate 3PID with account: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    info!("3PID associated with account: {} -> {}", session.address, user_id);
-    Ok(())
 }
 
 /// Send verification email with SMTP
@@ -284,12 +290,12 @@ async fn send_verification_email(
     token: &str,
     state: &AppState,
 ) -> Result<(), StatusCode> {
-    use lettre::{Message, SmtpTransport, Transport};
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::transport::smtp::client::{Tls, TlsParameters};
+    use lettre::{Message, SmtpTransport, Transport};
 
     let config = &state.config.email_config;
-    
+
     if !config.enabled {
         warn!("Email verification disabled - cannot send verification email");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -297,8 +303,7 @@ async fn send_verification_email(
 
     let verification_url = format!(
         "https://{}/_matrix/client/v3/account/3pid/email/verify?token={}",
-        state.config.homeserver_name,
-        token
+        state.config.homeserver_name, token
     );
 
     let email_body = format!(
@@ -321,9 +326,7 @@ async fn send_verification_email(
     <p style="color: #666; font-size: 14px;">This link will expire in 1 hour.</p>
 </body>
 </html>"#,
-        state.config.homeserver_name,
-        verification_url,
-        verification_url
+        state.config.homeserver_name, verification_url, verification_url
     );
 
     let email_message = Message::builder()
@@ -344,10 +347,7 @@ async fn send_verification_email(
         })?;
 
     // Configure SMTP transport
-    let creds = Credentials::new(
-        config.smtp_username.clone(),
-        config.smtp_password.clone(),
-    );
+    let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
 
     let mailer = SmtpTransport::relay(&config.smtp_server)
         .map_err(|e| {
@@ -359,18 +359,16 @@ async fn send_verification_email(
         .build();
 
     // Send email
-    tokio::task::spawn_blocking(move || {
-        mailer.send(&email_message)
-    })
-    .await
-    .map_err(|e| {
-        error!("Failed to spawn email sending task: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .map_err(|e| {
-        error!("Failed to send verification email: {:?}", e);
-        StatusCode::SERVICE_UNAVAILABLE
-    })?;
+    tokio::task::spawn_blocking(move || mailer.send(&email_message))
+        .await
+        .map_err(|e| {
+            error!("Failed to spawn email sending task: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map_err(|e| {
+            error!("Failed to send verification email: {:?}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
 
     info!("Verification email sent successfully to: {}", email);
     Ok(())
@@ -383,7 +381,7 @@ async fn send_verification_sms(
     state: &AppState,
 ) -> Result<(), StatusCode> {
     let config = &state.config.sms_config;
-    
+
     if !config.enabled {
         warn!("SMS verification disabled - cannot send verification SMS");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -399,7 +397,7 @@ async fn send_verification_sms(
         _ => {
             error!("Unsupported SMS provider: {}", config.provider);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        },
     }
 }
 
@@ -412,16 +410,10 @@ async fn send_twilio_sms(
 ) -> Result<(), StatusCode> {
     use base64::{Engine, engine::general_purpose};
 
-    let url = format!(
-        "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
-        config.api_key
-    );
+    let url =
+        format!("https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json", config.api_key);
 
-    let params = [
-        ("To", to),
-        ("From", &config.from_number),
-        ("Body", message),
-    ];
+    let params = [("To", to), ("From", &config.from_number), ("Body", message)];
 
     let auth_header = format!(
         "Basic {}",
@@ -457,9 +449,10 @@ pub async fn verify_3pid_token(
     Json(request): Json<VerifyTokenRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     let repo = ThirdPartyValidationSessionRepository::new(state.db.clone());
-    
+
     // Look up session
-    let session = repo.get_session_by_id_and_secret(&request.session_id, &request.client_secret)
+    let session = repo
+        .get_session_by_id_and_secret(&request.session_id, &request.client_secret)
         .await
         .map_err(|e| {
             error!("Failed to query 3PID session: {:?}", e);
@@ -489,12 +482,10 @@ pub async fn verify_3pid_token(
     }
 
     // Increment attempt count
-    repo.increment_session_attempts(&request.session_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to increment session attempts: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    repo.increment_session_attempts(&request.session_id).await.map_err(|e| {
+        error!("Failed to increment session attempts: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Validate token with timing-safe comparison
     if !constant_time_eq(session.verification_token.as_bytes(), request.token.as_bytes()) {
@@ -503,12 +494,10 @@ pub async fn verify_3pid_token(
     }
 
     // Mark session as verified
-    repo.mark_session_verified(&request.session_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to mark session as verified: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    repo.mark_session_verified(&request.session_id).await.map_err(|e| {
+        error!("Failed to mark session as verified: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     info!("3PID token verified successfully for session: {}", request.session_id);
     Ok(Json(json!({ "success": true })))
@@ -542,15 +531,14 @@ pub async fn request_3pid_token(
 
     // Check for existing active sessions for this address
     let repo = ThirdPartyValidationSessionRepository::new(state.db.clone());
-    let existing_sessions = repo.get_sessions_by_address(medium, address)
-        .await
-        .map_err(|e| {
-            error!("Failed to check existing sessions: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let existing_sessions = repo.get_sessions_by_address(medium, address).await.map_err(|e| {
+        error!("Failed to check existing sessions: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Check rate limiting - only allow one active session per address
-    let active_sessions: Vec<_> = existing_sessions.into_iter()
+    let active_sessions: Vec<_> = existing_sessions
+        .into_iter()
         .filter(|s| !s.is_expired() && s.is_valid_for_verification())
         .collect();
 
@@ -563,7 +551,7 @@ pub async fn request_3pid_token(
     let session = create_3pid_session(medium, address, &request.client_secret, &state).await?;
 
     info!("Created 3PID validation session: {} for {}", session.session_id, address);
-    
+
     Ok(Json(json!({
         "sid": session.session_id,
         "submit_url": format!("https://{}/_matrix/client/v3/account/3pid/verify", state.config.homeserver_name)

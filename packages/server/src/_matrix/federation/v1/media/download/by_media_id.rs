@@ -11,6 +11,13 @@ use tokio_util::io::ReaderStream;
 
 use crate::state::AppState;
 use crate::auth::verify_x_matrix_auth;
+use matryx_surrealdb::repository::{
+    media::MediaRepository,
+    media_service::MediaService,
+    room::RoomRepository,
+    membership::MembershipRepository,
+};
+use std::sync::Arc;
 
 /// Query parameters for media download
 #[derive(Debug, Deserialize)]
@@ -30,7 +37,7 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     // Verify X-Matrix authentication
-    let auth_result = verify_x_matrix_auth(&headers, &state.server_name, &state.signing_key).await;
+    let auth_result = verify_x_matrix_auth(&headers, &state.homeserver_name, state.event_signer.get_default_key_id()).await;
     let _x_matrix_auth = auth_result.map_err(|e| {
         warn!("X-Matrix authentication failed for media download: {}", e);
         StatusCode::UNAUTHORIZED
@@ -44,107 +51,43 @@ pub async fn get(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Query media metadata from database
-    let media_query = "
-        SELECT 
-            media_id, 
-            content_type, 
-            content_length, 
-            file_path, 
-            upload_name, 
-            created_at,
-            user_id
-        FROM media 
-        WHERE media_id = $media_id
-        LIMIT 1
-    ";
+    // Create MediaService instance
+    let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    
+    let media_service = MediaService::new(media_repo, room_repo, membership_repo);
 
-    let mut media_result = state
-        .db
-        .query(media_query)
-        .bind(("media_id", media_id.clone()))
+    // Handle federation media request using MediaService
+    let media_response = media_service
+        .handle_federation_media_request(
+            &media_id,
+            &state.homeserver_name,
+            &_x_matrix_auth.origin,
+        )
         .await
         .map_err(|e| {
-            error!("Database query failed for media lookup: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            debug!("Media not found or access denied: {}", e);
+            StatusCode::NOT_FOUND
         })?;
-
-    let media_records: Vec<serde_json::Value> = media_result.take(0).map_err(|e| {
-        error!("Failed to parse media query result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let media_record = media_records.first().ok_or_else(|| {
-        debug!("Media not found: {}", media_id);
-        StatusCode::NOT_FOUND
-    })?;
-
-    // Extract media metadata
-    let content_type = media_record
-        .get("content_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("application/octet-stream");
-
-    let content_length = media_record
-        .get("content_length")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    let file_path = media_record
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            error!("Missing file_path for media: {}", media_id);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let upload_name = media_record
-        .get("upload_name")
-        .and_then(|v| v.as_str());
 
     debug!(
-        "Serving media: id={}, type={}, size={}, path={}",
-        media_id, content_type, content_length, file_path
+        "Serving federation media: id={}, type={}, size={}",
+        media_id, media_response.content_type, media_response.content_length
     );
 
-    // Check if file exists on disk
-    let file = File::open(file_path).await.map_err(|e| {
-        error!("Failed to open media file {}: {}", file_path, e);
-        match e.kind() {
-            std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    })?;
-
-    // Create file stream for response
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+    // Create response body from content
+    let body = Body::from(media_response.content);
 
     // Build response with appropriate headers and security headers
     let mut response = Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", content_type)
-        .header("Content-Length", content_length.to_string())
+        .header("Content-Type", media_response.content_type)
+        .header("Content-Length", media_response.content_length.to_string())
         .header("Cache-Control", "public, max-age=31536000, immutable") // 1 year cache
         .header("Content-Security-Policy", 
             "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
         .header("Cross-Origin-Resource-Policy", "cross-origin");
-
-    // Add Content-Disposition header if upload name is available
-    if let Some(name) = upload_name {
-        // Sanitize filename for header
-        let sanitized_name = name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '-' | '_' | ' '))
-            .collect::<String>();
-        
-        if !sanitized_name.is_empty() {
-            response = response.header(
-                "Content-Disposition",
-                format!("inline; filename=\"{}\"", sanitized_name)
-            );
-        }
-    }
 
     // Add CORS headers for federation
     response = response

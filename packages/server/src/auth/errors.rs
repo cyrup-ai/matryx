@@ -81,3 +81,19 @@ impl IntoResponse for MatrixAuthError {
         (status, body).into_response()
     }
 }
+
+impl From<MatrixAuthError> for StatusCode {
+    fn from(error: MatrixAuthError) -> Self {
+        match error {
+            MatrixAuthError::MissingToken => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::UnknownToken => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::Forbidden => StatusCode::FORBIDDEN,
+            MatrixAuthError::InvalidSignature => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::MissingAuthorization => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::InvalidXMatrixFormat => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::SessionExpired => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MatrixAuthError::JwtError(_) => StatusCode::UNAUTHORIZED,
+        }
+    }
+}

@@ -33,7 +33,7 @@ use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 pub struct LiveMembershipService {
     db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
-    membership_repo: Arc<MembershipRepository<surrealdb::engine::any::Any>>,
+    membership_repo: Arc<MembershipRepository>,
     join_rules_validator: Arc<JoinRulesValidator>,
     power_level_validator: Arc<PowerLevelValidator>,
     alias_resolver: Arc<RoomAliasResolver>,
@@ -421,64 +421,34 @@ impl LiveMembershipService {
         room_id: &str,
         user_id: &str,
     ) -> Result<Option<Membership>, StatusCode> {
-        let query =
-            "SELECT * FROM membership WHERE room_id = $room_id AND user_id = $user_id LIMIT 1";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .await
-            .map_err(|e| {
-                error!("Failed to query user membership: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        let memberships: Vec<Membership> = response.take(0).map_err(|e| {
-            error!("Failed to parse membership query result: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        Ok(memberships.into_iter().next())
+        match self.membership_repo.get_by_room_user(room_id, user_id).await {
+            Ok(membership) => Ok(membership),
+            Err(e) => {
+                error!(
+                    "Failed to get user membership for {} in room {}: {:?}",
+                    user_id, room_id, e
+                );
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            },
+        }
     }
 
     /// Get room's join rules
     async fn get_room_join_rules(&self, room_id: &str) -> Result<String, StatusCode> {
-        let query = "
-            SELECT content.join_rule
-            FROM event 
-            WHERE room_id = $room_id 
-              AND event_type = 'm.room.join_rules'
-              AND state_key = ''
-            ORDER BY depth DESC, origin_server_ts DESC
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .await
-            .map_err(|e| {
-                error!("Failed to query join rules for room {}: {}", room_id, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-        let join_rule: Option<Value> = response.take(0).map_err(|e| {
-            error!("Failed to parse join rules query result: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-        match join_rule {
-            Some(rule) => {
-                if let Some(join_rule_str) = rule.as_str() {
-                    Ok(join_rule_str.to_string())
-                } else {
-                    Ok("invite".to_string()) // Default join rule
-                }
+        match self.room_repo.get_room_join_rules(room_id).await {
+            Ok(join_rules) => {
+                let join_rule_str = match join_rules {
+                    matryx_surrealdb::repository::room::JoinRules::Public => "public",
+                    matryx_surrealdb::repository::room::JoinRules::Invite => "invite",
+                    matryx_surrealdb::repository::room::JoinRules::Knock => "knock",
+                    matryx_surrealdb::repository::room::JoinRules::Restricted => "restricted",
+                };
+                Ok(join_rule_str.to_string())
             },
-            None => Ok("invite".to_string()), // Default join rule
+            Err(e) => {
+                error!("Failed to get join rules for room {}: {:?}", room_id, e);
+                Ok("invite".to_string()) // Default join rule on error
+            },
         }
     }
 

@@ -4,84 +4,17 @@
 //! traditional Matrix Client-Server API with SurrealDB LiveQuery for superior
 //! real-time performance and reduced server load.
 
+use crate::repositories::ClientRepositoryService;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use matryx_entity::{Event, Membership};
-use matryx_surrealdb::repository::{
-    EventRepository,
-    MembershipRepository,
-    RoomRepository,
-    SessionRepository,
-    UserRepository,
-};
+use matryx_entity::{ConnectionStatus, Event, Membership, RealtimeConfig, RealtimeCredentials};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
-use url::Url;
 
 use crate::sync::{LiveQuerySync, SyncState, SyncUpdate};
-
-/// Real-time Matrix client configuration
-#[derive(Debug, Clone)]
-pub struct RealtimeConfig {
-    /// Homeserver URL for HTTP API
-    pub homeserver_url: Url,
-    /// WebSocket URL for real-time connections
-    pub websocket_url: Option<Url>,
-    /// SurrealDB connection URL
-    pub surrealdb_url: Url,
-    /// Connection timeout in seconds
-    pub timeout_secs: u64,
-    /// Reconnection attempts
-    pub max_reconnect_attempts: u32,
-    /// Reconnection delay in seconds
-    pub reconnect_delay_secs: u64,
-}
-
-impl Default for RealtimeConfig {
-    fn default() -> Self {
-        Self {
-            homeserver_url: Url::parse("https://matrix.example.com").unwrap(),
-            websocket_url: None,
-            surrealdb_url: Url::parse("ws://localhost:8000").unwrap(),
-            timeout_secs: 30,
-            max_reconnect_attempts: 5,
-            reconnect_delay_secs: 5,
-        }
-    }
-}
-
-/// Authentication credentials for real-time client
-#[derive(Debug, Clone)]
-pub struct RealtimeCredentials {
-    /// Matrix user ID
-    pub user_id: String,
-    /// Access token
-    pub access_token: String,
-    /// Device ID
-    pub device_id: String,
-    /// Session ID
-    pub session_id: String,
-}
-
-/// Connection status for real-time client
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConnectionStatus {
-    /// Disconnected from all services
-    Disconnected,
-    /// Connecting to services
-    Connecting,
-    /// Connected to HTTP API only
-    HttpOnly,
-    /// Connected to HTTP API and SurrealDB
-    DatabaseConnected,
-    /// Fully connected (HTTP, SurrealDB, and WebSocket if configured)
-    FullyConnected,
-    /// Connection error
-    Error(String),
-}
 
 /// Real-time Matrix client event
 #[derive(Debug, Clone)]
@@ -134,13 +67,9 @@ pub struct RealtimeMatrixClient {
     /// HTTP client for Matrix API
     http_client: reqwest::Client,
     /// SurrealDB connection
-    db: Option<surrealdb::Surreal<surrealdb::engine::remote::ws::Client>>,
-    /// SurrealDB repositories
-    event_repo: Option<EventRepository<surrealdb::engine::remote::ws::Client>>,
-    membership_repo: Option<MembershipRepository<surrealdb::engine::remote::ws::Client>>,
-    room_repo: Option<RoomRepository>,
-    user_repo: Option<UserRepository>,
-    session_repo: Option<SessionRepository>,
+    db: Option<surrealdb::Surreal<surrealdb::engine::any::Any>>,
+    /// Client repository service
+    repository_service: Option<ClientRepositoryService>,
     /// LiveQuery sync manager
     sync_manager: Option<LiveQuerySync>,
     /// Event broadcast channel
@@ -174,11 +103,7 @@ impl RealtimeMatrixClient {
             status: Arc::new(RwLock::new(ConnectionStatus::Disconnected)),
             http_client,
             db: None,
-            event_repo: None,
-            membership_repo: None,
-            room_repo: None,
-            user_repo: None,
-            session_repo: None,
+            repository_service: None,
             sync_manager: None,
             event_sender,
             event_receiver,
@@ -262,9 +187,9 @@ impl RealtimeMatrixClient {
 
     /// Connect to SurrealDB and initialize repositories
     async fn connect_surrealdb(&mut self) -> Result<()> {
-        use surrealdb::{Surreal, engine::remote::ws::Ws, opt::auth::Root};
+        use surrealdb::{engine::any, opt::auth::Root};
 
-        let db = Surreal::new::<Ws>(&self.config.surrealdb_url.to_string()).await?;
+        let db = any::connect(self.config.surrealdb_url.to_string()).await?;
 
         // Authenticate with SurrealDB (using root for now, should be configurable)
         db.signin(Root { username: "root", password: "root" }).await?;
@@ -275,15 +200,15 @@ impl RealtimeMatrixClient {
         // Store database connection
         self.db = Some(db.clone());
 
-        // Initialize repositories with appropriate connection types
-        self.event_repo = Some(EventRepository::new(db.clone()));
-        self.membership_repo = Some(MembershipRepository::new(db.clone()));
+        // Initialize repository service
+        let user_id = self
+            .credentials
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No credentials available"))?
+            .user_id
+            .clone();
 
-        // For now, skip the repositories that require Surreal<Any> to focus on LiveQuery functionality
-        // TODO: Fix repository connection types in a separate task
-        self.room_repo = None;
-        self.user_repo = None;
-        self.session_repo = None;
+        self.repository_service = Some(ClientRepositoryService::from_db(db, user_id));
 
         debug!("Connected to SurrealDB and initialized repositories");
         Ok(())
@@ -296,25 +221,10 @@ impl RealtimeMatrixClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No credentials available"))?;
 
-        let _event_repo = self
-            .event_repo
+        let _repository_service = self
+            .repository_service
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Event repository not initialized"))?;
-
-        let _membership_repo = self
-            .membership_repo
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Membership repository not initialized"))?;
-
-        let _room_repo = self
-            .room_repo
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Room repository not initialized"))?;
-
-        let _user_repo = self
-            .user_repo
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("User repository not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Repository service not initialized"))?;
 
         let db = self
             .db
@@ -335,8 +245,6 @@ impl RealtimeMatrixClient {
         debug!("Initialized LiveQuery sync manager");
         Ok(())
     }
-
-
 
     /// Connect WebSocket for additional real-time features
     async fn connect_websocket(&mut self) -> Result<()> {
@@ -560,11 +468,7 @@ impl RealtimeMatrixClient {
         // Clear credentials and state
         self.credentials = None;
         self.sync_manager = None;
-        self.event_repo = None;
-        self.membership_repo = None;
-        self.room_repo = None;
-        self.user_repo = None;
-        self.session_repo = None;
+        self.repository_service = None;
 
         self.set_status(ConnectionStatus::Disconnected).await;
 
@@ -580,6 +484,12 @@ impl RealtimeMatrixClient {
     /// Check if client is authenticated
     pub fn is_authenticated(&self) -> bool {
         self.credentials.is_some()
+    }
+
+    /// Get a receiver for real-time events
+    /// This allows consumers to subscribe to events broadcast by the client
+    pub fn subscribe_to_events(&self) -> broadcast::Receiver<RealtimeEvent> {
+        self.event_receiver.resubscribe()
     }
 }
 

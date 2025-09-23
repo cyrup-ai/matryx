@@ -362,7 +362,7 @@ async fn create_user_session(
 /// Integrates with Matrix session service to generate JWT tokens
 /// for API authentication and authorization.
 async fn register_session_with_auth_service(
-    session_service: &MatrixSessionService,
+    session_service: &MatrixSessionService<surrealdb::engine::any::Any>,
     user_id: &str,
     device_id: &str,
     access_token: &str,

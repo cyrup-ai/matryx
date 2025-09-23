@@ -11,7 +11,13 @@ use tracing::{debug, error, info, warn};
 use crate::federation::pdu_validator::{PduValidator, ValidationResult};
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
-use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
+use matryx_surrealdb::repository::{
+    EventRepository,
+    FederationRepository,
+    KeyServerRepository,
+    MembershipRepository,
+    RoomRepository,
+};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -215,10 +221,14 @@ pub async fn put(
 
     // Validate the PDU through the 6-step validation pipeline
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
+    let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
     let pdu_validator = PduValidator::new(
         state.session_service.clone(),
         event_repo.clone(),
         room_repo.clone(),
+        federation_repo.clone(),
+        key_server_repo.clone(),
         state.db.clone(),
         state.homeserver_name.clone(),
     );

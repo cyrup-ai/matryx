@@ -6,10 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use matryx_surrealdb::repository::ProfileManagementService;
 
 use crate::{
     auth::MatrixSessionService,
-    database::SurrealRepository,
     AppState,
 };
 
@@ -47,54 +47,20 @@ pub async fn get_room_tags(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Verify user is member of the room
-    let membership_query = "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
-    let mut membership_params = HashMap::new();
-    membership_params.insert("room_id".to_string(), Value::String(room_id.clone()));
-    membership_params.insert("user_id".to_string(), Value::String(user_id.clone()));
-
-    let membership_result = state.database
-        .query(membership_query, Some(membership_params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let is_member = membership_result
-        .first()
-        .and_then(|rows| rows.first())
-        .and_then(|row| row.get("membership"))
-        .and_then(|v| v.as_str())
-        .map(|membership| membership == "join" || membership == "invite")
-        .unwrap_or(false);
-
-    if !is_member {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Query room tags from database
-    let query = "SELECT tag, tag_order FROM room_tags WHERE user_id = $user_id AND room_id = $room_id";
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(user_id));
-    params.insert("room_id".to_string(), Value::String(room_id));
-
-    let result = state.database
-        .query(query, Some(params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut tags = HashMap::new();
-
-    if let Some(tag_rows) = result.first() {
-        for tag_row in tag_rows {
-            if let (Some(tag_name), tag_order) = (
-                tag_row.get("tag").and_then(|v| v.as_str()),
-                tag_row.get("tag_order").and_then(|v| v.as_f64()),
-            ) {
-                tags.insert(tag_name.to_string(), RoomTag {
-                    order: tag_order,
-                });
+    let profile_service = ProfileManagementService::new(state.db.clone());
+    
+    // Get room tags using ProfileManagementService
+    match profile_service.get_room_tags(&user_id, &room_id).await {
+        Ok(tags_response) => {
+            let mut tags = HashMap::new();
+            
+            for (tag_name, tag_content) in tags_response.tags {
+                let order = tag_content.get("order").and_then(|v| v.as_f64());
+                tags.insert(tag_name, RoomTag { order });
             }
-        }
+            
+            return Ok(Json(RoomTagsResponse { tags }));
+        },
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
-
-    Ok(Json(RoomTagsResponse { tags }))
 }

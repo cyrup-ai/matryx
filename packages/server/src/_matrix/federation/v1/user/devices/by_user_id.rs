@@ -1,31 +1,15 @@
 use axum::{
-    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
+    response::Json,
 };
+use matryx_entity::{DeviceInfo, DeviceKeys};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+use std::collections::HashMap;
 use tracing::{debug, error, warn};
 
-use crate::state::AppState;
-
-/// Device information structure matching Matrix specification
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DeviceInfo {
-    pub device_display_name: Option<String>,
-    pub device_id: String,
-    pub keys: DeviceKeys,
-}
-
-/// Device keys structure for E2E encryption
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub algorithms: Vec<String>,
-    pub device_id: String,
-    pub keys: std::collections::HashMap<String, String>,
-    pub signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-    pub user_id: String,
-}
+use crate::{AppState, auth::MatrixSessionService};
 
 /// Cross-signing key structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,8 +73,8 @@ pub async fn get(
     // Query all devices for the user
     let devices_query = "
         SELECT device_id, display_name, device_keys, created_at, last_seen_ip, last_seen_ts
-        FROM device 
-        WHERE user_id = $user_id 
+        FROM device
+        WHERE user_id = $user_id
         ORDER BY created_at ASC
     ";
 
@@ -284,10 +268,10 @@ async fn get_device_stream_id(
     user_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let query = "
-        SELECT stream_id 
-        FROM device_list_updates 
-        WHERE user_id = $user_id 
-        ORDER BY stream_id DESC 
+        SELECT stream_id
+        FROM device_list_updates
+        WHERE user_id = $user_id
+        ORDER BY stream_id DESC
         LIMIT 1
     ";
 

@@ -1,3 +1,5 @@
+pub mod by_server_name;
+
 use axum::{
     body::Bytes,
     extract::{Multipart, State},
@@ -8,16 +10,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use uuid::Uuid;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
-use crate::{
-    auth::MatrixSessionService,
-    config::ServerConfig,
-    database::SurrealRepository,
-    AppState,
+use crate::{AppState, auth::MatrixSessionService, config::ServerConfig};
+use matryx_surrealdb::repository::{
+    media::MediaRepository,
+    media_service::MediaService,
+    membership::MembershipRepository,
+    room::RoomRepository,
 };
+use std::sync::Arc;
 
 #[derive(Serialize)]
 pub struct MediaUploadResponse {
@@ -38,19 +42,31 @@ pub struct MediaFile {
 
 fn validate_content_type(content_type: &str) -> bool {
     // Allow common media types
-    matches!(content_type, 
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/svg+xml" |
-        "video/mp4" | "video/webm" | "video/ogg" |
-        "audio/mp3" | "audio/ogg" | "audio/wav" | "audio/flac" |
-        "application/pdf" | "text/plain" | "application/json" |
-        "application/octet-stream"
+    matches!(
+        content_type,
+        "image/jpeg" |
+            "image/png" |
+            "image/gif" |
+            "image/webp" |
+            "image/svg+xml" |
+            "video/mp4" |
+            "video/webm" |
+            "video/ogg" |
+            "audio/mp3" |
+            "audio/ogg" |
+            "audio/wav" |
+            "audio/flac" |
+            "application/pdf" |
+            "text/plain" |
+            "application/json" |
+            "application/octet-stream"
     )
 }
 
 fn get_file_extension(content_type: &str) -> &'static str {
     match content_type {
         "image/jpeg" => "jpg",
-        "image/png" => "png", 
+        "image/png" => "png",
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
@@ -81,7 +97,8 @@ pub async fn upload_media(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -99,84 +116,47 @@ pub async fn upload_media(
                     if let Some(field_content_type) = field.content_type() {
                         content_type = field_content_type.to_string();
                     }
-                    
+
                     // Get filename if provided
                     if let Some(filename) = field.file_name() {
                         upload_name = Some(filename.to_string());
                     }
-                    
+
                     // Read file data
                     let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
                     file_data = Some(data);
-                }
+                },
                 _ => {
                     // Skip unknown fields
                     let _ = field.bytes().await;
-                }
+                },
             }
         }
     }
 
     let file_bytes = file_data.ok_or(StatusCode::BAD_REQUEST)?;
-    
-    // Validate file size (50MB limit)
-    const MAX_FILE_SIZE: usize = 50 * 1024 * 1024;
-    if file_bytes.len() > MAX_FILE_SIZE {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
 
-    // Validate content type
-    if !validate_content_type(&content_type) {
-        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    }
+    // Create MediaService instance
+    let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
 
-    // Generate media ID and file path
-    let media_id = Uuid::new_v4().to_string();
-    let server_name = &ServerConfig::get().homeserver_name;
-    let file_extension = get_file_extension(&content_type);
-    
-    // Create media directory structure
-    let media_dir = PathBuf::from("media").join(&server_name);
-    fs::create_dir_all(&media_dir).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    let file_path = media_dir.join(format!("{}.{}", media_id, file_extension));
-    
-    // Write file to disk
-    let mut file = fs::File::create(&file_path).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    file.write_all(&file_bytes).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    file.sync_all().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let media_service = MediaService::new(media_repo, room_repo, membership_repo);
 
-    // Store media metadata in database
-    let query = r#"
-        CREATE media_files SET
-            media_id = $media_id,
-            server_name = $server_name,
-            content_type = $content_type,
-            content_length = $content_length,
-            file_path = $file_path,
-            upload_name = $upload_name,
-            uploaded_by = $uploaded_by,
-            created_at = time::now()
-    "#;
-
-    let mut params = HashMap::new();
-    params.insert("media_id".to_string(), Value::String(media_id.clone()));
-    params.insert("server_name".to_string(), Value::String(server_name.clone()));
-    params.insert("content_type".to_string(), Value::String(content_type));
-    params.insert("content_length".to_string(), Value::Number(serde_json::Number::from(file_bytes.len())));
-    params.insert("file_path".to_string(), Value::String(file_path.to_string_lossy().to_string()));
-    params.insert("upload_name".to_string(), upload_name.map(Value::String).unwrap_or(Value::Null));
-    params.insert("uploaded_by".to_string(), Value::String(token_info.user_id));
-
-    state.database
-        .query(query, Some(params))
+    // Upload media using MediaService
+    let upload_result = media_service
+        .upload_media(&token_info.user_id, &file_bytes, &content_type, upload_name.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Return MXC URI
-    let content_uri = format!("mxc://{}/{}", server_name, media_id);
-    
-    Ok(Json(MediaUploadResponse {
-        content_uri,
-    }))
+    Ok(Json(MediaUploadResponse { content_uri: upload_result.content_uri }))
+}
+
+/// POST /_matrix/media/v3/upload
+pub async fn post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<MediaUploadResponse>, StatusCode> {
+    upload_media(State(state), headers, multipart).await
 }

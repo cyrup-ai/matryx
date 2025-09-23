@@ -20,6 +20,9 @@ bcrypt = "0.17.1"
 # Error handling
 thiserror = "2.0.16"
 
+# URL utilities
+url = { version = "2.0", features = ["serde"] }
+
 [lib]
 name = "matryx_entity"
 path = "src/lib.rs"

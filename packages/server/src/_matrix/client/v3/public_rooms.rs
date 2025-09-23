@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, authenticate_user};
+use crate::auth::{MatrixAuthError, extract_matrix_auth};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -58,9 +58,11 @@ pub async fn get(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<PublicRoomsResponse>, StatusCode> {
     // Authentication is optional for public rooms directory
-    let _user_id = match authenticate_user(&state, &headers).await {
-        Ok(user_id) => Some(user_id),
-        Err(_) => None, // Allow anonymous access to public rooms
+    let _user_id = match extract_matrix_auth(&headers, &state.session_service).await {
+        Ok(crate::auth::MatrixAuth::User(user_auth)) => Some(user_auth.user_id),
+        Ok(crate::auth::MatrixAuth::Server(_)) => None, // Server auth allowed but no user ID
+        Ok(crate::auth::MatrixAuth::Anonymous) => None, // Anonymous access allowed
+        Err(_) => None,                                 // Allow anonymous access to public rooms
     };
 
     info!("Public rooms request from {}", addr);
@@ -75,7 +77,7 @@ pub async fn get(
 
     // Query public rooms from database
     let query = r#"
-        SELECT room_id, name, topic, canonical_alias, num_joined_members, 
+        SELECT room_id, name, topic, canonical_alias, num_joined_members,
                avatar_url, world_readable, guest_can_join, join_rule, room_type
         FROM public_rooms
         ORDER BY num_joined_members DESC
@@ -170,9 +172,11 @@ pub async fn post(
     Json(filter): Json<PublicRoomsFilter>,
 ) -> Result<Json<PublicRoomsResponse>, StatusCode> {
     // Authentication is optional for public rooms directory
-    let _user_id = match authenticate_user(&state, &headers).await {
-        Ok(user_id) => Some(user_id),
-        Err(_) => None, // Allow anonymous access to public rooms
+    let _user_id = match extract_matrix_auth(&headers, &state.session_service).await {
+        Ok(crate::auth::MatrixAuth::User(user_auth)) => Some(user_auth.user_id),
+        Ok(crate::auth::MatrixAuth::Server(_)) => None, // Server auth allowed but no user ID
+        Ok(crate::auth::MatrixAuth::Anonymous) => None, // Anonymous access allowed
+        Err(_) => None,                                 // Allow anonymous access to public rooms
     };
 
     info!("Public rooms search from {} with filter", addr);
@@ -181,26 +185,27 @@ pub async fn post(
 
     let mut query = String::from(
         r#"
-        SELECT room_id, name, topic, canonical_alias, num_joined_members, 
+        SELECT room_id, name, topic, canonical_alias, num_joined_members,
                avatar_url, world_readable, guest_can_join, join_rule, room_type
         FROM public_rooms
     "#,
     );
 
     let mut conditions = Vec::new();
-    let mut bindings = Vec::new();
+    let mut search_term_owned = None;
+    let mut room_types_owned = None;
 
     // Apply search filter
     if let Some(room_filter) = &filter.filter {
         if let Some(search_term) = &room_filter.generic_search_term {
             conditions.push("(name CONTAINS $search_term OR topic CONTAINS $search_term)");
-            bindings.push(("search_term", search_term.as_str()));
+            search_term_owned = Some(search_term.clone());
         }
 
         if let Some(room_types) = &room_filter.room_types {
             if !room_types.is_empty() {
                 conditions.push("room_type IN $room_types");
-                bindings.push(("room_types", room_types));
+                room_types_owned = Some(room_types.clone());
             }
         }
     }
@@ -213,9 +218,15 @@ pub async fn post(
     query.push_str(" ORDER BY num_joined_members DESC LIMIT $limit");
 
     let mut db_query = state.db.query(&query);
-    for (key, value) in bindings {
-        db_query = db_query.bind((key, value));
+
+    if let Some(search_term) = search_term_owned {
+        db_query = db_query.bind(("search_term", search_term));
     }
+
+    if let Some(room_types) = room_types_owned {
+        db_query = db_query.bind(("room_types", room_types));
+    }
+
     db_query = db_query.bind(("limit", limit));
 
     let public_rooms = match db_query.await {

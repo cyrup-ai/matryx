@@ -17,18 +17,18 @@ use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRe
 ///
 /// This system handles:
 /// - Valid membership state transition validation
-/// - Simultaneous membership change conflict detection  
+/// - Simultaneous membership change conflict detection
 /// - Malformed membership event validation
 /// - State resolution integration for membership conflicts
 /// - Edge case handling for banned users and invalid transitions
 ///
-/// Performance: Lock-free validation with blazing-fast state consistency checks  
+/// Performance: Lock-free validation with blazing-fast state consistency checks
 /// Security: Complete Matrix specification compliance with proper error handling
 pub struct MembershipValidator {
     db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
     room_repo: Arc<RoomRepository>,
-    membership_repo: Arc<MembershipRepository<surrealdb::engine::any::Any>>,
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    membership_repo: Arc<MembershipRepository>,
+    event_repo: Arc<EventRepository>,
     state_resolver: Arc<StateResolver>,
 }
 
@@ -59,7 +59,7 @@ impl MembershipValidator {
     ///
     /// Performs comprehensive validation including:
     /// - Valid state transition checking per Matrix specification
-    /// - Conflict detection with existing membership changes  
+    /// - Conflict detection with existing membership changes
     /// - Event format and content validation
     /// - Integration with existing state resolution system
     ///
@@ -192,50 +192,31 @@ impl MembershipValidator {
         user_id: &str,
         event: &Event,
     ) -> MembershipResult<()> {
-        // Look for recent membership events for this user that might conflict
-        let query = "
-            SELECT * FROM event 
-            WHERE room_id = $room_id 
-              AND event_type = 'm.room.member'
-              AND state_key = $user_id
-              AND origin_server_ts > $recent_threshold
-              AND event_id != $current_event_id
-            ORDER BY origin_server_ts DESC
-            LIMIT 5
-        ";
-
-        // Consider events from the last 30 seconds as potentially conflicting
-        let recent_threshold = chrono::Utc::now().timestamp_millis() - 30_000;
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .bind(("recent_threshold", recent_threshold))
-            .bind(("current_event_id", event.event_id.clone()))
+        // Use the MembershipRepository to get conflicting memberships
+        let conflicting_event_ids = self
+            .membership_repo
+            .get_conflicting_memberships(room_id, user_id)
             .await
             .map_err(|e| MembershipError::database_error("conflict check", &e.to_string()))?;
 
-        let recent_events: Vec<Event> = response
-            .take(0)
-            .map_err(|e| MembershipError::database_error("conflict parsing", &e.to_string()))?;
+        // Filter out the current event
+        let relevant_conflicts: Vec<String> = conflicting_event_ids
+            .into_iter()
+            .filter(|event_id| event_id != &event.event_id)
+            .collect();
 
-        if !recent_events.is_empty() {
+        if !relevant_conflicts.is_empty() {
             warn!(
                 "Detected {} potentially conflicting membership events for user {} in room {}",
-                recent_events.len(),
+                relevant_conflicts.len(),
                 user_id,
                 room_id
             );
 
             // For now, log the conflict but allow the operation
             // In a full implementation, this would integrate with state resolution
-            for conflicting_event in recent_events {
-                debug!(
-                    "Conflicting event: {} at timestamp {}",
-                    conflicting_event.event_id, conflicting_event.origin_server_ts
-                );
+            for conflicting_event_id in relevant_conflicts {
+                debug!("Conflicting event: {} detected", conflicting_event_id);
             }
         }
 
@@ -364,7 +345,7 @@ impl MembershipValidator {
         Ok(())
     }
 
-    /// Validate knock-specific edge cases  
+    /// Validate knock-specific edge cases
     async fn validate_knock_edge_cases(
         &self,
         room_id: &str,
@@ -610,27 +591,14 @@ impl MembershipValidator {
         &self,
         room_id: &str,
     ) -> MembershipResult<Option<Event>> {
-        let query = "
-            SELECT * FROM event 
-            WHERE room_id = $room_id 
-              AND event_type = 'm.room.power_levels'
-              AND state_key = ''
-            ORDER BY depth DESC 
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
+        // Use RoomRepository to get the current power levels state event
+        let power_levels_event = self
+            .room_repo
+            .get_room_state_event(room_id, "m.room.power_levels", "")
             .await
             .map_err(|e| MembershipError::database_error("get power levels", &e.to_string()))?;
 
-        let power_events: Vec<Event> = response
-            .take(0)
-            .map_err(|e| MembershipError::database_error("power levels parsing", &e.to_string()))?;
-
-        Ok(power_events.into_iter().next())
+        Ok(power_levels_event)
     }
 }
 
@@ -711,10 +679,9 @@ mod tests {
     async fn setup_test_validator() -> MembershipValidator {
         // Use in-memory database for testing
         let db = Arc::new(
-            surrealdb::Surreal::new::<surrealdb::engine::any::Any>(
-                surrealdb::engine::any::connect("memory").await.unwrap(),
-            )
-            .unwrap(),
+            surrealdb::engine::any::connect("memory")
+                .await
+                .expect("Failed to connect to in-memory test database"),
         );
         MembershipValidator::new(db)
     }
@@ -1217,7 +1184,7 @@ mod tests {
         }
 
         #[tokio::test]
-        #[ignore] // Requires state resolver mocking  
+        #[ignore] // Requires state resolver mocking
         async fn test_resolve_membership_conflicts_state_resolution() {
             // This would test the Matrix State Resolution v2 integration
             // for resolving membership conflicts

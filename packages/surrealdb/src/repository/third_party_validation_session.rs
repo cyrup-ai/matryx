@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::repository::error::RepositoryError;
 use matryx_entity::types::third_party_validation_session::ThirdPartyValidationSession;
 
 /// Repository for managing third-party validation sessions
-/// 
+///
 /// Provides CRUD operations for 3PID validation sessions used in the Matrix
 /// Client-Server API third-party identifier validation flow.
 #[derive(Clone)]
@@ -26,39 +26,63 @@ impl ThirdPartyValidationSessionRepository {
 #[async_trait]
 pub trait ThirdPartyValidationSessionRepositoryTrait {
     /// Create a new validation session
-    async fn create_session(&self, session: &ThirdPartyValidationSession) -> Result<(), RepositoryError>;
-    
+    async fn create_session(
+        &self,
+        session: &ThirdPartyValidationSession,
+    ) -> Result<(), RepositoryError>;
+
     /// Get session by session ID
-    async fn get_session_by_id(&self, session_id: &str) -> Result<Option<ThirdPartyValidationSession>, RepositoryError>;
-    
+    async fn get_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ThirdPartyValidationSession>, RepositoryError>;
+
     /// Get session by session ID and client secret
-    async fn get_session_by_id_and_secret(&self, session_id: &str, client_secret: &str) -> Result<Option<ThirdPartyValidationSession>, RepositoryError>;
-    
+    async fn get_session_by_id_and_secret(
+        &self,
+        session_id: &str,
+        client_secret: &str,
+    ) -> Result<Option<ThirdPartyValidationSession>, RepositoryError>;
+
     /// Update session verification status
     async fn mark_session_verified(&self, session_id: &str) -> Result<(), RepositoryError>;
-    
+
     /// Update session attempt count
     async fn increment_session_attempts(&self, session_id: &str) -> Result<(), RepositoryError>;
-    
+
     /// Associate session with user
-    async fn associate_session_with_user(&self, session_id: &str, user_id: &str) -> Result<(), RepositoryError>;
-    
+    async fn associate_session_with_user(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> Result<(), RepositoryError>;
+
     /// Delete session
     async fn delete_session(&self, session_id: &str) -> Result<(), RepositoryError>;
-    
+
     /// Get sessions by address (for duplicate checking)
-    async fn get_sessions_by_address(&self, medium: &str, address: &str) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError>;
-    
+    async fn get_sessions_by_address(
+        &self,
+        medium: &str,
+        address: &str,
+    ) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError>;
+
     /// Clean up expired sessions
     async fn cleanup_expired_sessions(&self) -> Result<u64, RepositoryError>;
-    
+
     /// Get active sessions for user
-    async fn get_active_sessions_for_user(&self, user_id: &str) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError>;
+    async fn get_active_sessions_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError>;
 }
 
 #[async_trait]
 impl ThirdPartyValidationSessionRepositoryTrait for ThirdPartyValidationSessionRepository {
-    async fn create_session(&self, session: &ThirdPartyValidationSession) -> Result<(), RepositoryError> {
+    async fn create_session(
+        &self,
+        session: &ThirdPartyValidationSession,
+    ) -> Result<(), RepositoryError> {
         let query = r#"
             CREATE third_party_sessions SET
                 session_id = $session_id,
@@ -75,7 +99,8 @@ impl ThirdPartyValidationSessionRepositoryTrait for ThirdPartyValidationSessionR
                 max_attempts = $max_attempts
         "#;
 
-        let result = self.db
+        let mut result = self
+            .db
             .query(query)
             .bind(("session_id", session.session_id.clone()))
             .bind(("client_secret", session.client_secret.clone()))
@@ -91,45 +116,58 @@ impl ThirdPartyValidationSessionRepositoryTrait for ThirdPartyValidationSessionR
             .bind(("max_attempts", session.max_attempts))
             .await?;
 
+        // Verify the session was created successfully
+        let created_sessions: Vec<ThirdPartyValidationSession> = result.take(0)?;
+        if created_sessions.is_empty() {
+            return Err(RepositoryError::Database(surrealdb::Error::msg(
+                "Failed to create third-party validation session",
+            )));
+        }
+
         debug!("Created 3PID validation session: {}", session.session_id);
         Ok(())
     }
 
-    async fn get_session_by_id(&self, session_id: &str) -> Result<Option<ThirdPartyValidationSession>, RepositoryError> {
+    async fn get_session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ThirdPartyValidationSession>, RepositoryError> {
         let query = "SELECT * FROM third_party_sessions WHERE session_id = $session_id";
-        
-        let mut result = self.db
-            .query(query)
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+
+        let mut result = self.db.query(query).bind(("session_id", session_id.to_string())).await?;
 
         let sessions: Vec<ThirdPartyValidationSession> = result.take(0)?;
-        
+
         Ok(sessions.into_iter().next())
     }
 
-    async fn get_session_by_id_and_secret(&self, session_id: &str, client_secret: &str) -> Result<Option<ThirdPartyValidationSession>, RepositoryError> {
+    async fn get_session_by_id_and_secret(
+        &self,
+        session_id: &str,
+        client_secret: &str,
+    ) -> Result<Option<ThirdPartyValidationSession>, RepositoryError> {
         let query = r#"
-            SELECT * FROM third_party_sessions 
+            SELECT * FROM third_party_sessions
             WHERE session_id = $session_id AND client_secret = $client_secret
         "#;
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(query)
             .bind(("session_id", session_id.to_string()))
             .bind(("client_secret", client_secret.to_string()))
             .await?;
 
         let sessions: Vec<ThirdPartyValidationSession> = result.take(0)?;
-        
+
         Ok(sessions.into_iter().next())
     }
 
     async fn mark_session_verified(&self, session_id: &str) -> Result<(), RepositoryError> {
         let validated_at = Utc::now().timestamp();
-        
+
         let query = r#"
-            UPDATE third_party_sessions SET 
+            UPDATE third_party_sessions SET
                 verified = true,
                 validated_at = $validated_at
             WHERE session_id = $session_id
@@ -147,23 +185,24 @@ impl ThirdPartyValidationSessionRepositoryTrait for ThirdPartyValidationSessionR
 
     async fn increment_session_attempts(&self, session_id: &str) -> Result<(), RepositoryError> {
         let query = r#"
-            UPDATE third_party_sessions SET 
+            UPDATE third_party_sessions SET
                 attempt_count = attempt_count + 1
             WHERE session_id = $session_id
         "#;
 
-        self.db
-            .query(query)
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+        self.db.query(query).bind(("session_id", session_id.to_string())).await?;
 
         debug!("Incremented attempt count for session: {}", session_id);
         Ok(())
     }
 
-    async fn associate_session_with_user(&self, session_id: &str, user_id: &str) -> Result<(), RepositoryError> {
+    async fn associate_session_with_user(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> Result<(), RepositoryError> {
         let query = r#"
-            UPDATE third_party_sessions SET 
+            UPDATE third_party_sessions SET
                 user_id = $user_id
             WHERE session_id = $session_id
         "#;
@@ -181,75 +220,76 @@ impl ThirdPartyValidationSessionRepositoryTrait for ThirdPartyValidationSessionR
     async fn delete_session(&self, session_id: &str) -> Result<(), RepositoryError> {
         let query = "DELETE FROM third_party_sessions WHERE session_id = $session_id";
 
-        self.db
-            .query(query)
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+        self.db.query(query).bind(("session_id", session_id.to_string())).await?;
 
         debug!("Deleted 3PID validation session: {}", session_id);
         Ok(())
     }
 
-    async fn get_sessions_by_address(&self, medium: &str, address: &str) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError> {
+    async fn get_sessions_by_address(
+        &self,
+        medium: &str,
+        address: &str,
+    ) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError> {
         let query = r#"
-            SELECT * FROM third_party_sessions 
+            SELECT * FROM third_party_sessions
             WHERE medium = $medium AND address = $address
             ORDER BY created_at DESC
         "#;
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(query)
             .bind(("medium", medium.to_string()))
             .bind(("address", address.to_string()))
             .await?;
 
         let sessions: Vec<ThirdPartyValidationSession> = result.take(0)?;
-        
+
         Ok(sessions)
     }
 
     async fn cleanup_expired_sessions(&self) -> Result<u64, RepositoryError> {
         let now = Utc::now().timestamp();
-        
+
         let query = "DELETE FROM third_party_sessions WHERE expires_at < $now";
 
-        let mut result = self.db
-            .query(query)
-            .bind(("now", now))
-            .await?;
+        let result = self.db.query(query).bind(("now", now)).await?;
 
         // Get count of deleted sessions
         let deleted_count = result.num_statements();
-        
+
         info!("Cleaned up {} expired 3PID validation sessions", deleted_count);
         Ok(deleted_count as u64)
     }
 
-    async fn get_active_sessions_for_user(&self, user_id: &str) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError> {
+    async fn get_active_sessions_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ThirdPartyValidationSession>, RepositoryError> {
         let now = Utc::now().timestamp();
-        
+
         let query = r#"
-            SELECT * FROM third_party_sessions 
+            SELECT * FROM third_party_sessions
             WHERE user_id = $user_id AND expires_at > $now
             ORDER BY created_at DESC
         "#;
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(query)
             .bind(("user_id", user_id.to_string()))
             .bind(("now", now))
             .await?;
 
         let sessions: Vec<ThirdPartyValidationSession> = result.take(0)?;
-        
+
         Ok(sessions)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use uuid::Uuid;
 
     // Note: These tests would require a test database setup
     // They are provided as examples of how to test the repository
@@ -260,7 +300,7 @@ mod tests {
         // This test would require setting up a test SurrealDB instance
         // let db = setup_test_db().await;
         // let repo = ThirdPartyValidationSessionRepository::new(db);
-        
+
         // let session = ThirdPartyValidationSession::new(
         //     Uuid::new_v4().to_string(),
         //     "test_secret".to_string(),
@@ -269,10 +309,10 @@ mod tests {
         //     "token123".to_string(),
         //     Utc::now().timestamp() + 3600,
         // );
-        
+
         // repo.create_session(&session).await.unwrap();
         // let retrieved = repo.get_session_by_id(&session.session_id).await.unwrap();
-        
+
         // assert!(retrieved.is_some());
         // assert_eq!(retrieved.unwrap().session_id, session.session_id);
     }

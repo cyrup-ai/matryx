@@ -1,24 +1,25 @@
 use std::collections::HashMap;
-use surrealdb::{Surreal, engine::local::Mem};
+use surrealdb::{Surreal, engine::any::Any};
 
 /// Test configuration for isolated test database
 pub fn test_database_config() -> HashMap<String, String> {
     let mut config = HashMap::new();
-    config.insert("url".to_string(), "memory://".to_string());
+    config.insert("url".to_string(), "surrealkv://test_data/server_test.db".to_string());
     config.insert("namespace".to_string(), "test".to_string());
     config.insert("database".to_string(), "matrix_test".to_string());
     config
 }
 
 /// Initialize test database with schema
-pub async fn init_test_database() -> Result<Surreal<surrealdb::engine::local::Db>, Box<dyn std::error::Error>> {
-    let db = Surreal::new::<Mem>(()).await?;
+pub async fn init_test_database()
+-> Result<Surreal<Any>, Box<dyn std::error::Error>> {
+    let db = surrealdb::engine::any::connect("surrealkv://test_data/server_integration_test.db").await?;
     db.use_ns("test").use_db("matrix_test").await?;
-    
+
     // Load the comprehensive Matrix schema
     let schema = include_str!("../../surrealdb/migrations/matryx.surql");
     db.query(schema).await?;
-    
+
     Ok(db)
 }
 

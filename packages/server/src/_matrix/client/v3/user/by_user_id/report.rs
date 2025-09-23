@@ -8,11 +8,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{
-    auth::MatrixSessionService,
-    database::SurrealRepository,
-    AppState,
-};
+use crate::{AppState, auth::MatrixSessionService};
+use matryx_surrealdb::repository::ProfileManagementService;
 
 #[derive(Deserialize)]
 pub struct ReportUserRequest {
@@ -40,7 +37,8 @@ pub async fn post(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -65,82 +63,23 @@ pub async fn post(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Verify reported user exists
-    let user_exists_query = "SELECT user_id FROM users WHERE user_id = $user_id";
-    let mut user_params = HashMap::new();
-    user_params.insert("user_id".to_string(), Value::String(reported_user_id.clone()));
+    let profile_service = ProfileManagementService::new(state.db.clone());
 
-    let user_result = state.database
-        .query(user_exists_query, Some(user_params))
+    // Create report content with score if provided
+    let content = if let Some(score) = request.score {
+        Some(serde_json::json!({ "score": score }))
+    } else {
+        None
+    };
+
+    // Report user using ProfileManagementService
+    match profile_service
+        .report_user(&token_info.user_id, &reported_user_id, &request.reason, content)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let user_exists = user_result
-        .first()
-        .and_then(|rows| rows.first())
-        .is_some();
-
-    if !user_exists {
-        return Err(StatusCode::NOT_FOUND);
+    {
+        Ok(()) => {},
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
-
-    // Check if reporter has interacted with reported user (shared rooms)
-    let interaction_query = r#"
-        SELECT count() as shared_rooms
-        FROM room_members rm1
-        JOIN room_members rm2 ON rm1.room_id = rm2.room_id
-        WHERE rm1.user_id = $reporter_user_id 
-        AND rm2.user_id = $reported_user_id
-        AND rm1.membership = 'join'
-        AND rm2.membership = 'join'
-    "#;
-
-    let mut interaction_params = HashMap::new();
-    interaction_params.insert("reporter_user_id".to_string(), Value::String(token_info.user_id.clone()));
-    interaction_params.insert("reported_user_id".to_string(), Value::String(reported_user_id.clone()));
-
-    let interaction_result = state.database
-        .query(interaction_query, Some(interaction_params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let has_interaction = interaction_result
-        .first()
-        .and_then(|rows| rows.first())
-        .and_then(|row| row.get("shared_rooms"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) > 0;
-
-    if !has_interaction {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Create report
-    let report_id = Uuid::new_v4().to_string();
-    
-    let create_report_query = r#"
-        CREATE content_reports SET
-            id = $id,
-            reporter_user_id = $reporter_user_id,
-            reported_user_id = $reported_user_id,
-            reason = $reason,
-            score = $score,
-            status = 'pending',
-            created_at = time::now()
-    "#;
-
-    let mut report_params = HashMap::new();
-    report_params.insert("id".to_string(), Value::String(report_id));
-    report_params.insert("reporter_user_id".to_string(), Value::String(token_info.user_id));
-    report_params.insert("reported_user_id".to_string(), Value::String(reported_user_id));
-    report_params.insert("reason".to_string(), Value::String(request.reason));
-    report_params.insert("score".to_string(), 
-        request.score.map(|s| Value::Number(serde_json::Number::from(s))).unwrap_or(Value::Null));
-
-    state.database
-        .query(create_report_query, Some(report_params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // TODO: Notify moderators/administrators
 

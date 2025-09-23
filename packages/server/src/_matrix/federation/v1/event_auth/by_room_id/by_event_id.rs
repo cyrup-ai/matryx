@@ -72,7 +72,7 @@ pub async fn get(
 /// Uses breadth-first search to traverse the auth_events DAG and collect
 /// all events that directly or indirectly authorize the target event.
 async fn build_auth_chain(
-    event_repo: &EventRepository<surrealdb::engine::any::Any>,
+    event_repo: &EventRepository,
     target_event: &matryx_entity::types::Event,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let mut auth_chain = Vec::new();

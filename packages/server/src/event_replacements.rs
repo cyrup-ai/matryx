@@ -1,3 +1,4 @@
+use matryx_entity::{Event, EventContent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -22,17 +23,6 @@ pub enum ReplacementError {
     DatabaseError(String),
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Event {
-    pub event_id: String,
-    pub room_id: String,
-    pub sender: String,
-    pub content: Value,
-    pub origin_server_ts: u64,
-    #[serde(rename = "type")]
-    pub event_type: String,
-}
-
 pub struct ReplacementValidator;
 
 impl ReplacementValidator {
@@ -51,24 +41,29 @@ impl ReplacementValidator {
 
         // Get original event
         let original_event = self.get_event(original_event_id, state).await?;
-        
+
         // Validate same room
-        let replacement_room_id = replacement_event["room_id"].as_str()
+        let replacement_room_id = replacement_event["room_id"]
+            .as_str()
             .ok_or(ReplacementError::MissingNewContent)?;
-        
+
         if original_event.room_id != replacement_room_id {
-            warn!("Replacement event room {} differs from original room {}", 
-                  replacement_room_id, original_event.room_id);
+            warn!(
+                "Replacement event room {} differs from original room {}",
+                replacement_room_id, original_event.room_id
+            );
             return Err(ReplacementError::DifferentRoom);
         }
-        
+
         // Validate same sender
         if original_event.sender != sender {
-            warn!("Replacement sender {} differs from original sender {}", 
-                  sender, original_event.sender);
+            warn!(
+                "Replacement sender {} differs from original sender {}",
+                sender, original_event.sender
+            );
             return Err(ReplacementError::DifferentSender);
         }
-        
+
         // Validate m.new_content exists
         if !replacement_event["content"]["m.new_content"].is_object() {
             warn!("Replacement event missing m.new_content");
@@ -86,11 +81,11 @@ impl ReplacementValidator {
             warn!("Replacement relates_to event_id doesn't match original");
             return Err(ReplacementError::MissingNewContent);
         }
-        
+
         info!("Replacement validation successful for event {}", original_event_id);
         Ok(())
     }
-    
+
     pub async fn apply_replacement(
         &self,
         original_event_id: &str,
@@ -99,11 +94,14 @@ impl ReplacementValidator {
     ) -> Result<(), ReplacementError> {
         info!("Applying replacement for event {}", original_event_id);
 
-        let replacement_event_id = replacement_event["event_id"].as_str()
+        let replacement_event_id = replacement_event["event_id"]
+            .as_str()
             .ok_or(ReplacementError::MissingNewContent)?;
-        let room_id = replacement_event["room_id"].as_str()
+        let room_id = replacement_event["room_id"]
+            .as_str()
             .ok_or(ReplacementError::MissingNewContent)?;
-        let sender = replacement_event["sender"].as_str()
+        let sender = replacement_event["sender"]
+            .as_str()
             .ok_or(ReplacementError::MissingNewContent)?;
 
         // Store replacement in relations table
@@ -116,19 +114,21 @@ impl ReplacementValidator {
                 sender = $sender,
                 created_at = time::now()
         ";
-        
-        let result = state.db
+
+        let result = state
+            .db
             .query(query)
-            .bind(("replacement_event_id", replacement_event_id))
-            .bind(("original_event_id", original_event_id))
-            .bind(("room_id", room_id))
-            .bind(("sender", sender))
+            .bind(("replacement_event_id", replacement_event_id.to_string()))
+            .bind(("original_event_id", original_event_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("sender", sender.to_string()))
             .await
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
 
         // Store edit history
-        self.store_edit_history(original_event_id, replacement_event_id, state).await?;
-        
+        self.store_edit_history(original_event_id, replacement_event_id, state)
+            .await?;
+
         info!("Successfully applied replacement for event {}", original_event_id);
         Ok(())
     }
@@ -145,14 +145,16 @@ impl ReplacementValidator {
             AND r.rel_type = 'm.replace'
             ORDER BY e.origin_server_ts ASC
         ";
-        
-        let mut result = state.db
+
+        let mut result = state
+            .db
             .query(query)
-            .bind(("original_event_id", original_event_id))
+            .bind(("original_event_id", original_event_id.to_string()))
             .await
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
 
-        let events: Vec<Value> = result.take(0)
+        let events: Vec<Value> = result
+            .take(0)
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
 
         let mut replacement_events = Vec::new();
@@ -174,36 +176,37 @@ impl ReplacementValidator {
         Ok(history.last().cloned())
     }
 
-    async fn get_event(
-        &self,
-        event_id: &str,
-        state: &AppState,
-    ) -> Result<Event, ReplacementError> {
+    async fn get_event(&self, event_id: &str, state: &AppState) -> Result<Event, ReplacementError> {
         let query = "
             SELECT event_id, room_id, sender, content, origin_server_ts, type
             FROM room_timeline_events 
             WHERE event_id = $event_id
             LIMIT 1
         ";
-        
-        let mut result = state.db
+
+        let mut result = state
+            .db
             .query(query)
-            .bind(("event_id", event_id))
+            .bind(("event_id", event_id.to_string()))
             .await
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
 
-        let events: Vec<Value> = result.take(0)
+        let events: Vec<Value> = result
+            .take(0)
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
-        
+
         if let Some(event_data) = events.first() {
-            let event = Event {
-                event_id: event_data["event_id"].as_str().unwrap_or("").to_string(),
-                room_id: event_data["room_id"].as_str().unwrap_or("").to_string(),
-                sender: event_data["sender"].as_str().unwrap_or("").to_string(),
-                content: event_data["content"].clone(),
-                origin_server_ts: event_data["origin_server_ts"].as_u64().unwrap_or(0),
-                event_type: event_data["type"].as_str().unwrap_or("").to_string(),
-            };
+            let content = serde_json::from_value::<EventContent>(event_data["content"].clone())
+                .unwrap_or_default();
+
+            let event = Event::new(
+                event_data["event_id"].as_str().unwrap_or("").to_string(),
+                event_data["sender"].as_str().unwrap_or("").to_string(),
+                event_data["origin_server_ts"].as_i64().unwrap_or(0),
+                event_data["type"].as_str().unwrap_or("").to_string(),
+                event_data["room_id"].as_str().unwrap_or("").to_string(),
+                content,
+            );
             Ok(event)
         } else {
             Err(ReplacementError::OriginalEventNotFound)
@@ -223,11 +226,12 @@ impl ReplacementValidator {
                 replacement_event_id = $replacement_event_id,
                 created_at = time::now()
         ";
-        
-        state.db
+
+        state
+            .db
             .query(query)
-            .bind(("original_event_id", original_event_id))
-            .bind(("replacement_event_id", replacement_event_id))
+            .bind(("original_event_id", original_event_id.to_string()))
+            .bind(("replacement_event_id", replacement_event_id.to_string()))
             .await
             .map_err(|e| ReplacementError::DatabaseError(e.to_string()))?;
 

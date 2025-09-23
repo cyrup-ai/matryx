@@ -6,13 +6,17 @@
 
 use anyhow::Result;
 use futures_util::{Stream, StreamExt};
-use matryx_entity::{Event, Membership, MembershipState, UserPresenceUpdate, DeviceKeys};
+#[cfg(test)]
+use matryx_entity::EventContent;
+use matryx_entity::{Event, Membership, MembershipState, UserPresenceUpdate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+use crate::repositories::ClientRepositoryService;
 
 /// Matrix sync state for tracking synchronization progress
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +52,7 @@ impl Default for SyncState {
 }
 
 /// State for a joined room
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JoinedRoomState {
     /// Room timeline events
     pub timeline: Vec<Event>,
@@ -62,19 +66,6 @@ pub struct JoinedRoomState {
     pub unread_notifications: UnreadNotifications,
     /// Room summary
     pub summary: Option<RoomSummary>,
-}
-
-impl Default for JoinedRoomState {
-    fn default() -> Self {
-        Self {
-            timeline: Vec::new(),
-            state: Vec::new(),
-            ephemeral: Vec::new(),
-            account_data: Vec::new(),
-            unread_notifications: UnreadNotifications::default(),
-            summary: None,
-        }
-    }
 }
 
 /// State for an invited room
@@ -164,8 +155,8 @@ pub struct LiveQuerySync {
     user_id: String,
     /// Current sync state
     state: Arc<RwLock<SyncState>>,
-    /// SurrealDB connection for direct queries
-    db: surrealdb::Surreal<surrealdb::engine::remote::ws::Client>,
+    /// Client repository service
+    repository_service: ClientRepositoryService,
     /// Broadcast channel for sync updates
     update_sender: broadcast::Sender<SyncUpdate>,
     /// Receiver for sync updates
@@ -174,16 +165,15 @@ pub struct LiveQuerySync {
 
 impl LiveQuerySync {
     /// Create a new LiveQuery sync manager
-    pub fn new(
-        user_id: String,
-        db: surrealdb::Surreal<surrealdb::engine::remote::ws::Client>,
-    ) -> Self {
+    pub fn new(user_id: String, db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self {
         let (update_sender, update_receiver) = broadcast::channel(1000);
+
+        let repository_service = ClientRepositoryService::from_db(db, user_id.clone());
 
         Self {
             user_id,
             state: Arc::new(RwLock::new(SyncState::default())),
-            db,
+            repository_service,
             update_sender,
             update_receiver,
         }
@@ -211,7 +201,11 @@ impl LiveQuerySync {
         debug!("Initializing sync state for user: {}", self.user_id);
 
         // Get user's current room memberships
-        let memberships: Vec<Membership> = self.db.select("room_membership").await?;
+        let memberships = self
+            .repository_service
+            .get_user_memberships()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get user memberships: {}", e))?;
 
         let mut state = self.state.write().await;
 
@@ -222,11 +216,11 @@ impl LiveQuerySync {
                 state.joined_rooms.insert(membership.room_id.clone(), room_state);
 
                 // Load recent events for this room
-                let events: Vec<Event> = self.db
-                    .query("SELECT * FROM room_event WHERE room_id = $room_id ORDER BY origin_server_ts DESC LIMIT 50")
-                    .bind(("room_id", membership.room_id.clone()))
-                    .await?
-                    .take(0)?;
+                let events = self
+                    .repository_service
+                    .get_room_events(&membership.room_id, Some(50))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to get room events: {}", e))?;
 
                 if let Some(room_state) = state.joined_rooms.get_mut(&membership.room_id) {
                     room_state.timeline = events;
@@ -249,8 +243,7 @@ impl LiveQuerySync {
     /// Start LiveQuery subscriptions for events
     async fn start_event_subscriptions(&self) -> Result<()> {
         let state = self.state.clone();
-        // Clone database connection for async operations
-        let db = self.db.clone();
+        let repository_service = self.repository_service.clone();
         let update_sender = self.update_sender.clone();
 
         // Get list of joined rooms to subscribe to
@@ -262,19 +255,19 @@ impl LiveQuerySync {
         // Subscribe to events for each joined room
         for room_id in room_ids {
             let room_id_str = room_id.to_string();
-            let db_clone = db.clone();
+            let repository_service_clone = repository_service.clone();
             let update_sender_clone = update_sender.clone();
 
             tokio::spawn(async move {
-                // Use SurrealDB LiveQuery with correct API
-                match db_clone.select("room_event").live().await {
+                // Use repository method for LiveQuery subscription
+                match repository_service_clone.subscribe_to_room_events(&room_id_str).await {
                     Ok(mut stream) => {
                         info!("Subscribed to events for room: {}", room_id_str);
 
                         while let Some(notification_result) = stream.next().await {
                             match notification_result {
                                 Ok(notification) => {
-                                    let event: Event = notification.data;
+                                    let event: Event = notification;
                                     debug!(
                                         "Received event in room {}: {}",
                                         room_id_str, event.event_id
@@ -307,33 +300,34 @@ impl LiveQuerySync {
 
     /// Start LiveQuery subscriptions for membership changes
     async fn start_membership_subscriptions(&self) -> Result<()> {
-        let db_clone = self.db.clone();
+        let repository_service = self.repository_service.clone();
         let user_id_clone = self.user_id.clone();
         let update_sender_clone = self.update_sender.clone();
 
         tokio::spawn(async move {
-            match db_clone.select("room_membership").live().await {
+            match repository_service.subscribe_to_membership_changes().await {
                 Ok(mut stream) => {
                     info!("Subscribed to membership changes for user: {}", user_id_clone);
 
                     while let Some(notification_result) = stream.next().await {
                         match notification_result {
-                            Ok(notification) => {
-                                let membership: Membership = notification.data;
-                                debug!(
-                                    "Received membership update for user {} in room {}: {}",
-                                    user_id_clone, membership.room_id, membership.membership
-                                );
+                            Ok(memberships) => {
+                                for membership in memberships {
+                                    debug!(
+                                        "Received membership update for user {} in room {}: {}",
+                                        user_id_clone, membership.room_id, membership.membership
+                                    );
 
-                                let room_id_owned = membership.room_id.clone();
-                                let update = SyncUpdate::MembershipUpdate {
-                                    room_id: room_id_owned,
-                                    user_id: user_id_clone.clone(),
-                                    membership,
-                                };
+                                    let room_id_owned = membership.room_id.clone();
+                                    let update = SyncUpdate::MembershipUpdate {
+                                        room_id: room_id_owned,
+                                        user_id: user_id_clone.clone(),
+                                        membership,
+                                    };
 
-                                if let Err(e) = update_sender_clone.send(update) {
-                                    warn!("Failed to send membership update: {}", e);
+                                    if let Err(e) = update_sender_clone.send(update) {
+                                        warn!("Failed to send membership update: {}", e);
+                                    }
                                 }
                             },
                             Err(e) => {
@@ -359,32 +353,34 @@ impl LiveQuerySync {
 
     /// Start LiveQuery subscriptions for user presence
     async fn start_presence_subscriptions(&self) -> Result<()> {
-        let db_clone = self.db.clone();
+        let repository_service = self.repository_service.clone();
         let user_id_clone = self.user_id.clone();
         let update_sender_clone = self.update_sender.clone();
 
         tokio::spawn(async move {
             // Subscribe to presence updates for users in shared rooms
 
-            match db_clone.select("user_presence").live().await {
+            match repository_service.subscribe_to_presence_updates(&user_id_clone).await {
                 Ok(mut stream) => {
                     info!("Subscribed to presence updates for user: {}", user_id_clone);
-                    
+
                     while let Some(notification_result) = stream.next().await {
                         match notification_result {
                             Ok(notification) => {
                                 // Deserialize notification data following room events pattern
-                                let presence_update: UserPresenceUpdate = notification.data;
+                                let presence_update: UserPresenceUpdate = notification;
                                 let update = SyncUpdate::PresenceUpdate {
                                     user_id: presence_update.user_id,
                                     presence: PresenceState {
                                         presence: presence_update.presence,
                                         status_msg: presence_update.status_msg,
-                                        last_active_ago: presence_update.last_active_ago.map(|t| t as u64),
+                                        last_active_ago: presence_update
+                                            .last_active_ago
+                                            .map(|t| t as u64),
                                         currently_active: presence_update.currently_active,
                                     },
                                 };
-                                
+
                                 if let Err(e) = update_sender_clone.send(update) {
                                     warn!("Failed to send presence update: {}", e);
                                 }
@@ -407,7 +403,7 @@ impl LiveQuerySync {
 
     /// Start LiveQuery subscriptions for device and encryption updates
     async fn start_device_subscriptions(&self) -> Result<()> {
-        let db_clone = self.db.clone();
+        let repository_service = self.repository_service.clone();
         let user_id_clone = self.user_id.clone();
         let update_sender_clone = self.update_sender.clone();
 
@@ -415,20 +411,20 @@ impl LiveQuerySync {
         tokio::spawn(async move {
             // Subscribe to device key updates for users in shared rooms
 
-            match db_clone.select("device_keys").live().await {
+            match repository_service.subscribe_to_device_updates(&user_id_clone).await {
                 Ok(mut stream) => {
                     info!("Subscribed to device updates for user: {}", user_id_clone);
-                    
+
                     while let Some(notification_result) = stream.next().await {
                         match notification_result {
                             Ok(notification) => {
-                                // Deserialize notification data following room events pattern
-                                let device_keys: DeviceKeys = notification.data;
+                                // notification is now Device directly, not DeviceKeys
+                                let device = notification;
                                 let update = SyncUpdate::DeviceListUpdate {
-                                    changed: vec![device_keys.user_id],
+                                    changed: vec![device.user_id],
                                     left: vec![], // TODO: Implement proper left user tracking from membership changes
                                 };
-                                
+
                                 if let Err(e) = update_sender_clone.send(update) {
                                     warn!("Failed to send device list update: {}", e);
                                 }
@@ -447,29 +443,32 @@ impl LiveQuerySync {
         });
 
         // Subscribe to to-device messages
-        let db_clone_2 = self.db.clone();
+        let repository_service_2 = self.repository_service.clone();
         let user_id_clone_2 = self.user_id.clone();
         let update_sender_clone_2 = self.update_sender.clone();
 
         tokio::spawn(async move {
             // Subscribe to to-device messages for the user
 
-            match db_clone_2.select("to_device_messages").live().await {
+            match repository_service_2.subscribe_to_device_messages().await {
                 Ok(mut stream) => {
                     info!("Subscribed to to-device messages for user: {}", user_id_clone_2);
-                    
+
                     while let Some(notification_result) = stream.next().await {
                         match notification_result {
                             Ok(notification) => {
                                 // Process to-device message
-                                debug!("Received to-device message: {:?}", notification.data);
-                                
+                                debug!("Received to-device message: {:?}", notification);
+
                                 // Create account data update for to-device messages
+                                // Convert ToDeviceMessage to JSON Value
+                                let content =
+                                    serde_json::to_value(notification).unwrap_or_default();
                                 let update = SyncUpdate::AccountDataUpdate {
                                     data_type: "m.to_device".to_string(),
-                                    content: notification.data,
+                                    content,
                                 };
-                                
+
                                 if let Err(e) = update_sender_clone_2.send(update) {
                                     warn!("Failed to send to-device message update: {}", e);
                                 }
@@ -482,7 +481,10 @@ impl LiveQuerySync {
                 },
                 Err(e) => {
                     warn!("Could not subscribe to to-device messages (table may not exist): {}", e);
-                    info!("To-device message subscriptions initialized for user: {}", user_id_clone_2);
+                    info!(
+                        "To-device message subscriptions initialized for user: {}",
+                        user_id_clone_2
+                    );
                 },
             }
         });
@@ -534,18 +536,17 @@ impl LiveQuerySync {
     /// Subscribe to a new room (when user joins)
     pub async fn subscribe_to_room(&self, room_id: &str) -> Result<()> {
         let room_id_str = room_id.to_string();
-        let db_clone = self.db.clone();
+        let repository_service = self.repository_service.clone();
         let update_sender = self.update_sender.clone();
 
         tokio::spawn(async move {
-            match db_clone.select("room_event").live().await {
+            match repository_service.subscribe_to_room_events(&room_id_str).await {
                 Ok(mut stream) => {
                     info!("Subscribed to events for new room: {}", room_id_str);
 
                     while let Some(event_result) = stream.next().await {
                         match event_result {
-                            Ok(notification) => {
-                                let event: Event = notification.data;
+                            Ok(event) => {
                                 debug!(
                                     "Received event in room {}: {}",
                                     room_id_str, event.event_id
@@ -583,16 +584,22 @@ impl LiveQuerySync {
         // SurrealDB LiveQuery subscriptions will be automatically cleaned up
         Ok(())
     }
+
+    /// Get a receiver for sync updates
+    /// This allows consumers to subscribe to sync updates broadcast by the sync manager
+    pub fn subscribe_to_updates(&self) -> broadcast::Receiver<SyncUpdate> {
+        self.update_receiver.resubscribe()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matryx_surrealdb::repository::*;
-    use surrealdb::{Surreal, engine::local::Mem};
 
-    async fn setup_test_db() -> surrealdb::Surreal<surrealdb::engine::local::Mem> {
-        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).await.unwrap();
+    async fn setup_test_db() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = surrealdb::engine::any::connect("memory")
+            .await
+            .expect("Failed to connect to in-memory database");
         db.use_ns("test").use_db("test").await.unwrap();
         db
     }
@@ -621,7 +628,7 @@ mod tests {
             room_id: room_id.to_string(),
             sender: "@test:example.com".to_string(),
             event_type: "m.room.message".to_string(),
-            content: EventContent::RoomMessage(
+            content: EventContent::Unknown(
                 serde_json::json!({"msgtype": "m.text", "body": "Hello"}),
             ),
             state_key: None,

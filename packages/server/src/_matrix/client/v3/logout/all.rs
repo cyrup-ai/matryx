@@ -5,6 +5,7 @@ use axum::{
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
 };
+use futures::TryFutureExt;
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
@@ -35,7 +36,7 @@ pub async fn post(
     let start_time = std::time::Instant::now();
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Logout all failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

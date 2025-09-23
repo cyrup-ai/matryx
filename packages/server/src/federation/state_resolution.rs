@@ -73,15 +73,12 @@ impl StateKey {
 
 /// Matrix State Resolution v2 algorithm implementation
 pub struct StateResolver {
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    event_repo: Arc<EventRepository>,
     room_repo: Arc<RoomRepository>,
 }
 
 impl StateResolver {
-    pub fn new(
-        event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
-        room_repo: Arc<RoomRepository>,
-    ) -> Self {
+    pub fn new(event_repo: Arc<EventRepository>, room_repo: Arc<RoomRepository>) -> Self {
         Self { event_repo, room_repo }
     }
 
@@ -120,8 +117,11 @@ impl StateResolver {
 
             let (resolved_event, rejected, soft_failed) = if events.len() == 1 {
                 // No conflict for this state key
-                let resolved_event = events.into_iter().next()
-                    .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty state event collection".to_string()))?;
+                let resolved_event = events.into_iter().next().ok_or_else(|| {
+                    StateResolutionError::InvalidStateEvent(
+                        "Empty state event collection".to_string(),
+                    )
+                })?;
                 (resolved_event, Vec::new(), Vec::new())
             } else {
                 // Resolve conflict using authorization rules
@@ -196,13 +196,10 @@ impl StateResolver {
         }
 
         if valid_events.len() == 1 {
-            let resolved_event = valid_events.into_iter().next()
-                .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty valid events collection".to_string()))?;
-            return Ok((
-                resolved_event,
-                rejected_events,
-                soft_failed_events,
-            ));
+            let resolved_event = valid_events.into_iter().next().ok_or_else(|| {
+                StateResolutionError::InvalidStateEvent("Empty valid events collection".to_string())
+            })?;
+            return Ok((resolved_event, rejected_events, soft_failed_events));
         }
 
         // Use the existing conflict resolution logic
@@ -254,8 +251,9 @@ impl StateResolver {
         }
 
         // For other state events, return the event with highest authority
-        sorted_events.into_iter().next()
-            .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty sorted events collection".to_string()))
+        sorted_events.into_iter().next().ok_or_else(|| {
+            StateResolutionError::InvalidStateEvent("Empty sorted events collection".to_string())
+        })
     }
 
     /// Resolve membership event conflicts with special membership rules
@@ -294,8 +292,11 @@ impl StateResolver {
         // Default to most recent event
         let mut sorted = conflicting_events;
         sorted.sort_by(|a, b| b.origin_server_ts.cmp(&a.origin_server_ts));
-        sorted.into_iter().next()
-            .ok_or_else(|| StateResolutionError::InvalidStateEvent("Empty conflicting events collection".to_string()))
+        sorted.into_iter().next().ok_or_else(|| {
+            StateResolutionError::InvalidStateEvent(
+                "Empty conflicting events collection".to_string(),
+            )
+        })
     }
 
     /// Build the authorization event chain for the resolved state

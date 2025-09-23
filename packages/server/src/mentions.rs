@@ -1,9 +1,8 @@
-use regex::Regex;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use ruma_html::Html;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use tracing::{info, warn};
 
@@ -31,10 +30,14 @@ pub enum MentionsError {
 impl axum::response::IntoResponse for MentionsError {
     fn into_response(self) -> axum::response::Response {
         use axum::{http::StatusCode, response::Json};
-        
+
         let (status, error_message) = match self {
-            MentionsError::SerializationError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
-            MentionsError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            MentionsError::SerializationError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+            },
+            MentionsError::DatabaseError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+            },
             MentionsError::ValidationError(_) => (StatusCode::BAD_REQUEST, "Invalid request"),
             MentionsError::UserNotFound(_) => (StatusCode::NOT_FOUND, "User not found"),
             MentionsError::RoomNotFound(_) => (StatusCode::NOT_FOUND, "Room not found"),
@@ -55,7 +58,7 @@ pub struct MentionsMetadata {
     /// User IDs that are mentioned in the event
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_ids: Option<Vec<String>>,
-    
+
     /// Whether this is a room-wide mention (@room)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room: Option<bool>,
@@ -111,7 +114,7 @@ impl MentionsProcessor {
                     }
                 }
             }
-            
+
             if let Some(room) = existing_mentions.get("room").and_then(|v| v.as_bool()) {
                 has_room_mention = room;
             }
@@ -130,10 +133,14 @@ impl MentionsProcessor {
         // Create mentions metadata if we have any mentions
         if !valid_mentions.is_empty() || has_room_mention {
             let mentions = MentionsMetadata {
-                user_ids: if valid_mentions.is_empty() { None } else { Some(valid_mentions) },
+                user_ids: if valid_mentions.is_empty() {
+                    None
+                } else {
+                    Some(valid_mentions)
+                },
                 room: if has_room_mention { Some(true) } else { None },
             };
-            
+
             info!("Detected mentions in room {}: {:?}", room_id, mentions);
             Ok(Some(mentions))
         } else {
@@ -167,7 +174,7 @@ impl MentionsProcessor {
                 warn!("HTML parsing failed: {}, falling back to original content", e);
                 // Fallback to original content if parsing fails
                 html.to_string()
-            }
+            },
         }
     }
 
@@ -175,7 +182,7 @@ impl MentionsProcessor {
     fn safe_strip_html(&self, html: &str) -> Result<String, Box<dyn std::error::Error>> {
         // Parse HTML using Matrix-compliant parser
         let parsed_html = Html::parse(html);
-        
+
         // Extract text content safely
         Ok(self.extract_html_text_content(&parsed_html))
     }
@@ -183,12 +190,12 @@ impl MentionsProcessor {
     /// Extract text content from HTML nodes
     fn extract_html_text_content(&self, html: &Html) -> String {
         let mut text_content = String::new();
-        
+
         // Traverse HTML nodes and extract text
         for child in html.children() {
             self.extract_node_text(&child, &mut text_content);
         }
-        
+
         text_content
     }
 
@@ -238,26 +245,15 @@ impl MentionsProcessor {
         let mut mentions = Vec::new();
 
         // Get room members with display names
-        let query = "
-            SELECT user_id, content.displayname
-            FROM room_memberships 
-            WHERE room_id = $room_id AND content.membership = 'join'
-        ";
-        
-        let mut result = state.db
-            .query(query)
-            .bind(("room_id", room_id))
-            .await?;
+        let members = state
+            .mention_repository
+            .get_room_members_for_mentions(room_id)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        let members: Vec<Value> = result.take(0)?;
-
-        for member in members {
-            if let Some(user_id) = member.get("user_id").and_then(|v| v.as_str()) {
-                if let Some(display_name) = member.get("displayname").and_then(|v| v.as_str()) {
-                    if !display_name.is_empty() && text.contains(display_name) {
-                        mentions.push(user_id.to_string());
-                    }
-                }
+        for (user_id, display_name) in members {
+            if text.contains(&display_name) {
+                mentions.push(user_id);
             }
         }
 
@@ -281,27 +277,12 @@ impl MentionsProcessor {
         }
 
         let user_ids: Vec<String> = mentioned_users.iter().cloned().collect();
-        
-        let query = "
-            SELECT user_id
-            FROM room_memberships 
-            WHERE room_id = $room_id 
-            AND user_id IN $user_ids 
-            AND content.membership = 'join'
-        ";
-        
-        let mut result = state.db
-            .query(query)
-            .bind(("room_id", room_id))
-            .bind(("user_ids", user_ids))
-            .await?;
 
-        let valid_members: Vec<Value> = result.take(0)?;
-
-        let valid_user_ids: Vec<String> = valid_members
-            .into_iter()
-            .filter_map(|member| member.get("user_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
+        let valid_user_ids = state
+            .mention_repository
+            .validate_mentioned_users(room_id, &user_ids)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         Ok(valid_user_ids)
     }
@@ -314,11 +295,11 @@ impl MentionsProcessor {
     ) -> Result<(), MentionsError> {
         let mentions_json = serde_json::to_value(mentions)
             .map_err(|e| MentionsError::SerializationError(e.to_string()))?;
-        
+
         if let Some(content_obj) = content.as_object_mut() {
             content_obj.insert("m.mentions".to_string(), mentions_json);
         }
-        
+
         Ok(())
     }
 
@@ -334,13 +315,15 @@ impl MentionsProcessor {
         // Trigger notifications for user mentions
         if let Some(user_ids) = &mentions.user_ids {
             for user_id in user_ids {
-                self.trigger_user_mention_notification(user_id, event_id, room_id, sender, state).await?;
+                self.trigger_user_mention_notification(user_id, event_id, room_id, sender, state)
+                    .await?;
             }
         }
 
         // Trigger notifications for room mentions
         if mentions.room.unwrap_or(false) {
-            self.trigger_room_mention_notification(event_id, room_id, sender, state).await?;
+            self.trigger_room_mention_notification(event_id, room_id, sender, state)
+                .await?;
         }
 
         Ok(())
@@ -357,25 +340,11 @@ impl MentionsProcessor {
         info!("Triggering mention notification for user {} in room {}", user_id, room_id);
 
         // Create mention notification record
-        let query = "
-            CREATE mention_notifications SET
-                id = rand::uuid(),
-                user_id = $user_id,
-                event_id = $event_id,
-                room_id = $room_id,
-                sender = $sender,
-                mention_type = 'user',
-                created_at = time::now(),
-                read = false
-        ";
-        
-        state.db
-            .query(query)
-            .bind(("user_id", user_id))
-            .bind(("event_id", event_id))
-            .bind(("room_id", room_id))
-            .bind(("sender", sender))
-            .await?;
+        state
+            .mention_repository
+            .create_mention_notification(user_id, event_id, room_id, sender)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         // TODO: Integrate with push notification system
         // This would trigger push rules like .m.rule.is_user_mention
@@ -392,47 +361,12 @@ impl MentionsProcessor {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("Triggering room mention notification in room {}", room_id);
 
-        // Get all room members except sender
-        let query = "
-            SELECT user_id
-            FROM room_memberships 
-            WHERE room_id = $room_id 
-            AND content.membership = 'join'
-            AND user_id != $sender
-        ";
-        
-        let mut result = state.db
-            .query(query)
-            .bind(("room_id", room_id))
-            .bind(("sender", sender))
-            .await?;
-
-        let members: Vec<Value> = result.take(0)?;
-
-        // Create mention notifications for all members
-        for member in members {
-            if let Some(user_id) = member.get("user_id").and_then(|v| v.as_str()) {
-                let query = "
-                    CREATE mention_notifications SET
-                        id = rand::uuid(),
-                        user_id = $user_id,
-                        event_id = $event_id,
-                        room_id = $room_id,
-                        sender = $sender,
-                        mention_type = 'room',
-                        created_at = time::now(),
-                        read = false
-                ";
-                
-                state.db
-                    .query(query)
-                    .bind(("user_id", user_id))
-                    .bind(("event_id", event_id))
-                    .bind(("room_id", room_id))
-                    .bind(("sender", sender))
-                    .await?;
-            }
-        }
+        // Create room-wide mention notifications
+        state
+            .mention_repository
+            .create_room_notification(event_id, room_id, sender)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         // TODO: Integrate with push notification system
         // This would trigger push rules like .m.rule.is_room_mention

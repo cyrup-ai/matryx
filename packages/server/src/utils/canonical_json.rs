@@ -252,7 +252,7 @@ mod tests {
             "integer": 42,
             "zero": 0,
             "negative": -123,
-            "float": 3.14159,
+            "float": std::f64::consts::PI,
             "scientific": 1.23e-4
         });
 

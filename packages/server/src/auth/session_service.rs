@@ -1,8 +1,6 @@
 use anyhow::Result;
 use base64::{Engine, engine::general_purpose};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use surrealdb::Surreal;
-use surrealdb::engine::any::Any;
 use tracing::{debug, info, warn};
 
 use crate::auth::{
@@ -12,24 +10,38 @@ use crate::auth::{
     MatrixJwtClaims,
     MatrixServerAuth,
 };
+use matryx_surrealdb::repository::{
+    KeyServerRepository,
+    SessionRepository,
+    error::RepositoryError,
+    key_server::ServerSigningKeyRecord,
+    session::UserAccessToken,
+};
+use surrealdb::{Connection, Surreal};
 
 /// Service for managing Matrix authentication sessions with SurrealDB 3.0
 #[derive(Clone)]
-pub struct MatrixSessionService {
+pub struct MatrixSessionService<C: Connection> {
     jwt_secret: Vec<u8>,
     homeserver_name: String,
-    db: Option<Surreal<Any>>,
+    session_repo: SessionRepository,
+    key_server_repo: KeyServerRepository<C>,
 }
 
-impl MatrixSessionService {
-    /// Create new session service
-    pub fn new(jwt_secret: Vec<u8>, homeserver_name: String) -> Self {
-        Self { jwt_secret, homeserver_name, db: None }
-    }
-
-    /// Create new session service with database connection
-    pub fn with_db(jwt_secret: Vec<u8>, homeserver_name: String, db: Surreal<Any>) -> Self {
-        Self { jwt_secret, homeserver_name, db: Some(db) }
+impl<C: Connection> MatrixSessionService<C> {
+    /// Create new session service with repositories
+    pub fn new(
+        jwt_secret: Vec<u8>,
+        homeserver_name: String,
+        session_repo: SessionRepository,
+        key_server_repo: KeyServerRepository<C>,
+    ) -> Self {
+        Self {
+            jwt_secret,
+            homeserver_name,
+            session_repo,
+            key_server_repo,
+        }
     }
 
     /// Get the homeserver name
@@ -163,44 +175,20 @@ impl MatrixSessionService {
         &self,
         access_token: &str,
     ) -> Result<MatrixAccessToken, MatrixAuthError> {
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        // Query the access_tokens table
-        let query = "
-            SELECT user_id, device_id, expires_at
-            FROM user_access_tokens
-            WHERE token = $token AND (expires_at IS NULL OR expires_at > datetime::now())
-        ";
-
-        let mut response = db
-            .query(query)
-            .bind(("token", access_token.to_string()))
-            .await
-            .map_err(|e| MatrixAuthError::DatabaseError(format!("Token query failed: {}", e)))?;
-
-        #[derive(serde::Deserialize)]
-        struct TokenRecord {
-            user_id: String,
-            device_id: String,
-            expires_at: Option<chrono::DateTime<chrono::Utc>>,
-        }
-
-        let token_record: Option<TokenRecord> = response.take(0).map_err(|e| {
-            MatrixAuthError::DatabaseError(format!("Failed to parse token record: {}", e))
-        })?;
-
-        match token_record {
-            Some(record) => {
+        // Use session repository to validate opaque token
+        match self.session_repo.get_user_access_token(access_token).await {
+            Ok(Some(token_record)) => {
                 Ok(MatrixAccessToken {
                     token: access_token.to_string(),
-                    user_id: record.user_id,
-                    device_id: record.device_id,
-                    expires_at: record.expires_at.map(|dt| dt.timestamp()),
+                    user_id: token_record.user_id,
+                    device_id: token_record.device_id,
+                    expires_at: token_record.expires_at.map(|dt| dt.timestamp()),
                 })
             },
-            None => Err(MatrixAuthError::UnknownToken),
+            Ok(None) => Err(MatrixAuthError::UnknownToken),
+            Err(e) => {
+                Err(MatrixAuthError::DatabaseError(format!("Token validation failed: {}", e)))
+            },
         }
     }
 
@@ -244,39 +232,10 @@ impl MatrixSessionService {
         server_name: &str,
         key_id: &str,
     ) -> Result<String, MatrixAuthError> {
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        // Try cache first
-        let query = "
-            SELECT public_key, expires_at
-            FROM server_signing_keys
-            WHERE server_name = $server_name 
-              AND key_id = $key_id 
-              AND (expires_at IS NULL OR expires_at > datetime::now())
-        ";
-
-        let mut response = db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .bind(("key_id", key_id.to_string()))
-            .await
-            .map_err(|e| MatrixAuthError::DatabaseError(format!("Key query failed: {}", e)))?;
-
-        #[derive(serde::Deserialize)]
-        struct KeyRecord {
-            public_key: String,
-            expires_at: Option<chrono::DateTime<chrono::Utc>>,
-        }
-
-        let key_record: Option<KeyRecord> = response.take(0).map_err(|e| {
-            MatrixAuthError::DatabaseError(format!("Failed to parse key record: {}", e))
-        })?;
-
-        match key_record {
-            Some(record) => Ok(record.public_key),
-            None => {
+        // Try cache first using key server repository
+        match self.key_server_repo.get_server_signing_key(server_name, key_id).await {
+            Ok(Some(public_key)) => Ok(public_key),
+            Ok(None) => {
                 // Key not in cache - fetch from remote server
                 info!("Fetching server key {}:{} from remote server", server_name, key_id);
                 let fetched_key = self.fetch_remote_server_key(server_name, key_id).await?;
@@ -287,6 +246,7 @@ impl MatrixSessionService {
                 debug!("Successfully fetched and cached server key {}:{}", server_name, key_id);
                 Ok(fetched_key)
             },
+            Err(e) => Err(MatrixAuthError::DatabaseError(format!("Key query failed: {}", e))),
         }
     }
 
@@ -602,29 +562,12 @@ impl MatrixSessionService {
         key_id: &str,
         public_key: &str,
     ) -> Result<(), MatrixAuthError> {
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        let query = "
-            CREATE server_signing_keys SET
-                server_name = $server_name,
-                key_id = $key_id,
-                public_key = $public_key,
-                fetched_at = $fetched_at,
-                is_active = true,
-                expires_at = $expires_at
-        ";
-
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24); // Cache for 24 hours
+        let fetched_at = chrono::Utc::now();
 
-        let _response = db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .bind(("key_id", key_id.to_string()))
-            .bind(("public_key", public_key.to_string()))
-            .bind(("fetched_at", chrono::Utc::now()))
-            .bind(("expires_at", expires_at))
+        // Use key server repository to cache the public key
+        self.key_server_repo
+            .cache_server_signing_key(server_name, key_id, public_key, fetched_at, expires_at)
             .await
             .map_err(|e| {
                 MatrixAuthError::DatabaseError(format!("Failed to cache server key: {}", e))
@@ -639,35 +582,31 @@ impl MatrixSessionService {
         &self,
         server_name: &str,
     ) -> Result<crate::auth::ServerSigningKey, MatrixAuthError> {
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        // Try to get existing signing key
-        let query = "
-            SELECT key_id, server_name, private_key, public_key, created_at, expires_at, is_active
-            FROM server_signing_keys
-            WHERE server_name = $server_name 
-              AND is_active = true
-              AND (expires_at IS NULL OR expires_at > datetime::now())
-            ORDER BY created_at DESC
-            LIMIT 1
-        ";
-
-        let mut response = db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .await
-            .map_err(|e| {
-                MatrixAuthError::DatabaseError(format!("Failed to query server signing key: {}", e))
-            })?;
-
-        if let Ok(Some(key)) = response.take::<Option<crate::auth::ServerSigningKey>>(0) {
-            return Ok(key);
+        // Try to get existing signing key using repository
+        match self.key_server_repo.get_server_signing_key_by_server(server_name).await {
+            Ok(Some(key_record)) => {
+                // Convert repository record to auth type
+                Ok(crate::auth::ServerSigningKey {
+                    key_id: key_record.key_id,
+                    server_name: key_record.server_name,
+                    private_key: key_record.private_key,
+                    public_key: key_record.public_key,
+                    created_at: key_record.created_at,
+                    expires_at: key_record.expires_at,
+                    is_active: key_record.is_active,
+                })
+            },
+            Ok(None) => {
+                // Generate new signing key if none exists
+                self.generate_server_signing_key(server_name).await
+            },
+            Err(e) => {
+                Err(MatrixAuthError::DatabaseError(format!(
+                    "Failed to query server signing key: {}",
+                    e
+                )))
+            },
         }
-
-        // Generate new signing key if none exists
-        self.generate_server_signing_key(server_name).await
     }
 
     /// Generate a new server signing key
@@ -675,51 +614,31 @@ impl MatrixSessionService {
         &self,
         server_name: &str,
     ) -> Result<crate::auth::ServerSigningKey, MatrixAuthError> {
-        use base64::{Engine as _, engine::general_purpose};
-        use ed25519_dalek::{SigningKey, VerifyingKey};
-        use rand::rngs::OsRng;
-
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        // Generate Ed25519 key pair
-        let signing_key = SigningKey::generate(&mut OsRng);
-        let verifying_key: VerifyingKey = (&signing_key).into();
-
-        // Create key ID
-        let key_id =
-            format!("ed25519:{}", general_purpose::STANDARD.encode(&verifying_key.to_bytes()[..8]));
-
-        // Encode keys
-        let private_key = general_purpose::STANDARD.encode(signing_key.to_bytes());
-        let public_key = general_purpose::STANDARD.encode(verifying_key.to_bytes());
-
-        let now = chrono::Utc::now();
-        let expires_at = now + chrono::Duration::days(365); // 1 year validity
-
-        let signing_key_record = crate::auth::ServerSigningKey {
-            key_id: key_id.clone(),
-            server_name: server_name.to_string(),
-            private_key: private_key.clone(),
-            public_key: public_key.clone(),
-            created_at: now,
-            expires_at: Some(expires_at),
-            is_active: true,
-        };
-
-        // Store in database
-        let cloned_record = signing_key_record.clone();
-        let _: Option<crate::auth::ServerSigningKey> = db
-            .create(("server_signing_keys", key_id.clone()))
-            .content(cloned_record)
-            .await
-            .map_err(|e| {
-                MatrixAuthError::DatabaseError(format!("Failed to store server signing key: {}", e))
-            })?;
-
-        info!("Generated new server signing key: {} for {}", key_id, server_name);
-        Ok(signing_key_record)
+        // Use key server repository to generate and store signing key
+        match self.key_server_repo.generate_and_store_signing_key(server_name).await {
+            Ok(key_record) => {
+                info!(
+                    "Generated new server signing key: {} for {}",
+                    key_record.key_id, server_name
+                );
+                // Convert repository record to auth type
+                Ok(crate::auth::ServerSigningKey {
+                    key_id: key_record.key_id,
+                    server_name: key_record.server_name,
+                    private_key: key_record.private_key,
+                    public_key: key_record.public_key,
+                    created_at: key_record.created_at,
+                    expires_at: key_record.expires_at,
+                    is_active: key_record.is_active,
+                })
+            },
+            Err(e) => {
+                Err(MatrixAuthError::DatabaseError(format!(
+                    "Failed to generate server signing key: {}",
+                    e
+                )))
+            },
+        }
     }
 
     /// Sign JSON content with server signing key
@@ -731,43 +650,25 @@ impl MatrixSessionService {
         use base64::{Engine as _, engine::general_purpose};
         use ed25519_dalek::{Signature, Signer, SigningKey};
 
-        let db = self.db.as_ref().ok_or_else(|| {
-            MatrixAuthError::DatabaseError("Database connection not available".to_string())
-        })?;
-
-        // Get the signing key from database
-        let query = "
-            SELECT private_key
-            FROM server_signing_keys
-            WHERE key_id = $key_id 
-              AND is_active = true
-              AND (expires_at IS NULL OR expires_at > datetime::now())
-            LIMIT 1
-        ";
-
-        let mut response =
-            db.query(query).bind(("key_id", key_id.to_string())).await.map_err(|e| {
+        // Get the private key from repository
+        let private_key = self
+            .key_server_repo
+            .get_private_key_for_signing(key_id)
+            .await
+            .map_err(|e| {
                 MatrixAuthError::DatabaseError(format!("Failed to query signing key: {}", e))
+            })?
+            .ok_or_else(|| {
+                MatrixAuthError::DatabaseError(format!(
+                    "Signing key {} not found or expired",
+                    key_id
+                ))
             })?;
-
-        #[derive(serde::Deserialize)]
-        struct SigningKeyData {
-            private_key: String,
-        }
-
-        let key_data: Option<SigningKeyData> = response.take(0).map_err(|e| {
-            MatrixAuthError::DatabaseError(format!("Failed to extract signing key: {}", e))
-        })?;
-
-        let key_data = key_data.ok_or_else(|| {
-            MatrixAuthError::DatabaseError(format!("Signing key {} not found or expired", key_id))
-        })?;
 
         // Decode private key
-        let private_key_bytes =
-            general_purpose::STANDARD.decode(&key_data.private_key).map_err(|e| {
-                MatrixAuthError::DatabaseError(format!("Failed to decode private key: {}", e))
-            })?;
+        let private_key_bytes = general_purpose::STANDARD.decode(&private_key).map_err(|e| {
+            MatrixAuthError::DatabaseError(format!("Failed to decode private key: {}", e))
+        })?;
 
         let key_array: [u8; 32] = private_key_bytes.try_into().map_err(|_| {
             MatrixAuthError::DatabaseError("Invalid private key length".to_string())

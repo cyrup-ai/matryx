@@ -5,11 +5,13 @@ use axum::{
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
 };
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
 use crate::{
+    _matrix::client::v3::devices::{ClientDeviceInfo, TrustLevel},
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
@@ -19,7 +21,7 @@ use matryx_surrealdb::repository::{
     session::SessionRepository,
 };
 
-use super::DeviceInfo;
+// DeviceInfo already imported above
 
 /// Matrix Client-Server API v1.11 device update request
 #[derive(Deserialize)]
@@ -54,7 +56,7 @@ pub async fn delete(
     let start_time = std::time::Instant::now();
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Device deletion failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -165,11 +167,11 @@ pub async fn get(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(device_id): Path<String>,
-) -> Result<Json<DeviceInfo>, StatusCode> {
+) -> Result<Json<ClientDeviceInfo>, StatusCode> {
     let start_time = std::time::Instant::now();
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Device info failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -220,11 +222,16 @@ pub async fn get(
     );
 
     // Convert to Matrix API format
-    let device_info = DeviceInfo {
-        device_id: device.device_id,
+    let device_info = ClientDeviceInfo {
+        device_id: device.device_id.clone(),
         display_name: device.display_name,
         last_seen_ip: device.last_seen_ip,
         last_seen_ts: device.last_seen_ts.map(|ts| ts as u64),
+        user_id: user_id.to_string(),
+        created_ts: device.created_at.timestamp() as u64,
+        device_keys: device.device_keys.and_then(|v| serde_json::from_value(v).ok()),
+        trust_level: TrustLevel::Unverified, // Default trust level
+        is_deleted: device.hidden.unwrap_or(false), // Use hidden field as is_deleted
     };
 
     Ok(Json(device_info))
@@ -249,7 +256,7 @@ pub async fn put(
     let start_time = std::time::Instant::now();
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Device update failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

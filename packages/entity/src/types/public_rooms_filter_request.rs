@@ -1,11 +1,11 @@
-use crate::types::Filter;
+use crate::types::MatrixFilter;
 use serde::{Deserialize, Serialize};
 
 /// PublicRoomsFilterRequest
 /// Source: spec/server/13-public-md:175-185
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicRoomsFilterRequest {
-    pub filter: Option<Filter>,
+    pub filter: Option<MatrixFilter>,
     pub include_all_networks: Option<bool>,
     pub limit: Option<i64>,
     pub since: Option<String>,
@@ -14,7 +14,7 @@ pub struct PublicRoomsFilterRequest {
 
 impl PublicRoomsFilterRequest {
     pub fn new(
-        filter: Option<Filter>,
+        filter: Option<MatrixFilter>,
         include_all_networks: Option<bool>,
         limit: Option<i64>,
         since: Option<String>,

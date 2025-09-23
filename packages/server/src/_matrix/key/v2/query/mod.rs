@@ -9,10 +9,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 use matryx_entity::utils::canonical_json;
+use matryx_surrealdb::repository::InfrastructureService;
 
 /// POST /_matrix/key/v2/query
 ///
-/// Query for keys from multiple servers in a batch format.
+/// Query for keys from multiple servers in a batch format using KeyServerRepository.
 /// The receiving (notary) server must sign the keys returned by the queried servers.
 pub async fn post(
     State(state): State<AppState>,
@@ -35,11 +36,22 @@ pub async fn post(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Create InfrastructureService instance
+    let infrastructure_service = create_infrastructure_service(&state).await;
+
     // Process each server's key requests
     for (server_name, key_requests) in server_keys_request {
         debug!("Querying keys for server: {}", server_name);
 
-        match fetch_and_sign_server_keys(&state, &client, server_name, key_requests).await {
+        match fetch_and_sign_server_keys(
+            &infrastructure_service,
+            &client,
+            server_name,
+            key_requests,
+            &state.homeserver_name,
+        )
+        .await
+        {
             Ok(signed_keys) => {
                 server_keys_response.extend(signed_keys);
             },
@@ -57,12 +69,35 @@ pub async fn post(
     })))
 }
 
-/// Fetch server keys from a remote server and sign them as a notary
-async fn fetch_and_sign_server_keys(
+async fn create_infrastructure_service(
     state: &AppState,
+) -> InfrastructureService<surrealdb::engine::any::Any> {
+    let websocket_repo = matryx_surrealdb::repository::WebSocketRepository::new(state.db.clone());
+    let transaction_repo =
+        matryx_surrealdb::repository::TransactionRepository::new(state.db.clone());
+    let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(state.db.clone());
+    let registration_repo =
+        matryx_surrealdb::repository::RegistrationRepository::new(state.db.clone());
+    let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(state.db.clone());
+    let device_repo = matryx_surrealdb::repository::DeviceRepository::new(state.db.clone());
+
+    InfrastructureService::new(
+        websocket_repo,
+        transaction_repo,
+        key_server_repo,
+        registration_repo,
+        directory_repo,
+        device_repo,
+    )
+}
+
+/// Fetch server keys from a remote server and sign them as a notary using repository
+async fn fetch_and_sign_server_keys(
+    infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     client: &Client,
     server_name: &str,
     _key_requests: &Value,
+    homeserver_name: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     // Fetch keys from the remote server's /_matrix/key/v2/server endpoint
     let url = format!("https://{}/_matrix/key/v2/server", server_name);
@@ -99,14 +134,16 @@ async fn fetch_and_sign_server_keys(
         .into());
     }
 
-    // Sign the server key response as a notary
-    let notary_signature = create_notary_signature(state, &server_key_response).await?;
+    // Sign the server key response as a notary using repository
+    let notary_signature =
+        create_notary_signature(infrastructure_service, &server_key_response, homeserver_name)
+            .await?;
 
     // Add our notary signature to the response
     let mut signed_response = server_key_response;
     if let Some(signatures) = signed_response.get_mut("signatures") {
         if let Some(signatures_obj) = signatures.as_object_mut() {
-            signatures_obj.insert(state.homeserver_name.clone(), notary_signature);
+            signatures_obj.insert(homeserver_name.to_string(), notary_signature);
         }
     }
 
@@ -114,34 +151,19 @@ async fn fetch_and_sign_server_keys(
     Ok(vec![signed_response])
 }
 
-/// Create a notary signature for a server key response
+/// Create a notary signature for a server key response using repository
 async fn create_notary_signature(
-    state: &AppState,
+    infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     server_key_response: &Value,
+    homeserver_name: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    // Get our server's signing key
-    let query = "
-        SELECT key_id, private_key
-        FROM server_signing_keys
-        WHERE server_name = $server_name
-          AND is_active = true
-        ORDER BY created_at DESC
-        LIMIT 1
-    ";
+    // Get our server's signing key using repository
+    let key_id = "ed25519:auto"; // Default key ID format
+    let signing_key = infrastructure_service
+        .get_signing_key(homeserver_name, key_id)
+        .await
+        .map_err(|e| format!("Failed to get signing key: {:?}", e))?;
 
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("server_name", state.homeserver_name.clone()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct SigningKeyRecord {
-        key_id: String,
-        private_key: String,
-    }
-
-    let signing_key: Option<SigningKeyRecord> = response.take(0)?;
     let signing_key = signing_key.ok_or("No signing key found for notary signature")?;
 
     // Create canonical JSON for signing (without signatures field)
@@ -153,7 +175,7 @@ async fn create_notary_signature(
     let canonical_json = canonical_json(&canonical_data)?;
 
     // Sign the canonical JSON
-    let signature = sign_canonical_json(&canonical_json, &signing_key.private_key)?;
+    let signature = sign_canonical_json(&canonical_json, &signing_key.signing_key)?;
 
     let mut notary_signatures = HashMap::new();
     notary_signatures.insert(signing_key.key_id, json!(signature));

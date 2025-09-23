@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -27,7 +28,7 @@ pub async fn delete(
     headers: HeaderMap,
     Path((room_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Session key backup delete failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -94,7 +95,7 @@ pub async fn get(
     headers: HeaderMap,
     Path((room_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Session key backup get failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -161,7 +162,7 @@ pub async fn put(
     Path((room_id, session_id)): Path<(String, String)>,
     Json(request): Json<SessionKeyBackup>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Session key backup put failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

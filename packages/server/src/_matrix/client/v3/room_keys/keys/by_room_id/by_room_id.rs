@@ -52,7 +52,7 @@ pub async fn put(
     let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
     let mut version_response = state.db
         .query(version_query)
-        .bind(("user_id", &user_id))
+        .bind(("user_id", user_id.clone()))
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
@@ -102,10 +102,10 @@ pub async fn put(
     
     let _update_result = state.db
         .query(update_query)
-        .bind(("user_id", &user_id))
-        .bind(("version", &backup_version))
+        .bind(("user_id", user_id.clone()))
+        .bind(("version", backup_version.clone()))
         .bind(("new_count", count))
-        .bind(("etag", &etag))
+        .bind(("etag", etag.clone()))
         .bind(("updated_at", Utc::now()))
         .await
         .map_err(|e| {
@@ -146,7 +146,7 @@ pub async fn get(
     let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
     let mut version_response = state.db
         .query(version_query)
-        .bind(("user_id", &user_id))
+        .bind(("user_id", user_id.clone()))
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
@@ -162,9 +162,9 @@ pub async fn get(
     let query = "SELECT * FROM room_key_backups WHERE user_id = $user_id AND room_id = $room_id AND version = $version";
     let mut response = state.db
         .query(query)
-        .bind(("user_id", &user_id))
-        .bind(("room_id", &room_id))
-        .bind(("version", &backup_version))
+        .bind(("user_id", user_id.clone()))
+        .bind(("room_id", room_id.clone()))
+        .bind(("version", backup_version.clone()))
         .await
         .map_err(|e| {
             error!("Failed to get room key backups: {}", e);
@@ -217,7 +217,7 @@ pub async fn delete(
     let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
     let mut version_response = state.db
         .query(version_query)
-        .bind(("user_id", &user_id))
+        .bind(("user_id", user_id.clone()))
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
@@ -233,9 +233,9 @@ pub async fn delete(
     let delete_query = "DELETE FROM room_key_backups WHERE user_id = $user_id AND room_id = $room_id AND version = $version";
     let _delete_result = state.db
         .query(delete_query)
-        .bind(("user_id", &user_id))
-        .bind(("room_id", &room_id))
-        .bind(("version", &backup_version))
+        .bind(("user_id", user_id.clone()))
+        .bind(("room_id", room_id.clone()))
+        .bind(("version", backup_version.clone()))
         .await
         .map_err(|e| {
             error!("Failed to delete room key backups: {}", e);

@@ -70,7 +70,7 @@ pub type AuthorizationResult<T> = Result<T, AuthorizationError>;
 
 /// Main authorization engine implementing complete Matrix authorization rules
 pub struct AuthorizationEngine {
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    event_repo: Arc<EventRepository>,
     room_repo: Arc<RoomRepository>,
     power_level_validator: PowerLevelValidator,
     auth_events_selector: AuthEventsSelector,
@@ -80,10 +80,7 @@ pub struct AuthorizationEngine {
 
 impl AuthorizationEngine {
     /// Create new authorization engine with repository dependencies
-    pub fn new(
-        event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
-        room_repo: Arc<RoomRepository>,
-    ) -> Self {
+    pub fn new(event_repo: Arc<EventRepository>, room_repo: Arc<RoomRepository>) -> Self {
         Self {
             event_repo: event_repo.clone(),
             room_repo: room_repo.clone(),
@@ -392,11 +389,11 @@ impl AuthState {
 
 /// Power level validation logic implementing Matrix power level rules
 pub struct PowerLevelValidator {
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    event_repo: Arc<EventRepository>,
 }
 
 impl PowerLevelValidator {
-    pub fn new(event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>) -> Self {
+    pub fn new(event_repo: Arc<EventRepository>) -> Self {
         Self { event_repo }
     }
 
@@ -505,11 +502,11 @@ impl PowerLevelValidator {
 }
 /// Auth events selection logic implementing Matrix auth events selection algorithm
 pub struct AuthEventsSelector {
-    event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>,
+    event_repo: Arc<EventRepository>,
 }
 
 impl AuthEventsSelector {
-    pub fn new(event_repo: Arc<EventRepository<surrealdb::engine::any::Any>>) -> Self {
+    pub fn new(event_repo: Arc<EventRepository>) -> Self {
         Self { event_repo }
     }
 

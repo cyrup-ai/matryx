@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -37,7 +38,7 @@ pub async fn delete(
     headers: HeaderMap,
     Path(version): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Room key backup version delete failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -96,7 +97,7 @@ pub async fn get(
     headers: HeaderMap,
     Path(version): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Room key backup version get failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;
@@ -162,7 +163,7 @@ pub async fn put(
     Path(version): Path<String>,
     Json(request): Json<BackupVersionUpdateRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Room key backup version update failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

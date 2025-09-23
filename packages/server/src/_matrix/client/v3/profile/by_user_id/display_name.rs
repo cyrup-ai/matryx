@@ -5,23 +5,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use matryx_surrealdb::repository::ProfileManagementService;
 
 use crate::{
     auth::MatrixSessionService,
-    database::SurrealRepository,
     AppState,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UserProfile {
-    pub user_id: String,
-    pub display_name: Option<String>,
-    pub avatar_url: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+
 
 #[derive(Serialize)]
 pub struct DisplayNameResponse {
@@ -38,32 +29,20 @@ pub async fn get_display_name(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<DisplayNameResponse>, StatusCode> {
-    // Query user profile from database
-    let query = "SELECT display_name FROM user_profiles WHERE user_id = $user_id";
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(user_id.clone()));
-
-    let result = state.database
-        .query(query, Some(params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(profiles) = result.first() {
-        if let Some(profile_data) = profiles.first() {
-            let display_name = profile_data.get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            return Ok(Json(DisplayNameResponse {
-                displayname: display_name,
-            }));
+    let profile_service = ProfileManagementService::new(state.db.clone());
+    
+    // Get user profile which includes display name
+    match profile_service.get_user_profile(&user_id, &user_id).await {
+        Ok(profile) => Ok(Json(DisplayNameResponse {
+            displayname: profile.displayname,
+        })),
+        Err(_) => {
+            // If profile doesn't exist, return null display name
+            Ok(Json(DisplayNameResponse {
+                displayname: None,
+            }))
         }
     }
-
-    // If no profile exists, return null display name
-    Ok(Json(DisplayNameResponse {
-        displayname: None,
-    }))
 }
 
 pub async fn set_display_name(
@@ -90,35 +69,11 @@ pub async fn set_display_name(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Validate display name length (Matrix spec: max 256 characters)
-    if let Some(ref display_name) = request.displayname {
-        if display_name.len() > 256 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    let profile_service = ProfileManagementService::new(state.db.clone());
+    
+    // Update display name using profile service
+    match profile_service.update_display_name(&user_id, request.displayname).await {
+        Ok(()) => Ok(Json(serde_json::json!({}))),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
-
-    // Update or create user profile
-    let query = r#"
-        UPDATE user_profiles SET 
-            display_name = $display_name,
-            updated_at = time::now()
-        WHERE user_id = $user_id
-        ELSE CREATE user_profiles SET
-            user_id = $user_id,
-            display_name = $display_name,
-            created_at = time::now(),
-            updated_at = time::now()
-    "#;
-
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(user_id));
-    params.insert("display_name".to_string(), 
-        request.displayname.map(Value::String).unwrap_or(Value::Null));
-
-    state.database
-        .query(query, Some(params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(serde_json::json!({})))
 }

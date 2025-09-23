@@ -33,9 +33,9 @@ pub struct PushCacheConfig {
 impl Default for PushCacheConfig {
     fn default() -> Self {
         Self {
-            ttl_seconds: 3600,        // 1 hour TTL
-            max_capacity: 1000,       // Max 1000 cached gateways
-            enable_metrics: true,     // Enable performance monitoring
+            ttl_seconds: 3600,    // 1 hour TTL
+            max_capacity: 1000,   // Max 1000 cached gateways
+            enable_metrics: true, // Enable performance monitoring
         }
     }
 }
@@ -55,11 +55,10 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn init() -> Result<&'static ServerConfig, ConfigError> {
         Ok(SERVER_CONFIG.get_or_init(|| {
-            let homeserver_name = env::var("HOMESERVER_NAME")
-                .unwrap_or_else(|_| {
-                    warn!("HOMESERVER_NAME not set, defaulting to localhost (development only)");
-                    "localhost".to_string()
-                });
+            let homeserver_name = env::var("HOMESERVER_NAME").unwrap_or_else(|_| {
+                warn!("HOMESERVER_NAME not set, defaulting to localhost (development only)");
+                "localhost".to_string()
+            });
 
             let email_config = EmailConfig {
                 smtp_server: env::var("SMTP_SERVER").unwrap_or_else(|_| "localhost".to_string()),
@@ -70,7 +69,7 @@ impl ServerConfig {
                 smtp_username: env::var("SMTP_USERNAME").unwrap_or_default(),
                 smtp_password: env::var("SMTP_PASSWORD").unwrap_or_default(),
                 from_address: env::var("FROM_EMAIL")
-                    .unwrap_or_else(|| format!("noreply@{}", homeserver_name)),
+                    .unwrap_or_else(|_| format!("noreply@{}", homeserver_name)),
                 enabled: env::var("EMAIL_ENABLED")
                     .unwrap_or_else(|_| "true".to_string())
                     .parse()
@@ -129,8 +128,9 @@ impl ServerConfig {
                     error!("HOMESERVER_NAME must not be localhost in production");
                     panic!("Invalid production configuration: localhost server name");
                 }
-                
-                if !crate::utils::matrix_identifiers::is_valid_server_name(&config.homeserver_name) {
+
+                if !crate::utils::matrix_identifiers::is_valid_server_name(&config.homeserver_name)
+                {
                     error!("Invalid server name format: {}", config.homeserver_name);
                     panic!("Invalid production configuration: malformed server name");
                 }

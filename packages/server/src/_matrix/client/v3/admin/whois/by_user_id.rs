@@ -1,26 +1,27 @@
 use axum::extract::ConnectInfo;
 use axum::{
-    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
+    response::Json,
 };
+
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, authenticate_user};
+use crate::auth::{MatrixAuthError, extract_matrix_auth};
 use crate::state::AppState;
 
 #[derive(Serialize)]
 pub struct WhoisResponse {
     pub user_id: String,
-    pub devices: HashMap<String, DeviceInfo>,
+    pub devices: HashMap<String, WhoisDeviceInfo>,
 }
 
 #[derive(Serialize)]
-pub struct DeviceInfo {
+pub struct WhoisDeviceInfo {
     pub sessions: Vec<SessionInfo>,
 }
 
@@ -44,13 +45,17 @@ pub async fn get(
     Path(target_user_id): Path<String>,
 ) -> Result<Json<WhoisResponse>, StatusCode> {
     // Authenticate user
-    let auth_result = authenticate_user(&state, &headers).await;
-    let user_id = match auth_result {
-        Ok(user_id) => user_id,
+    let auth_result = extract_matrix_auth(&headers, &state.session_service).await;
+    let matrix_auth = match auth_result {
+        Ok(auth) => auth,
         Err(MatrixAuthError::MissingToken) => return Err(StatusCode::UNAUTHORIZED),
-        Err(MatrixAuthError::InvalidToken) => return Err(StatusCode::UNAUTHORIZED),
-        Err(MatrixAuthError::ExpiredToken) => return Err(StatusCode::UNAUTHORIZED),
+        Err(MatrixAuthError::MissingAuthorization) => return Err(StatusCode::UNAUTHORIZED),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+
+    let user_id = match matrix_auth {
+        crate::auth::MatrixAuth::User(user_auth) => user_auth.user_id,
+        _ => return Err(StatusCode::UNAUTHORIZED),
     };
 
     info!(
@@ -60,7 +65,8 @@ pub async fn get(
 
     // Check if user is admin
     let admin_check_query = "SELECT is_admin FROM users WHERE user_id = $user_id";
-    let is_admin = match state.db.query(admin_check_query).bind(("user_id", &user_id)).await {
+    let is_admin = match state.db.query(admin_check_query).bind(("user_id", user_id.clone())).await
+    {
         Ok(mut result) => {
             match result.take::<Vec<bool>>(0) {
                 Ok(admin_flags) => admin_flags.into_iter().next().unwrap_or(false),
@@ -83,22 +89,26 @@ pub async fn get(
 
     // Check if target user exists
     let user_exists_query = "SELECT user_id FROM users WHERE user_id = $user_id";
-    let user_exists =
-        match state.db.query(user_exists_query).bind(("user_id", &target_user_id)).await {
-            Ok(mut result) => {
-                match result.take::<Vec<String>>(0) {
-                    Ok(users) => !users.is_empty(),
-                    Err(e) => {
-                        error!("Failed to check user existence: {}", e);
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    },
-                }
-            },
-            Err(e) => {
-                error!("Failed to query user existence: {}", e);
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            },
-        };
+    let user_exists = match state
+        .db
+        .query(user_exists_query)
+        .bind(("user_id", target_user_id.clone()))
+        .await
+    {
+        Ok(mut result) => {
+            match result.take::<Vec<String>>(0) {
+                Ok(users) => !users.is_empty(),
+                Err(e) => {
+                    error!("Failed to check user existence: {}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                },
+            }
+        },
+        Err(e) => {
+            error!("Failed to query user existence: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        },
+    };
 
     if !user_exists {
         return Err(StatusCode::NOT_FOUND);
@@ -111,7 +121,12 @@ pub async fn get(
         WHERE d.user_id = $user_id
     "#;
 
-    let devices = match state.db.query(devices_query).bind(("user_id", &target_user_id)).await {
+    let devices = match state
+        .db
+        .query(devices_query)
+        .bind(("user_id", target_user_id.clone()))
+        .await
+    {
         Ok(mut result) => {
             match result
                 .take::<Vec<(String, Option<String>, Option<String>, Option<i64>, Option<String>)>>(
@@ -142,7 +157,7 @@ pub async fn get(
 
         let sessions = vec![SessionInfo { connections }];
 
-        device_info_map.insert(device_id, DeviceInfo { sessions });
+        device_info_map.insert(device_id, WhoisDeviceInfo { sessions });
     }
 
     // Get additional session information from access tokens
@@ -152,7 +167,12 @@ pub async fn get(
         WHERE user_id = $user_id AND expires_at > time::now()
     "#;
 
-    if let Ok(mut result) = state.db.query(tokens_query).bind(("user_id", &target_user_id)).await {
+    if let Ok(mut result) = state
+        .db
+        .query(tokens_query)
+        .bind(("user_id", target_user_id.clone()))
+        .await
+    {
         if let Ok(tokens) = result.take::<Vec<(String, Option<String>, Option<i64>)>>(0) {
             for (device_id, last_used_ip, last_used_ts) in tokens {
                 if let Some(device_info) = device_info_map.get_mut(&device_id) {

@@ -1,58 +1,47 @@
-use serde::{Deserialize, Serialize};
 use matryx_entity::PDU;
+use matryx_surrealdb::repository::push::{
+    Event,
+    PushAction,
+    PushCondition,
+    PushRule,
+    PushRuleEvaluation,
+    RoomContext,
+};
+use matryx_surrealdb::repository::{PushRepository, RepositoryError};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use surrealdb::engine::any::Any;
+use surrealdb::{Connection, Surreal};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PushRule {
-    pub rule_id: String,
-    pub priority_class: i32,
-    pub priority: i32,
-    pub conditions: Vec<PushCondition>,
-    pub actions: Vec<PushAction>,
-    pub default: bool,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PushCondition {
-    EventMatch { key: String, pattern: String },
-    ContainsDisplayName,
-    RoomMemberCount { is: String },
-    SenderNotificationPermission { key: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum PushAction {
-    Notify,
-    DontNotify,
-    Coalesce,
-    SetTweak { set_tweak: String, value: serde_json::Value },
-}
-
-pub struct RoomContext {
-    pub room_id: String,
-    pub member_count: u64,
-    pub user_display_name: Option<String>,
-    pub power_levels: HashMap<String, i64>,
-}
+// Types are now imported from the repository module
 
 pub struct PushRuleEngine {
-    rules: Vec<PushRule>,
+    push_repo: PushRepository<Any>,
+    default_rules: Vec<PushRule>,
 }
 
 impl PushRuleEngine {
-    pub fn new(rules: Vec<PushRule>) -> Self {
-        Self { rules }
+    pub fn new(db: Surreal<Any>) -> Self {
+        let push_repo = PushRepository::new(db);
+        let default_rules = Self::get_default_rules();
+
+        Self { push_repo, default_rules }
+    }
+
+    pub fn with_rules(db: Surreal<Any>, rules: Vec<PushRule>) -> Self {
+        let push_repo = PushRepository::new(db);
+
+        Self { push_repo, default_rules: rules }
     }
 
     pub fn evaluate_event(&self, event: &PDU, context: &RoomContext) -> Vec<PushAction> {
+        // Use default rules for evaluation (this is synchronous)
         let mut actions = Vec::new();
-        
+
         // Sort rules by priority class and priority
-        let mut sorted_rules = self.rules.clone();
+        let mut sorted_rules = self.default_rules.clone();
         sorted_rules.sort_by(|a, b| {
-            a.priority_class.cmp(&b.priority_class)
-                .then(a.priority.cmp(&b.priority))
+            a.priority_class.cmp(&b.priority_class).then(a.priority.cmp(&b.priority))
         });
 
         for rule in sorted_rules {
@@ -74,7 +63,32 @@ impl PushRuleEngine {
         actions
     }
 
-    fn evaluate_conditions(&self, conditions: &[PushCondition], event: &PDU, context: &RoomContext) -> bool {
+    /// Evaluate push rules for a user using the repository (async version)
+    pub async fn evaluate_event_for_user(
+        &self,
+        user_id: &str,
+        event: &PDU,
+        context: &RoomContext,
+    ) -> Result<PushRuleEvaluation, RepositoryError> {
+        // Convert PDU to Event
+        let push_event = Event {
+            event_id: event.event_id.clone(),
+            event_type: event.event_type.clone(),
+            sender: event.sender.clone(),
+            content: serde_json::to_value(&event.content)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+            state_key: event.state_key.clone(),
+        };
+
+        self.push_repo.evaluate_push_rules(user_id, &push_event, context).await
+    }
+
+    fn evaluate_conditions(
+        &self,
+        conditions: &[PushCondition],
+        event: &PDU,
+        context: &RoomContext,
+    ) -> bool {
         for condition in conditions {
             if !self.evaluate_condition(condition, event, context) {
                 return false; // All conditions must match
@@ -83,7 +97,12 @@ impl PushRuleEngine {
         true
     }
 
-    fn evaluate_condition(&self, condition: &PushCondition, event: &PDU, context: &RoomContext) -> bool {
+    fn evaluate_condition(
+        &self,
+        condition: &PushCondition,
+        event: &PDU,
+        context: &RoomContext,
+    ) -> bool {
         match condition {
             PushCondition::EventMatch { key, pattern } => {
                 self.evaluate_event_match(key, pattern, event)
@@ -91,9 +110,7 @@ impl PushRuleEngine {
             PushCondition::ContainsDisplayName => {
                 self.evaluate_contains_display_name(event, context)
             },
-            PushCondition::RoomMemberCount { is } => {
-                self.evaluate_room_member_count(is, context)
-            },
+            PushCondition::RoomMemberCount { is } => self.evaluate_room_member_count(is, context),
             PushCondition::SenderNotificationPermission { key } => {
                 self.evaluate_sender_notification_permission(key, event, context)
             },
@@ -151,7 +168,12 @@ impl PushRuleEngine {
         false
     }
 
-    fn evaluate_sender_notification_permission(&self, key: &str, event: &PDU, context: &RoomContext) -> bool {
+    fn evaluate_sender_notification_permission(
+        &self,
+        key: &str,
+        event: &PDU,
+        context: &RoomContext,
+    ) -> bool {
         // Check if sender has required power level for notifications
         if let Some(sender_power) = context.power_levels.get(&event.sender) {
             // Default notification power level is 50
@@ -163,6 +185,66 @@ impl PushRuleEngine {
         } else {
             false
         }
+    }
+
+    /// Create a push rule for a user using the repository
+    pub async fn create_push_rule(
+        &self,
+        user_id: &str,
+        rule: &PushRule,
+    ) -> Result<(), RepositoryError> {
+        self.push_repo.create_push_rule(user_id, rule).await
+    }
+
+    /// Get user's push rules using the repository
+    pub async fn get_user_push_rules(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<PushRule>, RepositoryError> {
+        self.push_repo.get_user_push_rules(user_id).await
+    }
+
+    /// Update a push rule using the repository
+    pub async fn update_push_rule(
+        &self,
+        user_id: &str,
+        rule_id: &str,
+        rule: &PushRule,
+    ) -> Result<(), RepositoryError> {
+        self.push_repo.update_push_rule(user_id, rule_id, rule).await
+    }
+
+    /// Delete a push rule using the repository
+    pub async fn delete_push_rule(
+        &self,
+        user_id: &str,
+        rule_id: &str,
+    ) -> Result<(), RepositoryError> {
+        self.push_repo.delete_push_rule(user_id, rule_id).await
+    }
+
+    /// Get a specific push rule using the repository
+    pub async fn get_push_rule_by_id(
+        &self,
+        user_id: &str,
+        rule_id: &str,
+    ) -> Result<Option<PushRule>, RepositoryError> {
+        self.push_repo.get_push_rule_by_id(user_id, rule_id).await
+    }
+
+    /// Enable or disable a push rule using the repository
+    pub async fn enable_push_rule(
+        &self,
+        user_id: &str,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<(), RepositoryError> {
+        self.push_repo.enable_push_rule(user_id, rule_id, enabled).await
+    }
+
+    /// Reset user's push rules to defaults using the repository
+    pub async fn reset_user_push_rules(&self, user_id: &str) -> Result<(), RepositoryError> {
+        self.push_repo.reset_user_push_rules(user_id).await
     }
 
     pub fn get_default_rules() -> Vec<PushRule> {
@@ -177,7 +259,6 @@ impl PushRuleEngine {
                 default: true,
                 enabled: false,
             },
-            
             // Content rules
             PushRule {
                 rule_id: ".m.rule.contains_display_name".to_string(),
@@ -198,11 +279,10 @@ impl PushRuleEngine {
                 default: true,
                 enabled: true,
             },
-
             // Room rules
             // (Room-specific rules would be added here)
 
-            // Sender rules  
+            // Sender rules
             // (Sender-specific rules would be added here)
 
             // Underride rules (lowest priority)
@@ -210,12 +290,10 @@ impl PushRuleEngine {
                 rule_id: ".m.rule.message".to_string(),
                 priority_class: 1,
                 priority: 0,
-                conditions: vec![
-                    PushCondition::EventMatch {
-                        key: "type".to_string(),
-                        pattern: "m.room.message".to_string(),
-                    },
-                ],
+                conditions: vec![PushCondition::EventMatch {
+                    key: "type".to_string(),
+                    pattern: "m.room.message".to_string(),
+                }],
                 actions: vec![PushAction::Notify],
                 default: true,
                 enabled: true,

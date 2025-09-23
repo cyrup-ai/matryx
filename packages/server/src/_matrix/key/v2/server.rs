@@ -6,6 +6,7 @@ use tracing::{error, info};
 
 use crate::AppState;
 use matryx_entity::utils::canonical_json;
+use matryx_surrealdb::repository::{InfrastructureService, SigningKey};
 
 #[derive(serde::Deserialize)]
 struct SigningKeyRecord {
@@ -18,7 +19,7 @@ struct SigningKeyRecord {
 
 /// GET /_matrix/key/v2/server
 ///
-/// Returns the homeserver's published signing keys for federation.
+/// Returns the homeserver's published signing keys for federation using KeyServerRepository.
 /// Other servers use these keys to verify signatures on events and requests.
 pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
     // Get server name from environment with proper error handling
@@ -27,12 +28,17 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Get or generate Ed25519 signing keys from database
+    // Create InfrastructureService instance
+    let infrastructure_service = create_infrastructure_service(&state).await;
+
+    // Get or generate Ed25519 signing keys using repository
     let (verify_keys, old_verify_keys, signatures) =
-        get_or_generate_signing_keys(&state, &server_name).await.map_err(|e| {
-            error!("Failed to get signing keys: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        get_or_generate_signing_keys(&infrastructure_service, &server_name)
+            .await
+            .map_err(|e| {
+                error!("Failed to get signing keys: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     let current_time_ms = chrono::Utc::now().timestamp_millis();
     let valid_until_ms = current_time_ms + (7 * 24 * 60 * 60 * 1000); // 7 days from now
@@ -46,43 +52,72 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
     })))
 }
 
-/// Get existing signing keys from database or generate new ones
-async fn get_or_generate_signing_keys(
+async fn create_infrastructure_service(
     state: &AppState,
+) -> InfrastructureService<surrealdb::engine::any::Any> {
+    let websocket_repo = matryx_surrealdb::repository::WebSocketRepository::new(state.db.clone());
+    let transaction_repo =
+        matryx_surrealdb::repository::TransactionRepository::new(state.db.clone());
+    let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(state.db.clone());
+    let registration_repo =
+        matryx_surrealdb::repository::RegistrationRepository::new(state.db.clone());
+    let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(state.db.clone());
+    let device_repo = matryx_surrealdb::repository::DeviceRepository::new(state.db.clone());
+
+    InfrastructureService::new(
+        websocket_repo,
+        transaction_repo,
+        key_server_repo,
+        registration_repo,
+        directory_repo,
+        device_repo,
+    )
+}
+
+/// Get existing signing keys from repository or generate new ones
+async fn get_or_generate_signing_keys(
+    infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     server_name: &str,
 ) -> Result<(Value, Value, Value), Box<dyn std::error::Error + Send + Sync>> {
-    // Query existing signing keys
-    let query = "
-        SELECT key_id, public_key, private_key, created_at, expires_at
-        FROM server_signing_keys
-        WHERE server_name = $server_name
-          AND is_active = true
-          AND (expires_at IS NULL OR expires_at > datetime::now())
-        ORDER BY created_at DESC
-    ";
+    // Try to get existing signing key using repository
+    let key_id = "ed25519:auto";
 
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("server_name", server_name.to_string()))
-        .await?;
-
-    let existing_keys: Vec<SigningKeyRecord> = response.take(0)?;
-
-    let (current_key, old_keys): (SigningKeyRecord, Vec<SigningKeyRecord>) = if existing_keys
-        .is_empty()
+    let current_key = match infrastructure_service
+        .get_server_keys(server_name, Some(&[key_id.to_string()]))
+        .await
     {
-        // No keys exist, generate new ones
-        info!("No signing keys found for server {}, generating new Ed25519 key pair", server_name);
-        let new_key = generate_ed25519_keypair(state, server_name).await?;
-        (new_key, vec![])
-    } else {
-        // Use existing keys
-        let current = existing_keys
-            .into_iter()
-            .next()
-            .ok_or("No current key found despite non-empty keys")?;
-        (current, vec![])
+        Ok(server_keys_response) => {
+            // If we have server keys, extract the current key
+            if let Some(server_keys) = server_keys_response.server_keys.first() {
+                if let Some(verify_key) = server_keys.verify_keys.get(key_id) {
+                    // Convert to our internal format
+                    SigningKeyRecord {
+                        key_id: key_id.to_string(),
+                        public_key: verify_key.key.clone(),
+                        private_key: "".to_string(), // We don't store private keys in ServerKeys
+                        created_at: chrono::Utc::now(),
+                        expires_at: Some(
+                            chrono::DateTime::from_timestamp(server_keys.valid_until_ts, 0)
+                                .unwrap_or_else(chrono::Utc::now),
+                        ),
+                    }
+                } else {
+                    // No key found, generate new one
+                    generate_ed25519_keypair(infrastructure_service, server_name).await?
+                }
+            } else {
+                // No server keys, generate new one
+                generate_ed25519_keypair(infrastructure_service, server_name).await?
+            }
+        },
+        Err(_) => {
+            // No keys exist, generate new ones
+            info!(
+                "No signing keys found for server {}, generating new Ed25519 key pair",
+                server_name
+            );
+            generate_ed25519_keypair(infrastructure_service, server_name).await?
+        },
     };
 
     // Build verify_keys JSON
@@ -110,19 +145,19 @@ async fn get_or_generate_signing_keys(
     Ok((json!(verify_keys), old_verify_keys, json!(signatures)))
 }
 
-/// Generate new Ed25519 keypair and store in database
+/// Generate new Ed25519 keypair and store using repository
 async fn generate_ed25519_keypair(
-    state: &AppState,
+    infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     server_name: &str,
 ) -> Result<SigningKeyRecord, Box<dyn std::error::Error + Send + Sync>> {
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use rand::{RngCore, rngs::OsRng};
 
     // Generate proper Ed25519 keypair using cryptographically secure random number generator
     let mut rng = OsRng;
     let mut secret_bytes = [0u8; 32];
     rng.fill_bytes(&mut secret_bytes);
-    let signing_key = SigningKey::from_bytes(&secret_bytes);
+    let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
     let verifying_key = signing_key.verifying_key();
 
     // Extract raw bytes
@@ -137,28 +172,25 @@ async fn generate_ed25519_keypair(
     let created_at = chrono::Utc::now();
     let expires_at = created_at + chrono::Duration::days(365); // 1 year validity
 
-    // Store in database
-    let query = "
-        CREATE server_signing_keys SET
-            server_name = $server_name,
-            key_id = $key_id,
-            public_key = $public_key,
-            private_key = $private_key,
-            created_at = $created_at,
-            expires_at = $expires_at,
-            is_active = true
-    ";
+    // Create SigningKey struct for repository
+    let signing_key_entity = SigningKey {
+        key_id: key_id.clone(),
+        server_name: server_name.to_string(),
+        signing_key: private_key_b64.clone(),
+        verify_key: public_key_b64.clone(),
+        created_at,
+        expires_at: Some(expires_at),
+    };
 
-    state
-        .db
-        .query(query)
-        .bind(("server_name", server_name.to_string()))
-        .bind(("key_id", key_id.clone()))
-        .bind(("public_key", public_key_b64.clone()))
-        .bind(("private_key", private_key_b64.clone()))
-        .bind(("created_at", created_at))
-        .bind(("expires_at", expires_at))
-        .await?;
+    // Store using InfrastructureService
+    infrastructure_service
+        .store_signing_key(server_name, &key_id, &signing_key_entity)
+        .await
+        .map_err(|e| {
+            error!("Failed to store signing key: {:?}", e);
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to store signing key"))
+                as Box<dyn std::error::Error + Send + Sync>
+        })?;
 
     info!(
         "Generated and stored new Ed25519 keypair for server {} with key_id {}",

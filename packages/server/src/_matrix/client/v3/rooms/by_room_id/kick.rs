@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -52,7 +53,7 @@ pub async fn post(
     Json(request): Json<KickRequest>,
 ) -> Result<Json<KickResponse>, StatusCode> {
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         warn!("Room kick failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

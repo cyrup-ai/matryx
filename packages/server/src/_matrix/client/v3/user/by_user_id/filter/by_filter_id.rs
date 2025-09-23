@@ -1,45 +1,29 @@
-use axum::{Json, extract::Path, http::StatusCode};
-use serde_json::{Value, json};
+use crate::auth::AuthenticatedUser;
+use crate::state::AppState;
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
+use matryx_entity::types::MatrixFilter;
+use matryx_surrealdb::repository::filter::FilterRepository;
 
 /// GET /_matrix/client/v3/user/{userId}/filter/{filterId}
 pub async fn get(
-    Path((_user_id, _filter_id)): Path<(String, String)>,
-) -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "event_fields": [],
-        "event_format": "client",
-        "presence": {
-            "limit": 10
-        },
-        "account_data": {
-            "limit": 10
-        },
-        "room": {
-            "rooms": [],
-            "not_rooms": [],
-            "ephemeral": {
-                "limit": 10
-            },
-            "include_leave": false,
-            "state": {
-                "limit": 10
-            },
-            "timeline": {
-                "limit": 10
-            },
-            "account_data": {
-                "limit": 10
-            }
-        }
-    })))
-}
+    State(state): State<AppState>,
+    Path((user_id, filter_id)): Path<(String, String)>,
+    auth: AuthenticatedUser,
+) -> Result<Json<MatrixFilter>, StatusCode> {
+    if auth.user_id != user_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
-/// POST /_matrix/client/v3/user/{userId}/filter
-pub async fn post(
-    Path(_user_id): Path<String>,
-    Json(_payload): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "filter_id": "example_filter_id"
-    })))
+    let filter_repo = FilterRepository::new(state.db.clone());
+    let filter = filter_repo
+        .get_by_id(&filter_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(filter))
 }

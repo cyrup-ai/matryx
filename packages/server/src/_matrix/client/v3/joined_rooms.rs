@@ -3,6 +3,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
+use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::error;
@@ -22,7 +23,7 @@ pub async fn get(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<JoinedRoomsResponse>, StatusCode> {
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Authentication failed: {}", e);
         StatusCode::UNAUTHORIZED
     })?;

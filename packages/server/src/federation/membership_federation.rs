@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use surrealdb::engine::any::Any;
 
 use axum::http::StatusCode;
 use base64::{Engine, engine::general_purpose};
@@ -35,7 +36,7 @@ pub struct FederationRetryManager {
     retry_config: RetryConfig,
     server_circuit_breakers: Arc<tokio::sync::RwLock<HashMap<String, CircuitBreaker>>>,
     event_signer: Arc<EventSigner>,
-    session_service: Arc<MatrixSessionService>,
+    session_service: Arc<MatrixSessionService<Any>>,
     homeserver_name: String,
 }
 
@@ -46,7 +47,7 @@ pub struct RetryConfig {
     pub max_retries: u32,
     /// Base delay for exponential backoff (milliseconds)
     pub base_delay_ms: u64,
-    /// Maximum delay between retries (milliseconds)  
+    /// Maximum delay between retries (milliseconds)
     pub max_delay_ms: u64,
     /// Jitter factor for backoff randomization (0.0 to 1.0)
     pub jitter_factor: f64,
@@ -138,7 +139,7 @@ impl FederationRetryManager {
     pub fn new(
         retry_config: Option<RetryConfig>,
         event_signer: Arc<EventSigner>,
-        session_service: Arc<MatrixSessionService>,
+        session_service: Arc<MatrixSessionService<Any>>,
         homeserver_name: String,
     ) -> Self {
         let config = retry_config.unwrap_or_default();
@@ -162,7 +163,7 @@ impl FederationRetryManager {
 
     /// Retry a federation request with intelligent backoff and circuit breaking
     ///
-    /// # Arguments  
+    /// # Arguments
     /// * `server_name` - The Matrix server to make the request to
     /// * `operation` - Description of the operation for logging
     /// * `request_fn` - Async function that performs the actual request
@@ -823,6 +824,15 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// HTTP mocking infrastructure for federation testing
+    ///
+    /// Uses `wiremock` to create controlled HTTP responses for testing federation
+    /// retry logic, error handling, and network resilience. This is standard
+    /// practice for testing distributed systems without external dependencies.
+    ///
+    /// **Testing Pattern:** Mock external HTTP services for reliable unit tests
+    /// **Library:** wiremock - Industry standard HTTP mocking for Rust
+
     // Test fixtures
     fn create_test_retry_config() -> RetryConfig {
         RetryConfig {
@@ -838,16 +848,19 @@ mod tests {
 
     async fn setup_test_federation_manager() -> FederationRetryManager {
         // Create mock dependencies with required parameters
+        let db = surrealdb::engine::any::connect("memory")
+            .await
+            .expect("Failed to connect to in-memory test database - this should never fail");
+        
+        let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+        let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+        
         let session_service = Arc::new(crate::auth::session_service::MatrixSessionService::new(
             vec![1, 2, 3, 4], // dummy JWT secret
             "test.homeserver.com".to_string(),
+            session_repo,
+            key_server_repo,
         ));
-        let db = surrealdb::Surreal::new::<surrealdb::engine::any::Any>(
-            surrealdb::engine::any::connect("memory")
-                .await
-                .expect("Failed to connect to in-memory test database - this should never fail"),
-        )
-        .expect("Failed to initialize test database - this should never fail");
         let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
             session_service.clone(),
             db,
@@ -1016,13 +1029,20 @@ mod tests {
                 circuit_breaker_recovery_ms: 5000,
             };
 
+            let db = surrealdb::engine::any::connect("memory")
+                .await
+                .expect("Failed to connect to in-memory test database");
+            
+            let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+            let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+            
             let session_service =
                 Arc::new(crate::auth::session_service::MatrixSessionService::new(
                     vec![1, 2, 3, 4], // dummy JWT secret
                     "test.homeserver.com".to_string(),
+                    session_repo,
+                    key_server_repo,
                 ));
-            let db: surrealdb::Surreal<surrealdb::engine::any::Any> =
-                surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).into();
             let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
                 session_service.clone(),
                 db,
@@ -1101,13 +1121,20 @@ mod tests {
 
         #[tokio::test]
         async fn test_federation_manager_new() {
+            let db = surrealdb::engine::any::connect("memory")
+                .await
+                .expect("Failed to connect to in-memory test database");
+            
+            let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+            let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+            
             let session_service =
                 Arc::new(crate::auth::session_service::MatrixSessionService::new(
                     vec![1, 2, 3, 4], // dummy JWT secret
                     "test.homeserver.com".to_string(),
+                    session_repo,
+                    key_server_repo,
                 ));
-            let db: surrealdb::Surreal<surrealdb::engine::any::Any> =
-                surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).into();
             let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
                 session_service.clone(),
                 db,

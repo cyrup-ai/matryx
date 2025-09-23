@@ -3,17 +3,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::{
-    auth::MatrixSessionService,
-    database::SurrealRepository,
-    AppState,
-};
+use crate::{AppState, auth::MatrixSessionService};
+use matryx_surrealdb::repository::ProfileManagementService;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AccountData {
@@ -45,57 +42,27 @@ pub async fn get_room_account_data(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    
+
     // Verify user authorization
     if token_info.user_id != user_id {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Verify user is member of the room
-    let membership_query = "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
-    let mut membership_params = HashMap::new();
-    membership_params.insert("room_id".to_string(), Value::String(room_id.clone()));
-    membership_params.insert("user_id".to_string(), Value::String(user_id.clone()));
+    let profile_service = ProfileManagementService::new(state.db.clone());
 
-    let membership_result = state.database
-        .query(membership_query, Some(membership_params))
+    // Get room account data using ProfileManagementService
+    match profile_service
+        .get_account_data(&user_id, &data_type, Some(&room_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let is_member = membership_result
-        .first()
-        .and_then(|rows| rows.first())
-        .and_then(|row| row.get("membership"))
-        .and_then(|v| v.as_str())
-        .map(|membership| membership == "join" || membership == "invite")
-        .unwrap_or(false);
-
-    if !is_member {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Query room-scoped account data from database
-    let query = "SELECT content FROM account_data WHERE user_id = $user_id AND room_id = $room_id AND data_type = $data_type";
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(user_id));
-    params.insert("room_id".to_string(), Value::String(room_id));
-    params.insert("data_type".to_string(), Value::String(data_type));
-
-    let result = state.database
-        .query(query, Some(params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(data_rows) = result.first() {
-        if let Some(data_row) = data_rows.first() {
-            if let Some(content) = data_row.get("content") {
-                return Ok(Json(content.clone()));
-            }
-        }
+    {
+        Ok(Some(content)) => return Ok(Json(content)),
+        Ok(None) => {},
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 
     // If no account data exists, return 404
@@ -116,30 +83,33 @@ pub async fn set_room_account_data(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate token and get user context
-    let token_info = state.session_service
+    let token_info = state
+        .session_service
         .validate_access_token(access_token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    
+
     // Verify user authorization
     if token_info.user_id != user_id {
         return Err(StatusCode::FORBIDDEN);
     }
 
     // Verify user is member of the room
-    let membership_query = "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
-    let mut membership_params = HashMap::new();
-    membership_params.insert("room_id".to_string(), Value::String(room_id.clone()));
-    membership_params.insert("user_id".to_string(), Value::String(user_id.clone()));
+    let membership_query =
+        "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
 
-    let membership_result = state.database
-        .query(membership_query, Some(membership_params))
+    let mut membership_result = state
+        .db
+        .query(membership_query)
+        .bind(("room_id", room_id.clone()))
+        .bind(("user_id", user_id.clone()))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let is_member = membership_result
+    let membership_rows: Vec<HashMap<String, Value>> =
+        membership_result.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = membership_rows
         .first()
-        .and_then(|rows| rows.first())
         .and_then(|row| row.get("membership"))
         .and_then(|v| v.as_str())
         .map(|membership| membership == "join" || membership == "invite")
@@ -154,36 +124,20 @@ pub async fn set_room_account_data(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Generate unique ID for account data
-    let account_data_id = Uuid::new_v4().to_string();
+    let profile_service = ProfileManagementService::new(state.db.clone());
 
-    // Update or create room-scoped account data
-    let query = r#"
-        UPDATE account_data SET 
-            content = $content,
-            updated_at = time::now()
-        WHERE user_id = $user_id AND room_id = $room_id AND data_type = $data_type
-        ELSE CREATE account_data SET
-            id = $id,
-            user_id = $user_id,
-            room_id = $room_id,
-            data_type = $data_type,
-            content = $content,
-            created_at = time::now(),
-            updated_at = time::now()
-    "#;
-
-    let mut params = HashMap::new();
-    params.insert("id".to_string(), Value::String(account_data_id));
-    params.insert("user_id".to_string(), Value::String(user_id));
-    params.insert("room_id".to_string(), Value::String(room_id));
-    params.insert("data_type".to_string(), Value::String(data_type));
-    params.insert("content".to_string(), request.content);
-
-    state.database
-        .query(query, Some(params))
+    // Set room account data using ProfileManagementService
+    match profile_service
+        .set_account_data(&user_id, &data_type, request.content, Some(&room_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        Ok(()) => {},
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 
     Ok(Json(serde_json::json!({})))
 }
+
+// HTTP method handlers for main.rs routing
+pub use get_room_account_data as get;
+pub use set_room_account_data as put;

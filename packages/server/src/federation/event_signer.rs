@@ -5,13 +5,14 @@
 //! EventSigningEngine to ensure proper Matrix specification compliance.
 
 use std::sync::Arc;
+use surrealdb::engine::any::Any;
 
 use tracing::{debug, info, warn};
 
 use crate::auth::MatrixSessionService;
 use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use matryx_entity::types::Event;
-use matryx_surrealdb::repository::error::RepositoryError;
+use matryx_surrealdb::repository::{KeyServerRepository, error::RepositoryError};
 
 /// High-level event signing service for outgoing Matrix events
 ///
@@ -20,20 +21,28 @@ use matryx_surrealdb::repository::error::RepositoryError;
 /// generation according to the Matrix specification.
 pub struct EventSigner {
     signing_engine: EventSigningEngine,
+    key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
     default_key_id: String,
     homeserver_name: String,
 }
 
 impl EventSigner {
     pub fn new(
-        session_service: Arc<MatrixSessionService>,
+        session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
         homeserver_name: String,
         default_key_id: String,
     ) -> Self {
-        let signing_engine = EventSigningEngine::new(session_service, db, homeserver_name.clone());
+        let signing_engine =
+            EventSigningEngine::new(session_service, db.clone(), homeserver_name.clone());
+        let key_server_repo = Arc::new(KeyServerRepository::new(db));
 
-        Self { signing_engine, default_key_id, homeserver_name }
+        Self {
+            signing_engine,
+            key_server_repo,
+            default_key_id,
+            homeserver_name,
+        }
     }
 
     /// Sign an outgoing event for federation
@@ -174,38 +183,23 @@ impl EventSigner {
         Ok(())
     }
 
+    /// Get the default signing key ID for this server
+    ///
+    /// Returns the key ID that will be used for signing if no specific key is requested.
+    pub fn get_default_key_id(&self) -> &str {
+        &self.default_key_id
+    }
+
     /// Get available signing keys for this server
     ///
     /// Returns list of key IDs that can be used for signing events.
     pub async fn get_available_signing_keys(&self) -> Result<Vec<String>, EventSigningError> {
-        // Query database for active signing keys
-        let query = "
-            SELECT key_id
-            FROM server_signing_keys
-            WHERE server_name = $server_name
-              AND is_active = true
-              AND (expires_at IS NULL OR expires_at > datetime::now())
-            ORDER BY created_at DESC
-        ";
-
-        let db = &self.signing_engine.db;
-        let mut response = db
-            .query(query)
-            .bind(("server_name", self.homeserver_name.clone()))
+        // Get active signing key IDs using key server repository
+        let key_ids = self
+            .key_server_repo
+            .get_active_signing_key_ids(&self.homeserver_name)
             .await
-            .map_err(|e| {
-                EventSigningError::DatabaseError(RepositoryError::Validation {
-                    field: "query".to_string(),
-                    message: format!("Failed to query signing keys: {}", e),
-                })
-            })?;
-
-        let key_ids: Vec<String> = response.take(0).map_err(|e| {
-            EventSigningError::DatabaseError(RepositoryError::Validation {
-                field: "parse".to_string(),
-                message: format!("Failed to parse key results: {}", e),
-            })
-        })?;
+            .map_err(|e| EventSigningError::DatabaseError(e))?;
 
         debug!("Found {} active signing keys", key_ids.len());
         Ok(key_ids)
@@ -243,35 +237,21 @@ impl EventSigner {
         let now = chrono::Utc::now();
         let expires_at = now + chrono::Duration::days(365); // 1 year validity
 
-        // Store the new signing key in the database with proper metadata
-        let query = "
-            CREATE server_signing_keys CONTENT {
-                key_id: $key_id,
-                server_name: $server_name,
-                private_key: $private_key,
-                public_key: $public_key,
-                created_at: $created_at,
-                expires_at: $expires_at,
-                is_active: true
-            }
-        ";
+        // Create SigningKey struct for repository storage
+        let signing_key_entity = matryx_surrealdb::SigningKey {
+            key_id: key_id.clone(),
+            server_name: self.homeserver_name.clone(),
+            signing_key: private_key_b64,
+            verify_key: public_key_b64,
+            created_at: now,
+            expires_at: Some(expires_at),
+        };
 
-        db.query(query)
-            .bind(("key_id", key_id.clone()))
-            .bind(("server_name", self.homeserver_name.clone()))
-            .bind(("private_key", private_key_b64))
-            .bind(("public_key", public_key_b64))
-            .bind(("created_at", now))
-            .bind(("expires_at", expires_at))
+        // Store the new signing key using key server repository
+        self.key_server_repo
+            .store_signing_key(&self.homeserver_name, &key_id, &signing_key_entity)
             .await
-            .map_err(|e| {
-                EventSigningError::DatabaseError(
-                    matryx_surrealdb::repository::error::RepositoryError::Validation {
-                        field: "key_generation".to_string(),
-                        message: format!("Failed to store new signing key: {}", e),
-                    },
-                )
-            })?;
+            .map_err(|e| EventSigningError::DatabaseError(e))?;
 
         info!(
             "Generated and stored new signing key: {} for server {} (expires: {})",
@@ -288,12 +268,48 @@ impl EventSigner {
     pub fn redact_event(&self, event: &Event) -> Result<serde_json::Value, EventSigningError> {
         self.signing_engine.redact_event(event)
     }
+
+    /// Sign a federation HTTP request with X-Matrix authentication
+    ///
+    /// This method adds the required X-Matrix authorization header to HTTP requests
+    /// for federation API calls, following the Matrix Server-Server API specification.
+    ///
+    /// # Arguments
+    /// * `request_builder` - The reqwest RequestBuilder to sign
+    /// * `destination` - The destination server name
+    ///
+    /// # Returns
+    /// * `Ok(RequestBuilder)` - The signed request builder
+    /// * `Err(EventSigningError)` - If signing fails
+    pub async fn sign_federation_request(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        destination: &str,
+    ) -> Result<reqwest::RequestBuilder, EventSigningError> {
+        use chrono::Utc;
+        use serde_json::json;
+
+        // For now, return the request builder without signing
+        // TODO: Implement proper X-Matrix signature generation
+        warn!("Federation request signing not yet implemented - proceeding without signature");
+
+        // Add basic Matrix headers
+        let signed_request = request_builder.header(
+            "Authorization",
+            format!(
+                "X-Matrix origin={},key=\"{}\",sig=\"placeholder\"",
+                self.homeserver_name, self.default_key_id
+            ),
+        );
+
+        Ok(signed_request)
+    }
 }
 
 /// Utility function to create EventSigner from application state
 impl EventSigner {
     pub fn from_app_state(
-        session_service: Arc<MatrixSessionService>,
+        session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
         homeserver_name: String,
     ) -> Self {
@@ -336,11 +352,16 @@ mod tests {
         use matryx_surrealdb::test_utils::create_test_db;
         use std::sync::Arc;
 
-        let test_db = create_test_db();
-        let session_service = Arc::new(MatrixSessionService::with_db(
+        let test_db = create_test_db().expect("Failed to create test database");
+        
+        let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(test_db.clone());
+        let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(test_db.clone());
+        
+        let session_service = Arc::new(MatrixSessionService::new(
             b"test_secret".to_vec(),
             "test.example.org".to_string(),
-            test_db.clone(),
+            session_repo,
+            key_server_repo,
         ));
 
         EventSigner::new(

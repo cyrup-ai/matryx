@@ -13,7 +13,15 @@ use tracing::{debug, error, info, warn};
 use crate::auth::MatrixAuthError;
 use crate::federation::pdu_validator::{PduValidator, ValidationResult};
 use crate::state::AppState;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_surrealdb::repository::{
+    DeviceRepository,
+    EventRepository,
+    FederationRepository,
+    KeyServerRepository,
+    RoomRepository,
+    TransactionRepository,
+    UserRepository,
+};
 
 /// Matrix X-Matrix authentication header parsed structure with comprehensive validation
 #[derive(Debug, Clone)]
@@ -505,10 +513,14 @@ pub async fn put(
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
 
+    let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
+    let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
     let pdu_validator = PduValidator::new(
         state.session_service.clone(),
         event_repo.clone(),
         room_repo.clone(),
+        federation_repo.clone(),
+        key_server_repo.clone(),
         state.db.clone(),
         state.homeserver_name.clone(),
     );
@@ -682,43 +694,18 @@ async fn check_transaction_cache(
     state: &AppState,
     transaction_key: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT result, created_at
-        FROM federation_transactions
-        WHERE transaction_key = $transaction_key
-        ORDER BY created_at DESC
-        LIMIT 1
-    ";
+    let transaction_repo = TransactionRepository::new(state.db.clone());
 
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("transaction_key", transaction_key.to_string()))
-        .await
-        .map_err(|e| format!("Database query failed for transaction cache: {}", e))?;
-
-    #[derive(serde::Deserialize)]
-    struct TransactionRecord {
-        result: Value,
-        created_at: chrono::DateTime<chrono::Utc>,
-    }
-
-    let transaction_record: Option<TransactionRecord> = response
-        .take(0)
-        .map_err(|e| format!("Failed to parse transaction cache query result: {}", e))?;
-
-    match transaction_record {
-        Some(record) => {
-            debug!(
-                "Found cached transaction result for {} from {}",
-                transaction_key, record.created_at
-            );
-            Ok(Some(record.result))
+    match transaction_repo.get_cached_result(transaction_key).await {
+        Ok(Some(result)) => {
+            debug!("Found cached transaction result for {}", transaction_key);
+            Ok(Some(result))
         },
-        None => {
+        Ok(None) => {
             debug!("No cached result found for transaction: {}", transaction_key);
             Ok(None)
         },
+        Err(e) => Err(format!("Database query failed for transaction cache: {}", e).into()),
     }
 }
 
@@ -731,30 +718,15 @@ async fn cache_transaction_result(
     transaction_key: &str,
     result: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        CREATE federation_transactions SET
-            transaction_key = $transaction_key,
-            result = $result,
-            created_at = $created_at,
-            expires_at = $expires_at
-    ";
+    let transaction_repo = TransactionRepository::new(state.db.clone());
 
-    let now = Utc::now();
-    let expires_at = now + chrono::Duration::hours(24); // Cache for 24 hours
-
-    let _response = state
-        .db
-        .query(query)
-        .bind(("transaction_key", transaction_key.to_string()))
-        .bind(("result", result.clone()))
-        .bind(("created_at", now))
-        .bind(("expires_at", expires_at))
-        .await
-        .map_err(|e| format!("Failed to cache transaction result: {}", e))?;
-
-    debug!("Cached transaction result for {} (expires: {})", transaction_key, expires_at);
-
-    Ok(())
+    match transaction_repo.cache_result(transaction_key, result.clone()).await {
+        Ok(()) => {
+            debug!("Cached transaction result for {}", transaction_key);
+            Ok(())
+        },
+        Err(e) => Err(format!("Failed to cache transaction result: {}", e).into()),
+    }
 }
 
 /// Process typing EDU from federation
@@ -803,35 +775,19 @@ async fn process_typing_edu(
     }
 
     // Verify user is in the room
-    let membership_check = "
-        SELECT membership 
-        FROM room_memberships 
-        WHERE room_id = $room_id AND user_id = $user_id 
-        LIMIT 1
-    ";
+    let room_repo = RoomRepository::new(state.db.clone());
 
-    let mut membership_result = state
-        .db
-        .query(membership_check)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await?;
-
-    let memberships: Vec<serde_json::Value> = membership_result.take(0)?;
-
-    if memberships.is_empty() {
-        debug!("Ignoring typing EDU for user {} not in room {}", user_id, room_id);
-        return Ok(());
-    }
-
-    let membership = memberships[0].get("membership").and_then(|v| v.as_str()).unwrap_or("");
-
-    if membership != "join" {
-        debug!(
-            "Ignoring typing EDU for user {} not joined to room {} (membership: {})",
-            user_id, room_id, membership
-        );
-        return Ok(());
+    match room_repo.check_membership(room_id, user_id).await {
+        Ok(true) => {
+            // User is a member, continue processing
+        },
+        Ok(false) => {
+            debug!("Ignoring typing EDU for user {} not in room {}", user_id, room_id);
+            return Ok(());
+        },
+        Err(e) => {
+            return Err(format!("Failed to check room membership: {}", e).into());
+        },
     }
 
     if typing {
@@ -1338,72 +1294,65 @@ async fn process_direct_to_device_edu(
             .ok_or(format!("Invalid device messages for user {}", user_id))?;
 
         // Check if user exists locally
-        let user_check = "SELECT user_id FROM users WHERE user_id = $user_id LIMIT 1";
-        let mut user_result = state.db.query(user_check).bind(("user_id", user_id.clone())).await?;
+        let user_repo = UserRepository::new(state.db.clone());
 
-        let local_users: Vec<serde_json::Value> = user_result.take(0)?;
-
-        if local_users.is_empty() {
-            debug!("Ignoring direct-to-device message for non-local user: {}", user_id);
-            continue;
+        match user_repo.user_exists(user_id).await {
+            Ok(true) => {
+                // User exists locally, continue processing
+            },
+            Ok(false) => {
+                debug!("Ignoring direct-to-device message for non-local user: {}", user_id);
+                continue;
+            },
+            Err(e) => {
+                return Err(format!("Failed to check user existence: {}", e).into());
+            },
         }
 
         // Process messages for each device
         for (device_id, message_content) in device_messages {
             if device_id == "*" {
                 // Send to all devices for this user
-                let all_devices_query = "
-                    SELECT device_id 
-                    FROM device 
-                    WHERE user_id = $user_id
-                ";
+                let device_repo = DeviceRepository::new(state.db.clone());
 
-                let mut devices_result = state
-                    .db
-                    .query(all_devices_query)
-                    .bind(("user_id", user_id.clone()))
-                    .await?;
-
-                let user_devices: Vec<serde_json::Value> = devices_result.take(0)?;
-
-                for device_record in user_devices {
-                    if let Some(actual_device_id) =
-                        device_record.get("device_id").and_then(|v| v.as_str())
-                    {
-                        store_to_device_message(
-                            state,
-                            message_id,
-                            origin,
-                            sender,
-                            event_type,
-                            user_id,
-                            actual_device_id,
-                            message_content,
-                        )
-                        .await?;
-                    }
+                match device_repo.get_all_user_devices(user_id).await {
+                    Ok(user_devices) => {
+                        for device in user_devices {
+                            store_to_device_message(
+                                state,
+                                message_id,
+                                origin,
+                                sender,
+                                event_type,
+                                user_id,
+                                &device.device_id,
+                                message_content,
+                            )
+                            .await?;
+                        }
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to get user devices: {}", e).into());
+                    },
                 }
             } else {
                 // Send to specific device
-                let device_check = "
-                    SELECT device_id 
-                    FROM device 
-                    WHERE user_id = $user_id AND device_id = $device_id 
-                    LIMIT 1
-                ";
+                let device_repo = DeviceRepository::new(state.db.clone());
 
-                let mut device_result = state
-                    .db
-                    .query(device_check)
-                    .bind(("user_id", user_id.clone()))
-                    .bind(("device_id", device_id.clone()))
-                    .await?;
-
-                let target_devices: Vec<serde_json::Value> = device_result.take(0)?;
-
-                if target_devices.is_empty() {
-                    debug!("Device {} not found for user {}, ignoring message", device_id, user_id);
-                    continue;
+                match device_repo.verify_device(user_id, device_id).await {
+                    Ok(true) => {
+                        // Device exists, continue processing
+                    },
+                    Ok(false) => {
+                        debug!(
+                            "Device {} not found for user {}, ignoring message",
+                            device_id, user_id
+                        );
+                        continue;
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to verify device: {}", e).into());
+                    },
                 }
 
                 store_to_device_message(

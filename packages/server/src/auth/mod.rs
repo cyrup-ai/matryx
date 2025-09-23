@@ -1,11 +1,19 @@
 pub mod authenticated_user;
+pub mod captcha;
 pub mod errors;
 pub mod matrix_auth;
 pub mod middleware;
+pub mod oauth2;
+pub mod refresh_token;
 pub mod session_service;
+pub mod uia;
 
 pub use authenticated_user::*;
+pub use captcha::*;
 pub use errors::*;
 pub use matrix_auth::*;
 pub use middleware::*;
+pub use oauth2::*;
+pub use refresh_token::*;
 pub use session_service::*;
+pub use uia::*;

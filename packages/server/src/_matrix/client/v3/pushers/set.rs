@@ -46,9 +46,12 @@ pub async fn post(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Validate access token using state's session service
-    let token_info = state.session_service.validate_access_token(access_token).await
+    let token_info = state
+        .session_service
+        .validate_access_token(access_token)
+        .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    
+
     let user_id = token_info.user_id;
 
     info!(
@@ -86,8 +89,8 @@ pub async fn post(
         if let Err(e) = state
             .db
             .query(delete_query)
-            .bind(("user_id", &user_id))
-            .bind(("pusher_id", &request.pusher_id))
+            .bind(("user_id", user_id.clone()))
+            .bind(("pusher_id", request.pusher_id.clone()))
             .await
         {
             error!("Failed to delete pusher: {}", e);
@@ -123,16 +126,16 @@ pub async fn post(
         if let Err(e) = state
             .db
             .query(upsert_query)
-            .bind(("id", &pusher_id))
-            .bind(("user_id", &user_id))
-            .bind(("pusher_id", &request.pusher_id))
-            .bind(("kind", &request.kind))
-            .bind(("app_id", &request.app_id))
-            .bind(("app_display_name", &request.app_display_name))
-            .bind(("device_display_name", &request.device_display_name))
-            .bind(("profile_tag", &request.profile_tag))
-            .bind(("lang", &request.lang))
-            .bind(("data", &data_json))
+            .bind(("id", pusher_id.clone()))
+            .bind(("user_id", user_id.clone()))
+            .bind(("pusher_id", request.pusher_id.clone()))
+            .bind(("kind", request.kind.clone()))
+            .bind(("app_id", request.app_id.clone()))
+            .bind(("app_display_name", request.app_display_name.clone()))
+            .bind(("device_display_name", request.device_display_name.clone()))
+            .bind(("profile_tag", request.profile_tag.clone()))
+            .bind(("lang", request.lang.clone()))
+            .bind(("data", data_json.clone()))
             .await
         {
             error!("Failed to set pusher: {}", e);

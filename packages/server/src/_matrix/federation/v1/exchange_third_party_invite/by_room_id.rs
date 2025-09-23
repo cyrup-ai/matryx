@@ -14,7 +14,13 @@ use crate::federation::pdu_validator::{PduValidator, ValidationResult};
 use crate::state::AppState;
 use crate::utils::canonical_json::to_canonical_json;
 use matryx_entity::types::{Event, Membership, MembershipState};
-use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
+use matryx_surrealdb::repository::{
+    EventRepository,
+    FederationRepository,
+    KeyServerRepository,
+    MembershipRepository,
+    RoomRepository,
+};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -53,9 +59,7 @@ fn extract_signature_data(
         .find(|(k, _)| k.starts_with("ed25519:"))
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let signature_str = signature_b64
-        .as_str()
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let signature_str = signature_b64.as_str().ok_or(StatusCode::BAD_REQUEST)?;
 
     Ok(SignatureData {
         server_name: identity_server.to_string(),
@@ -71,36 +75,26 @@ async fn fetch_identity_server_key(
     key_id: &str,
 ) -> Result<String, StatusCode> {
     let url = format!("https://{}/_matrix/identity/api/v1/pubkey/{}", identity_server, key_id);
-    
-    let response = http_client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            error!("Failed to fetch identity server key: {:?}", e);
-            StatusCode::SERVICE_UNAVAILABLE
-        })?;
+
+    let response = http_client.get(&url).send().await.map_err(|e| {
+        error!("Failed to fetch identity server key: {:?}", e);
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
 
     if !response.status().is_success() {
         error!("Identity server returned error: {}", response.status());
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let key_data: Value = response
-        .json()
-        .await
-        .map_err(|e| {
-            error!("Failed to parse identity server key response: {:?}", e);
-            StatusCode::BAD_GATEWAY
-        })?;
+    let key_data: Value = response.json().await.map_err(|e| {
+        error!("Failed to parse identity server key response: {:?}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
 
-    let public_key = key_data
-        .get("public_key")
-        .and_then(|k| k.as_str())
-        .ok_or_else(|| {
-            error!("Invalid public key format in identity server response");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let public_key = key_data.get("public_key").and_then(|k| k.as_str()).ok_or_else(|| {
+        error!("Invalid public key format in identity server response");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     Ok(public_key.to_string())
 }
@@ -116,10 +110,11 @@ async fn verify_third_party_invite_signature(
 
     // Fetch public key from identity server
     let public_key = fetch_identity_server_key(
-        &state.http_client, 
-        &signature_data.server_name, 
-        &signature_data.key_id
-    ).await?;
+        &state.http_client,
+        &signature_data.server_name,
+        &signature_data.key_id,
+    )
+    .await?;
 
     // Create canonical JSON without signatures
     let mut canonical_object = signed_object.clone();
@@ -127,11 +122,10 @@ async fn verify_third_party_invite_signature(
         obj.remove("signatures");
     }
 
-    let canonical_json = to_canonical_json(&canonical_object)
-        .map_err(|e| {
-            error!("Failed to create canonical JSON: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let canonical_json = to_canonical_json(&canonical_object).map_err(|e| {
+        error!("Failed to create canonical JSON: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Use existing Ed25519 verification from MatrixSessionService
     match state.session_service.verify_ed25519_signature(
@@ -146,7 +140,7 @@ async fn verify_third_party_invite_signature(
         Err(e) => {
             warn!("Third-party invite signature verification failed: {:?}", e);
             Ok(false)
-        }
+        },
     }
 }
 
@@ -356,12 +350,13 @@ pub async fn put(
     }
 
     // Verify the third-party invite signature
-    let signature_valid = verify_third_party_invite_signature(&state, &room_id, third_party_invite)
-        .await
-        .map_err(|e| {
-            error!("Failed to verify third-party invite signature: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let signature_valid =
+        verify_room_third_party_invite_signature(&state, &room_id, third_party_invite)
+            .await
+            .map_err(|e| {
+                error!("Failed to verify third-party invite signature: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     if !signature_valid {
         warn!("Third-party invite signature verification failed");
@@ -401,10 +396,14 @@ pub async fn put(
 
     // Validate the invite event PDU
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
+    let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
     let pdu_validator = PduValidator::new(
         state.session_service.clone(),
         event_repo.clone(),
         room_repo.clone(),
+        federation_repo.clone(),
+        key_server_repo.clone(),
         state.db.clone(),
         state.homeserver_name.clone(),
     );
@@ -492,8 +491,8 @@ pub async fn put(
     Ok(Json(json!({})))
 }
 
-/// Verify the third-party invite signature against the identity server's public key
-async fn verify_third_party_invite_signature(
+/// Verify the third-party invite signature against the stored room event
+async fn verify_room_third_party_invite_signature(
     state: &AppState,
     room_id: &str,
     third_party_invite: &Value,

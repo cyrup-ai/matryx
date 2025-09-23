@@ -104,7 +104,7 @@ pub async fn get(
     let query = "SELECT * FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
     let mut response = state.db
         .query(query)
-        .bind(("user_id", &user_id))
+        .bind(("user_id", user_id.clone()))
         .await
         .map_err(|e| {
             error!("Failed to query backup versions: {}", e);

@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use futures::TryFutureExt;
 use serde_json::Value;
 use tracing::{error, info, warn};
 
@@ -30,7 +31,7 @@ impl From<LogoutError> for StatusCode {
 
 /// POST /_matrix/client/v3/logout
 ///
-/// Implements Matrix Client-Server API logout endpoint with complete session invalidation.
+/// Implements Matrix Client-Server API hard logout endpoint with complete session invalidation.
 ///
 /// Features:
 /// - Invalidates the current access token
@@ -42,33 +43,64 @@ pub async fn post_logout(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
-    info!("Processing logout request");
+    info!("Processing hard logout request");
+    logout_internal(state, headers, false).await
+}
+
+/// POST /_matrix/client/v3/logout/soft
+///
+/// Implements Matrix Client-Server API soft logout endpoint that preserves device information.
+///
+/// Features:
+/// - Invalidates the current access token and refresh tokens
+/// - Preserves device registration and E2EE keys
+/// - Maintains device information for future logins
+/// - Cleans up session data but keeps device record
+/// - Allows seamless re-authentication without losing encryption keys
+pub async fn post_soft_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    info!("Processing soft logout request");
+    logout_internal(state, headers, true).await
+}
+
+/// Internal logout implementation supporting both hard and soft logout
+async fn logout_internal(
+    state: AppState,
+    headers: HeaderMap,
+    soft_logout: bool,
+) -> Result<Json<Value>, StatusCode> {
+    let logout_type = if soft_logout { "soft" } else { "hard" };
 
     // Extract and validate Matrix authentication
-    let auth = extract_matrix_auth(&headers).map_err(|e| {
-        warn!("Logout failed - authentication extraction failed: {}", e);
+    let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
+        warn!("{} logout failed - authentication extraction failed: {}", logout_type, e);
         StatusCode::UNAUTHORIZED
     })?;
 
     let (user_id, device_id, access_token) = match auth {
         MatrixAuth::User(token_info) => {
             if token_info.is_expired() {
-                warn!("Logout failed - access token expired for user");
+                warn!("{} logout failed - access token expired for user", logout_type);
                 return Err(StatusCode::UNAUTHORIZED);
             }
             (token_info.user_id.clone(), token_info.device_id.clone(), token_info.token.clone())
         },
         MatrixAuth::Server(_) => {
-            warn!("Logout failed - server authentication not allowed for logout");
+            warn!("{} logout failed - server authentication not allowed for logout", logout_type);
             return Err(StatusCode::FORBIDDEN);
         },
         MatrixAuth::Anonymous => {
-            warn!("Logout failed - anonymous authentication not allowed for logout");
+            warn!(
+                "{} logout failed - anonymous authentication not allowed for logout",
+                logout_type
+            );
             return Err(StatusCode::UNAUTHORIZED);
         },
     };
 
-    info!("Logout request for user: {} device: {}", user_id, device_id);
+    info!("{} logout request for user: {} device: {}", logout_type, user_id, device_id);
 
     // Initialize repositories for database operations
     let session_repo = SessionRepository::new(state.db.clone());
@@ -77,16 +109,30 @@ pub async fn post_logout(
     // Invalidate session in database
     invalidate_user_session(&session_repo, &user_id, &device_id, &access_token).await?;
 
-    // Delete device and associated device keys
-    delete_user_device(&device_repo, &user_id, &device_id).await?;
-
-    // Invalidate token in database
+    // Invalidate access token and refresh tokens
     invalidate_session_token(&session_repo, &access_token).await?;
+
+    // Revoke all refresh tokens for this device
+    revoke_device_refresh_tokens(&state, &user_id, &device_id).await?;
+
+    if soft_logout {
+        // Soft logout: preserve device and E2EE keys, only invalidate sessions
+        preserve_device_for_soft_logout(&device_repo, &user_id, &device_id).await?;
+        info!(
+            "Soft logout successful for user: {} device: {} (device preserved)",
+            user_id, device_id
+        );
+    } else {
+        // Hard logout: delete device and associated device keys
+        delete_user_device(&device_repo, &user_id, &device_id).await?;
+        info!(
+            "Hard logout successful for user: {} device: {} (device deleted)",
+            user_id, device_id
+        );
+    }
 
     // Clean up any active LiveQuery subscriptions for this session
     cleanup_livequery_subscriptions(&state, &user_id, &device_id).await?;
-
-    info!("Logout successful for user: {} device: {}", user_id, device_id);
 
     // Return empty JSON object as per Matrix specification
     Ok(Json(serde_json::json!({})))
@@ -199,6 +245,80 @@ async fn cleanup_livequery_subscriptions(
         Err(e) => {
             error!("Failed to cleanup LiveQuery subscriptions: {}", e);
             // Don't fail the logout for cleanup errors, just log them
+            Ok(())
+        },
+    }
+}
+
+/// Preserve device information for soft logout (mark as inactive but don't delete)
+async fn preserve_device_for_soft_logout(
+    device_repo: &DeviceRepository,
+    user_id: &str,
+    device_id: &str,
+) -> Result<(), LogoutError> {
+    // Use existing DeviceRepository to actually preserve the device
+    match device_repo.get_by_id(device_id).await {
+        Ok(Some(mut device)) => {
+            // CRITICAL: Preserve E2EE keys - don't modify:
+            // - device.device_keys (E2EE device identity)
+            // - device.one_time_keys (for key exchange)
+            // - device.fallback_keys (backup keys)
+
+            // Update last seen timestamp for tracking
+            device.last_seen_ts = Some(chrono::Utc::now().timestamp());
+
+            // Update device in database with preserved E2EE keys
+            device_repo.update(&device).await.map_err(|e| {
+                error!("Failed to update device for soft logout: {}", e);
+                LogoutError::DatabaseError
+            })?;
+
+            info!(
+                "Device preserved for soft logout - user: {} device: {} (E2EE keys maintained)",
+                user_id, device_id
+            );
+            Ok(())
+        },
+        Ok(None) => {
+            warn!("Device not found for soft logout preservation: {}", device_id);
+            Ok(()) // Don't fail logout if device not found
+        },
+        Err(e) => {
+            error!("Database error during soft logout device preservation: {}", e);
+            Err(LogoutError::DatabaseError)
+        },
+    }
+}
+
+/// Revoke all refresh tokens for a specific device
+async fn revoke_device_refresh_tokens(
+    state: &AppState,
+    user_id: &str,
+    device_id: &str,
+) -> Result<(), LogoutError> {
+    let revoke_query = "
+        UPDATE refresh_tokens 
+        SET revoked = true, revoked_at = datetime::now()
+        WHERE user_id = $user_id AND device_id = $device_id AND revoked = false
+    ";
+
+    match state
+        .db
+        .query(revoke_query)
+        .bind(("user_id", user_id.to_string()))
+        .bind(("device_id", device_id.to_string()))
+        .await
+    {
+        Ok(_) => {
+            info!("Refresh tokens revoked for user: {} device: {}", user_id, device_id);
+            Ok(())
+        },
+        Err(e) => {
+            error!(
+                "Failed to revoke refresh tokens for user: {} device: {}: {}",
+                user_id, device_id, e
+            );
+            // Don't fail logout for refresh token revocation errors
             Ok(())
         },
     }

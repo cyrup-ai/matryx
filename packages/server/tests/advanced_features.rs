@@ -1,5 +1,5 @@
 use axum_test::TestServer;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 mod common;
@@ -19,7 +19,7 @@ async fn test_push_notification_flow() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     assert_eq!(user_response.status_code(), 200);
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
@@ -41,7 +41,7 @@ async fn test_push_notification_flow() {
             }
         }))
         .await;
-    
+
     assert_eq!(pusher_response.status_code(), 200);
 
     // 2. Create room
@@ -53,7 +53,7 @@ async fn test_push_notification_flow() {
             "preset": "public_chat"
         }))
         .await;
-    
+
     assert_eq!(room_response.status_code(), 200);
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
@@ -67,7 +67,7 @@ async fn test_push_notification_flow() {
             "body": "Test push notification message"
         }))
         .await;
-    
+
     assert_eq!(message_response.status_code(), 200);
 
     // 4. Verify push rule evaluation (would need mock push gateway to fully test)
@@ -76,7 +76,7 @@ async fn test_push_notification_flow() {
         .get("/_matrix/client/v3/pushers")
         .add_header("Authorization", format!("Bearer {}", access_token))
         .await;
-    
+
     assert_eq!(pushers_response.status_code(), 200);
     let pushers_data: Value = pushers_response.json();
     assert!(pushers_data["pushers"].as_array().unwrap().len() > 0);
@@ -96,7 +96,7 @@ async fn test_room_preview_world_readable() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -114,7 +114,7 @@ async fn test_room_preview_world_readable() {
             }]
         }))
         .await;
-    
+
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
 
@@ -132,10 +132,10 @@ async fn test_room_preview_world_readable() {
     let preview_response = server
         .get(&format!("/_matrix/client/v3/rooms/{}/initialSync", room_id))
         .await;
-    
+
     assert_eq!(preview_response.status_code(), 200);
     let preview_data: Value = preview_response.json();
-    
+
     // 3. Verify event visibility rules
     assert_eq!(preview_data["room_id"], room_id);
     assert!(preview_data["messages"]["chunk"].as_array().is_some());
@@ -156,7 +156,7 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -168,7 +168,7 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
             "preset": "private_chat"
         }))
         .await;
-    
+
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
 
@@ -176,7 +176,7 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
     let preview_response = server
         .get(&format!("/_matrix/client/v3/rooms/{}/initialSync", room_id))
         .await;
-    
+
     assert_eq!(preview_response.status_code(), 403);
 }
 
@@ -194,7 +194,7 @@ async fn test_guest_access_restrictions() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -212,7 +212,7 @@ async fn test_guest_access_restrictions() {
             }]
         }))
         .await;
-    
+
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
 
@@ -223,7 +223,7 @@ async fn test_guest_access_restrictions() {
             "kind": "guest"
         }))
         .await;
-    
+
     // Guest registration should work
     assert!(guest_response.status_code() == 200 || guest_response.status_code() == 400); // May not be implemented
 
@@ -238,7 +238,7 @@ async fn test_room_history_visibility_enforcement() {
 
     // Test all history visibility modes
     let visibility_modes = vec!["invited", "joined", "shared", "world_readable"];
-    
+
     for mode in visibility_modes {
         let user_response = server
             .post("/_matrix/client/v3/register")
@@ -248,7 +248,7 @@ async fn test_room_history_visibility_enforcement() {
                 "device_id": "TEST_DEVICE"
             }))
             .await;
-        
+
         let user_data: Value = user_response.json();
         let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -266,7 +266,7 @@ async fn test_room_history_visibility_enforcement() {
                 }]
             }))
             .await;
-        
+
         assert_eq!(room_response.status_code(), 200);
     }
 }
@@ -285,7 +285,7 @@ async fn test_room_tagging_operations() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
     let user_id = user_data["user_id"].as_str().unwrap();
@@ -297,13 +297,13 @@ async fn test_room_tagging_operations() {
             "name": "Tag Test Room"
         }))
         .await;
-    
+
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
 
     // Test Matrix reserved tags
     let reserved_tags = vec!["m.favourite", "m.lowpriority"];
-    
+
     for tag in reserved_tags {
         let tag_response = server
             .put(&format!("/_matrix/client/v3/user/{}/rooms/{}/tags/{}", user_id, room_id, tag))
@@ -312,7 +312,7 @@ async fn test_room_tagging_operations() {
                 "order": 0.5
             }))
             .await;
-        
+
         assert_eq!(tag_response.status_code(), 200);
     }
 
@@ -324,7 +324,7 @@ async fn test_room_tagging_operations() {
             "order": 0.3
         }))
         .await;
-    
+
     assert_eq!(custom_tag_response.status_code(), 200);
 
     // Get tags and verify
@@ -332,7 +332,7 @@ async fn test_room_tagging_operations() {
         .get(&format!("/_matrix/client/v3/user/{}/rooms/{}/tags", user_id, room_id))
         .add_header("Authorization", format!("Bearer {}", access_token))
         .await;
-    
+
     assert_eq!(get_tags_response.status_code(), 200);
     let tags_data: Value = get_tags_response.json();
     assert!(tags_data["tags"].as_object().unwrap().contains_key("m.favourite"));
@@ -353,7 +353,7 @@ async fn test_server_side_search() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -364,7 +364,7 @@ async fn test_server_side_search() {
             "name": "Search Test Room"
         }))
         .await;
-    
+
     let room_data: Value = room_response.json();
     let room_id = room_data["room_id"].as_str().unwrap();
 
@@ -372,7 +372,7 @@ async fn test_server_side_search() {
     let messages = vec![
         "Hello world, this is a test message",
         "Another message with different content",
-        "Final message for search testing"
+        "Final message for search testing",
     ];
 
     for (i, message) in messages.iter().enumerate() {
@@ -402,10 +402,14 @@ async fn test_server_side_search() {
             }
         }))
         .await;
-    
+
     assert_eq!(search_response.status_code(), 200);
     let search_data: Value = search_response.json();
-    assert!(search_data["search_categories"]["room_events"]["results"].as_array().is_some());
+    assert!(
+        search_data["search_categories"]["room_events"]["results"]
+            .as_array()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -422,7 +426,7 @@ async fn test_third_party_invites() {
             "device_id": "TEST_DEVICE"
         }))
         .await;
-    
+
     let user_data: Value = user_response.json();
     let access_token = user_data["access_token"].as_str().unwrap();
 
@@ -431,7 +435,7 @@ async fn test_third_party_invites() {
         .get("/_matrix/client/v3/account/3pid")
         .add_header("Authorization", format!("Bearer {}", access_token))
         .await;
-    
+
     // Should return 200 with empty list or proper 3PID data
     assert!(threepid_response.status_code() == 200 || threepid_response.status_code() == 404);
 }

@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use surrealdb::engine::any::Any;
 
 use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
@@ -17,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::auth::MatrixSessionService;
 use crate::utils::canonical_json::to_canonical_json;
 use matryx_entity::types::{Event, ServerKeysResponse};
-use matryx_surrealdb::repository::error::RepositoryError;
+use matryx_surrealdb::repository::{KeyServerRepository, error::RepositoryError};
 
 /// Errors that can occur during event signing and validation
 #[derive(Debug, thiserror::Error)]
@@ -59,15 +60,16 @@ pub enum EventSigningError {
 /// including redaction algorithms, hash calculations, signature generation/verification,
 /// and remote server key management.
 pub struct EventSigningEngine {
-    pub session_service: Arc<MatrixSessionService>,
+    pub session_service: Arc<MatrixSessionService<Any>>,
     pub db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+    key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
     http_client: Client,
     homeserver_name: String,
 }
 
 impl EventSigningEngine {
     pub fn new(
-        session_service: Arc<MatrixSessionService>,
+        session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
         homeserver_name: String,
     ) -> Self {
@@ -77,7 +79,15 @@ impl EventSigningEngine {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { session_service, db, http_client, homeserver_name }
+        let key_server_repo = Arc::new(KeyServerRepository::new(db.clone()));
+
+        Self {
+            session_service,
+            db,
+            key_server_repo,
+            http_client,
+            homeserver_name,
+        }
     }
 
     /// Sign an outgoing event with server's signing key
@@ -453,31 +463,17 @@ impl EventSigningEngine {
         let valid_until = chrono::DateTime::from_timestamp(server_keys.valid_until_ts / 1000, 0);
 
         for (key_id, key_data) in verify_keys {
-            let query = "
-                CREATE server_signing_keys CONTENT {
-                    server_name: $server_name,
-                    key_id: $key_id,
-                    public_key: $public_key,
-                    fetched_at: $fetched_at,
-                    expires_at: $expires_at,
-                    is_active: true
-                }
-            ";
-
-            self.db
-                .query(query)
-                .bind(("server_name", server_name.to_string()))
-                .bind(("key_id", key_id.to_string()))
-                .bind(("public_key", key_data.key.clone()))
-                .bind(("fetched_at", now))
-                .bind(("expires_at", valid_until))
+            // Cache server signing key using key server repository
+            self.key_server_repo
+                .cache_server_signing_key(
+                    server_name,
+                    &key_id,
+                    &key_data.key,
+                    now,
+                    valid_until.unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24)),
+                )
                 .await
-                .map_err(|e| {
-                    EventSigningError::DatabaseError(RepositoryError::Validation {
-                        field: "server_key".to_string(),
-                        message: format!("Failed to cache server key: {}", e),
-                    })
-                })?;
+                .map_err(|e| EventSigningError::DatabaseError(e))?;
 
             debug!("Cached server key {}:{}", server_name, key_id);
         }
@@ -491,37 +487,11 @@ impl EventSigningEngine {
         server_name: &str,
         key_id: &str,
     ) -> Result<Option<String>, EventSigningError> {
-        let query = "
-            SELECT public_key
-            FROM server_signing_keys
-            WHERE server_name = $server_name
-              AND key_id = $key_id
-              AND is_active = true
-              AND (expires_at IS NULL OR expires_at > datetime::now())
-            LIMIT 1
-        ";
-
-        let mut response = self
-            .db
-            .query(query)
-            .bind(("server_name", server_name.to_string()))
-            .bind(("key_id", key_id.to_string()))
+        // Get cached server signing key using key server repository
+        self.key_server_repo
+            .get_server_signing_key(server_name, key_id)
             .await
-            .map_err(|e| {
-                EventSigningError::DatabaseError(RepositoryError::Validation {
-                    field: "query".to_string(),
-                    message: format!("Failed to query cached keys: {}", e),
-                })
-            })?;
-
-        let public_key: Option<String> = response.take(0).map_err(|e| {
-            EventSigningError::DatabaseError(RepositoryError::Validation {
-                field: "parse".to_string(),
-                message: format!("Failed to parse key result: {}", e),
-            })
-        })?;
-
-        Ok(public_key)
+            .map_err(|e| EventSigningError::DatabaseError(e))
     }
 
     /// Validate event signatures and hashes
@@ -724,11 +694,16 @@ mod tests {
         use matryx_surrealdb::test_utils::create_test_db;
         use std::sync::Arc;
 
-        let test_db = create_test_db();
-        let session_service = Arc::new(MatrixSessionService::with_db(
+        let test_db = create_test_db().expect("Failed to create test database");
+        
+        let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(test_db.clone());
+        let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(test_db.clone());
+        
+        let session_service = Arc::new(MatrixSessionService::new(
             b"test_secret".to_vec(),
             "test.example.org".to_string(),
-            test_db.clone(),
+            session_repo,
+            key_server_repo,
         ));
 
         EventSigningEngine::new(session_service, test_db, "test.example.org".to_string())

@@ -4,33 +4,61 @@
 //! Returns information about how to contact the server administrator for support.
 //! This is an optional endpoint that helps users find support when things go wrong.
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, SupportConfig};
 use axum::{http::StatusCode, response::Json};
 use serde_json::{Value, json};
 use std::env;
+use tracing::{error, warn};
 
 /// Matrix server support information
+/// Returns JSON object with administrator contact information and support page URL
 pub async fn get() -> Result<Json<Value>, StatusCode> {
     // Get configuration from centralized ServerConfig
-    let config = ServerConfig::get();
-    let homeserver_name = &config.homeserver_name;
-    let admin_email = &config.admin_email;
+    let server_config = match std::panic::catch_unwind(|| ServerConfig::get()) {
+        Ok(config) => config,
+        Err(_) => {
+            error!("Failed to get server configuration for support endpoint");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        },
+    };
 
-    let support_page = env::var("MATRIX_SUPPORT_PAGE")
-        .unwrap_or_else(|_| format!("https://{}/support", homeserver_name));
+    // Create support configuration from environment and server config
+    let support_config =
+        SupportConfig::from_env(&server_config.homeserver_name, &server_config.admin_email);
 
-    // Return standard Matrix support information
-    // This provides contact information for users who need help
-    let support_info = json!({
-        "admins": [
-            {
-                "matrix_id": format!("@admin:{}", homeserver_name),
-                "email_address": admin_email,
-                "role": "administrator"
-            }
-        ],
-        "support_page": support_page
+    // Validate support configuration
+    if let Err(validation_error) = support_config.validate() {
+        error!("Support configuration validation failed: {}", validation_error);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Check if public support is enabled
+    if !support_config.public_support_enabled {
+        warn!("Public support information is disabled");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Build admins array from support configuration
+    let mut admins = Vec::new();
+    for contact in support_config.get_support_contacts() {
+        admins.push(json!({
+            "matrix_id": contact.matrix_id,
+            "email_address": contact.email_address,
+            "role": contact.role
+        }));
+    }
+
+    // Build response object
+    let mut support_info = json!({
+        "admins": admins
     });
+
+    // Add support page if enabled
+    if let Some(support_page_url) = support_config.get_support_page_url() {
+        support_info
+            .as_object_mut()
+            .and_then(|obj| obj.insert("support_page".to_string(), json!(support_page_url)));
+    }
 
     Ok(Json(support_info))
 }

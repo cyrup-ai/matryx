@@ -4,24 +4,14 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use matryx_surrealdb::repository::ProfileManagementService;
 
 use crate::{
     auth::MatrixSessionService,
-    database::SurrealRepository,
     AppState,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct UserProfile {
-    pub user_id: String,
-    pub display_name: Option<String>,
-    pub avatar_url: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
+
 
 #[derive(Serialize)]
 pub struct ProfileResponse {
@@ -35,31 +25,20 @@ pub async fn get_profile(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<ProfileResponse>, StatusCode> {
-    // Query user profile from database
-    let query = "SELECT * FROM user_profiles WHERE user_id = $user_id";
-    let mut params = HashMap::new();
-    params.insert("user_id".to_string(), Value::String(user_id.clone()));
-
-    let result = state.database
-        .query(query, Some(params))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(profiles) = result.first() {
-        if let Some(profile_data) = profiles.first() {
-            let profile: UserProfile = serde_json::from_value(profile_data.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            return Ok(Json(ProfileResponse {
-                displayname: profile.display_name,
-                avatar_url: profile.avatar_url,
-            }));
+    let profile_service = ProfileManagementService::new(state.db.clone());
+    
+    // Get user profile using ProfileManagementService
+    match profile_service.get_user_profile(&user_id, &user_id).await {
+        Ok(profile) => Ok(Json(ProfileResponse {
+            displayname: profile.displayname,
+            avatar_url: profile.avatar_url,
+        })),
+        Err(_) => {
+            // If no profile exists, return empty profile
+            Ok(Json(ProfileResponse {
+                displayname: None,
+                avatar_url: None,
+            }))
         }
     }
-
-    // If no profile exists, return empty profile
-    Ok(Json(ProfileResponse {
-        displayname: None,
-        avatar_url: None,
-    }))
 }
