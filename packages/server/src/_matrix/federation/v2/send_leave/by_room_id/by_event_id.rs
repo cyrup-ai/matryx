@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::federation::client::FederationClient;
+use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
+use crate::federation::membership_federation::validate_federation_leave_allowed;
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
@@ -91,9 +93,8 @@ pub async fn put(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -189,6 +190,20 @@ pub async fn put(
             StatusCode::NOT_FOUND
         })?;
 
+    // Validate room allows leave events from this federation server (v2 API)
+    if !validate_federation_leave_allowed(&room, &x_matrix_auth.origin) {
+        warn!(
+            "Federation leave denied for server {} in room {} - v2 API origin restrictions apply",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    info!(
+        "Room leave validation passed for room {} (version {}) from server {} using v2 API",
+        room_id, room.room_version, x_matrix_auth.origin
+    );
+
     // Check if user is currently in the room and can leave
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
     let existing_membership =
@@ -223,15 +238,25 @@ pub async fn put(
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
     let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
     let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
-    let pdu_validator = PduValidator::new(
-        state.session_service.clone(),
-        event_repo.clone(),
-        room_repo.clone(),
-        federation_repo.clone(),
-        key_server_repo.clone(),
-        state.db.clone(),
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let federation_client = Arc::new(FederationClient::new(
+        state.http_client.clone(),
+        state.event_signer.clone(),
         state.homeserver_name.clone(),
-    );
+    ));
+    let params = PduValidatorParams {
+        session_service: state.session_service.clone(),
+        event_repo: event_repo.clone(),
+        room_repo: room_repo.clone(),
+        membership_repo: membership_repo.clone(),
+        federation_repo: federation_repo.clone(),
+        key_server_repo: key_server_repo.clone(),
+        federation_client: federation_client.clone(),
+        dns_resolver: state.dns_resolver.clone(),
+        db: state.db.clone(),
+        homeserver_name: state.homeserver_name.clone(),
+    };
+    let pdu_validator = PduValidator::new(params).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Validate the leave event PDU
     let validated_event = match pdu_validator.validate_pdu(&payload, &x_matrix_auth.origin).await {

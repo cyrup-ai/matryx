@@ -4,12 +4,14 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_entity::types::Event;
 
 #[derive(Deserialize)]
 pub struct RelationsQuery {

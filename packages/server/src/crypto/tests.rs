@@ -1,15 +1,13 @@
 #[cfg(test)]
-mod tests {
+mod crypto_tests {
     use crate::crypto::{
-        AuthData,
+
         CryptoError,
-        EncryptedKeyData,
         MatryxCryptoProvider,
-        RoomKeyBackupData,
+
     };
     use serde_json::json;
     use std::collections::HashMap;
-    use tokio_test;
     use vodozemac::megolm::GroupSession;
     use vodozemac::olm::{Account, SessionConfig};
 
@@ -22,6 +20,10 @@ mod tests {
         // Generate valid device keys using vodozemac
         let identity_keys = account.identity_keys();
         let device_keys = create_device_keys_from_account(&account, "@test:example.com", "DEVICE1");
+
+        // Verify that identity keys match what we expect
+        assert!(!identity_keys.curve25519.to_base64().is_empty());
+        assert!(!identity_keys.ed25519.to_base64().is_empty());
 
         // Should pass validation
         let result = crypto_provider.verify_device_keys(&device_keys).await;

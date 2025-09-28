@@ -9,8 +9,8 @@ use tracing::{debug, error, warn};
 
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
-use matryx_entity::types::Event;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// GET /_matrix/client/v3/rooms/{roomId}/state
 ///
@@ -24,7 +24,7 @@ pub async fn get(
 
     // Validate room exists
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let room = room_repo
+    let _room = room_repo
         .get_by_id(&room_id)
         .await
         .map_err(|e| {
@@ -37,12 +37,25 @@ pub async fn get(
         })?;
 
     // Check if user has permission to view room state
-    let has_permission = check_room_state_permission(&state, &room_id, &auth.user_id)
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let membership_status = membership_repo.get_user_membership_status(&room_id, &auth.user_id)
         .await
         .map_err(|e| {
-            error!("Failed to check room state permissions: {}", e);
+            error!("Failed to check user membership: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    let has_permission = if let Some(membership) = membership_status {
+        matches!(membership.as_str(), "join" | "invite" | "leave")
+    } else {
+        // Check if room has world-readable history
+        room_repo.is_room_world_readable(&room_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to check room world-readable status: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
 
     if !has_permission {
         warn!("User {} not authorized to view state of room {}", auth.user_id, room_id);
@@ -50,109 +63,13 @@ pub async fn get(
     }
 
     // Get current room state
-    let state_events = get_current_room_state(&state, &room_id).await.map_err(|e| {
-        error!("Failed to get room state: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    debug!("Retrieved {} state events for room {}", state_events.len(), room_id);
-    Ok(Json(json!(state_events)))
-}
-
-/// Check if a user has permission to view room state
-async fn check_room_state_permission(
-    state: &AppState,
-    room_id: &str,
-    user_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check user's membership in the room
-    let query = "
-        SELECT membership
-        FROM membership
-        WHERE room_id = $room_id AND user_id = $user_id
-        ORDER BY updated_at DESC
-        LIMIT 1
-    ";
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct MembershipResult {
-        membership: String,
-    }
-
-    let membership: Option<MembershipResult> = response.take(0)?;
-
-    // User can view state if they are joined, invited, or have left (for historical state)
-    if let Some(membership) = membership {
-        return Ok(matches!(membership.membership.as_str(), "join" | "invite" | "leave"));
-    }
-
-    // Check if room has world-readable history
-    let world_readable = is_room_world_readable(state, room_id).await?;
-    Ok(world_readable)
-}
-
-/// Check if a room has world-readable history
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
-
-/// Get current room state events
-async fn get_current_room_state(
-    state: &AppState,
-    room_id: &str,
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    // Get all current state events for the room
-    let query = "
-        SELECT *
-        FROM event
-        WHERE room_id = $room_id
-        AND state_key IS NOT NULL
-        AND (
-            SELECT COUNT()
-            FROM event e2
-            WHERE e2.room_id = $room_id
-            AND e2.type = event.type
-            AND e2.state_key = event.state_key
-            AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
-        ) = 0
-        ORDER BY type, state_key
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    let events: Vec<Event> = response.take(0)?;
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let events = event_repo.get_room_current_state(&room_id, None)
+        .await
+        .map_err(|e| {
+            error!("Failed to get room state: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Convert events to Matrix client format
     let state_events: Vec<Value> = events
@@ -171,7 +88,10 @@ async fn get_current_room_state(
         })
         .collect();
 
-    Ok(state_events)
+    debug!("Retrieved {} state events for room {}", state_events.len(), room_id);
+    Ok(Json(json!(state_events)))
 }
+
+
 
 pub mod by_event_type;

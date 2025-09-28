@@ -3,6 +3,13 @@ use matryx_entity::{Event, ThreadSummary};
 use serde_json::Value;
 use surrealdb::{Connection, Surreal};
 
+#[derive(Debug, Clone)]
+pub struct ThreadEventsResponse {
+    pub events: Vec<Event>,
+    pub next_batch: Option<String>,
+    pub prev_batch: Option<String>,
+}
+
 pub struct ThreadRepository<C: Connection> {
     db: Surreal<C>,
 }
@@ -46,6 +53,71 @@ impl<C: Connection> ThreadRepository<C> {
         }
 
         Ok(thread_events)
+    }
+
+    /// Get thread events starting from a specific pagination token
+    pub async fn get_thread_events_from(
+        &self,
+        thread_root_id: &str,
+        from_token: &str,
+        limit: Option<u32>,
+    ) -> Result<ThreadEventsResponse, RepositoryError> {
+        let limit = limit.unwrap_or(50).min(100); // Cap at 100 events
+
+        // Parse the from_token as an event ID for pagination
+        let query = "
+            SELECT e.* FROM room_timeline_events e
+            JOIN event_relations r ON e.event_id = r.event_id
+            WHERE r.relates_to_event_id = $thread_root_id
+            AND r.rel_type = 'm.thread'
+            AND e.origin_server_ts > (
+                SELECT origin_server_ts FROM room_timeline_events
+                WHERE event_id = $from_token
+            )
+            ORDER BY e.origin_server_ts ASC
+            LIMIT $limit
+        ";
+
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("thread_root_id", thread_root_id.to_string()))
+            .bind(("from_token", from_token.to_string()))
+            .bind(("limit", limit))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: format!("Failed to query thread events from token: {}", e),
+                operation: "get_thread_events_from".to_string(),
+            })?;
+
+        let events: Vec<Value> = result
+            .take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: format!("Failed to extract thread events result: {}", e),
+                operation: "get_thread_events_from".to_string(),
+            })?;
+
+        let mut thread_events = Vec::new();
+        for event_data in events {
+            if let Ok(event) = self.value_to_event(event_data) {
+                thread_events.push(event);
+            }
+        }
+
+        // Generate pagination tokens
+        let next_batch = if thread_events.len() as u32 >= limit {
+            thread_events.last().map(|e| format!("e_{}", e.origin_server_ts))
+        } else {
+            None
+        };
+
+        let prev_batch = thread_events.first().map(|e| format!("e_{}", e.origin_server_ts));
+
+        Ok(ThreadEventsResponse {
+            events: thread_events,
+            next_batch,
+            prev_batch,
+        })
     }
 
     /// Create a thread relation between an event and thread root

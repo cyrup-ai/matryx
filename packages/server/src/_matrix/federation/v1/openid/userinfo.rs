@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_surrealdb::repository::UserRepository;
+use matryx_surrealdb::{AuthRepository, UserRepository};
 
 /// Query parameters for OpenID userinfo request
 #[derive(Debug, Deserialize)]
@@ -54,21 +54,9 @@ pub async fn get(
     }
 
     // Query database for OpenID token
-    let query = "
-        SELECT user_id, expires_at
-        FROM openid_token
-        WHERE access_token = $access_token
-        AND expires_at > $current_time
-        LIMIT 1
-    ";
-
-    let current_time = chrono::Utc::now().timestamp_millis();
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("access_token", params.access_token.clone()))
-        .bind(("current_time", current_time))
+    let auth_repo = AuthRepository::new(state.db.clone());
+    let token = auth_repo
+        .validate_openid_token(&params.access_token)
         .await
         .map_err(|e| {
             error!("Failed to query OpenID token: {}", e);
@@ -79,43 +67,39 @@ pub async fn get(
                     error: "Internal server error".to_string(),
                 }),
             )
+        })?
+        .ok_or_else(|| {
+            warn!("OpenID token not found: {}", params.access_token);
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(OpenIdError {
+                    errcode: "M_UNKNOWN_TOKEN".to_string(),
+                    error: "Access token unknown or expired".to_string(),
+                }),
+            )
         })?;
 
-    #[derive(serde::Deserialize)]
-    struct TokenResult {
-        user_id: String,
-        expires_at: i64,
-    }
-
-    let token_result: Option<TokenResult> = response.take(0).map_err(|e| {
-        error!("Failed to parse OpenID token result: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(OpenIdError {
-                errcode: "M_UNKNOWN".to_string(),
-                error: "Internal server error".to_string(),
-            }),
-        )
-    })?;
-
-    let token = token_result.ok_or_else(|| {
-        warn!("OpenID token not found or expired: {}", params.access_token);
-        (
+    // Check if token has expired according to Matrix OpenID specification
+    let current_timestamp = chrono::Utc::now().timestamp();
+    if token.1 < current_timestamp {
+        warn!("OpenID token expired at {} (current: {}): {}", 
+              token.1, current_timestamp, params.access_token);
+        return Err((
             StatusCode::UNAUTHORIZED,
             Json(OpenIdError {
                 errcode: "M_UNKNOWN_TOKEN".to_string(),
-                error: "Access token unknown or expired".to_string(),
+                error: "Access token expired".to_string(),
             }),
-        )
-    })?;
+        ));
+    }
 
     // Verify user still exists
     let user_repo = Arc::new(UserRepository::new(state.db.clone()));
     let user = user_repo
-        .get_by_id(&token.user_id)
+        .get_by_id(&token.0)
         .await
         .map_err(|e| {
-            error!("Failed to query user {}: {}", token.user_id, e);
+            error!("Failed to query user {}: {}", token.0, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(OpenIdError {
@@ -125,7 +109,7 @@ pub async fn get(
             )
         })?
         .ok_or_else(|| {
-            warn!("User {} not found for OpenID token", token.user_id);
+            warn!("User {} not found for OpenID token", token.0);
             (
                 StatusCode::UNAUTHORIZED,
                 Json(OpenIdError {

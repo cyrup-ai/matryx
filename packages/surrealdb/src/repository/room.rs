@@ -29,8 +29,10 @@ pub struct RoomCreationConfig {
     pub is_direct: bool,
     pub preset: Option<String>,
     pub invite_users: Vec<String>,
+    pub invite_3pid: Vec<Value>,
     pub initial_state: Vec<Value>,
     pub power_level_content_override: Option<Value>,
+    pub creation_content: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,12 +60,42 @@ pub enum RoomVisibility {
     Private,
 }
 
-#[derive(Debug, Clone)]
+
+// TASK16 SUBTASK 3: Add JoinRules enum
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum JoinRules {
     Public,
     Invite,
     Knock,
+    Private,
     Restricted,
+}
+
+impl JoinRules {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JoinRules::Public => "public",
+            JoinRules::Invite => "invite",
+            JoinRules::Knock => "knock",
+            JoinRules::Private => "private",
+            JoinRules::Restricted => "restricted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum GuestAccess {
+    CanJoin,
+    Forbidden,
+}
+
+impl GuestAccess {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GuestAccess::CanJoin => "can_join",
+            GuestAccess::Forbidden => "forbidden",
+        }
+    }
 }
 
 // Response types for advanced room operations
@@ -85,6 +117,9 @@ pub struct MembersResponse {
     pub banned: Option<std::collections::HashMap<String, MemberInfo>>,
     pub knocked: Option<std::collections::HashMap<String, MemberInfo>>,
 }
+
+// Type alias for complex room data tuple to reduce type complexity
+type RoomDataTuple = (String, Option<String>, Option<String>, Option<String>, Option<String>, bool, bool, String, Option<String>, String, u32);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberInfo {
@@ -361,52 +396,21 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(visibility) = content.get("history_visibility").and_then(|v| v.as_str())
-                {
-                    return match visibility {
-                        "world_readable" => Ok(RoomVisibility::Public),
-                        _ => Ok(RoomVisibility::Private),
-                    };
-                }
-            }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(visibility) = content.get("history_visibility").and_then(|v| v.as_str())
+        {
+            return match visibility {
+                "world_readable" => Ok(RoomVisibility::Public),
+                _ => Ok(RoomVisibility::Private),
+            };
         }
 
         // Default to private if no visibility event found
         Ok(RoomVisibility::Private)
     }
 
-    /// Get room join rules
-    pub async fn get_room_join_rules(&self, room_id: &str) -> Result<JoinRules, RepositoryError> {
-        let query = "
-            SELECT content FROM event
-            WHERE room_id = $room_id
-            AND event_type = 'm.room.join_rules'
-            AND state_key = ''
-            ORDER BY origin_server_ts DESC
-            LIMIT 1
-        ";
-        let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
-        let events: Vec<Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(join_rule) = content.get("join_rule").and_then(|v| v.as_str()) {
-                    return match join_rule {
-                        "public" => Ok(JoinRules::Public),
-                        "invite" => Ok(JoinRules::Invite),
-                        "knock" => Ok(JoinRules::Knock),
-                        "restricted" => Ok(JoinRules::Restricted),
-                        _ => Ok(JoinRules::Invite), // Default to invite for unknown rules
-                    };
-                }
-            }
-        }
-
-        // Default to invite if no join rules event found
-        Ok(JoinRules::Invite)
-    }
 
     /// Get room power levels
     pub async fn get_room_power_levels(
@@ -424,50 +428,49 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                let users = content
-                    .get("users")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(k, v)| v.as_i64().map(|i| (k.clone(), i)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content") {
+            let users = content
+                .get("users")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_i64().map(|i| (k.clone(), i)))
+                        .collect()
+                })
+                .unwrap_or_default();
 
-                let events_map = content
-                    .get("events")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(k, v)| v.as_i64().map(|i| (k.clone(), i)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+            let events_map = content
+                .get("events")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_i64().map(|i| (k.clone(), i)))
+                        .collect()
+                })
+                .unwrap_or_default();
 
-                return Ok(PowerLevels {
-                    users,
-                    users_default: content
-                        .get("users_default")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    events: events_map,
-                    events_default: content
-                        .get("events_default")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
-                    state_default: content
-                        .get("state_default")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(50),
-                    ban: content.get("ban").and_then(|v| v.as_i64()).unwrap_or(50),
-                    kick: content.get("kick").and_then(|v| v.as_i64()).unwrap_or(50),
-                    redact: content.get("redact").and_then(|v| v.as_i64()).unwrap_or(50),
-                    invite: content.get("invite").and_then(|v| v.as_i64()).unwrap_or(50),
-                    notifications: Default::default(),
-                });
-            }
+            return Ok(PowerLevels {
+                users,
+                users_default: content
+                    .get("users_default")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                events: events_map,
+                events_default: content
+                    .get("events_default")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                state_default: content
+                    .get("state_default")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(50),
+                ban: content.get("ban").and_then(|v| v.as_i64()).unwrap_or(50),
+                kick: content.get("kick").and_then(|v| v.as_i64()).unwrap_or(50),
+                redact: content.get("redact").and_then(|v| v.as_i64()).unwrap_or(50),
+                invite: content.get("invite").and_then(|v| v.as_i64()).unwrap_or(50),
+                notifications: Default::default(),
+            });
         }
 
         // Return default power levels if no event found
@@ -487,15 +490,43 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(name) = content.get("name").and_then(|v| v.as_str()) {
-                    return Ok(Some(name.to_string()));
-                }
-            }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(name) = content.get("name").and_then(|v| v.as_str()) {
+            return Ok(Some(name.to_string()));
         }
 
         Ok(None)
+    }
+
+    /// Get room join rules
+    pub async fn get_room_join_rules(&self, room_id: &str) -> Result<JoinRules, RepositoryError> {
+        let query = "
+            SELECT content FROM event
+            WHERE room_id = $room_id
+            AND event_type = 'm.room.join_rules'
+            AND state_key = ''
+            ORDER BY origin_server_ts DESC
+            LIMIT 1
+        ";
+        let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+        let events: Vec<Value> = result.take(0)?;
+
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(join_rule) = content.get("join_rule").and_then(|v| v.as_str()) {
+            return Ok(match join_rule {
+                "public" => JoinRules::Public,
+                "invite" => JoinRules::Invite,
+                "knock" => JoinRules::Knock,
+                "private" => JoinRules::Private,
+                "restricted" => JoinRules::Restricted,
+                _ => JoinRules::Invite, // Default
+            });
+        }
+
+        // Default to "invite" if no join rules are set
+        Ok(JoinRules::Invite)
     }
 
     /// Check if a room is joinable by a user
@@ -510,6 +541,10 @@ impl RoomRepository {
             JoinRules::Public => Ok(true),
             JoinRules::Invite => {
                 // Check if user has pending invitation
+                self.check_membership(room_id, user_id).await
+            },
+            JoinRules::Private => {
+                // Private rooms require invitation
                 self.check_membership(room_id, user_id).await
             },
             JoinRules::Knock => {
@@ -701,23 +736,22 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                return Ok(RoomCreationContent {
-                    creator: content
-                        .get("creator")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    room_version: content
-                        .get("room_version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("9")
-                        .to_string(),
-                    federate: content.get("m.federate").and_then(|v| v.as_bool()).unwrap_or(true),
-                    predecessor: content.get("predecessor").cloned(),
-                });
-            }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content") {
+            return Ok(RoomCreationContent {
+                creator: content
+                    .get("creator")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                room_version: content
+                    .get("room_version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("9")
+                    .to_string(),
+                federate: content.get("m.federate").and_then(|v| v.as_bool()).unwrap_or(true),
+                predecessor: content.get("predecessor").cloned(),
+            });
         }
 
         Err(RepositoryError::NotFound {
@@ -852,30 +886,27 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let acl_events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(acl_event) = acl_events.first() {
-            if let Some(content) = acl_event.get("content") {
-                // Check deny list
-                if let Some(deny_list) = content.get("deny").and_then(|v| v.as_array()) {
-                    for pattern in deny_list {
-                        if let Some(pattern_str) = pattern.as_str() {
-                            if self.matches_server_pattern(server_name, pattern_str) {
-                                return Ok(false);
-                            }
-                        }
+        if let Some(acl_event) = acl_events.first()
+            && let Some(content) = acl_event.get("content") {
+            // Check deny list
+            if let Some(deny_list) = content.get("deny").and_then(|v| v.as_array()) {
+                for pattern in deny_list {
+                    if let Some(pattern_str) = pattern.as_str()
+                        && self.matches_server_pattern(server_name, pattern_str) {
+                        return Ok(false);
                     }
                 }
+            }
 
-                // Check allow list
-                if let Some(allow_list) = content.get("allow").and_then(|v| v.as_array()) {
-                    for pattern in allow_list {
-                        if let Some(pattern_str) = pattern.as_str() {
-                            if self.matches_server_pattern(server_name, pattern_str) {
-                                return Ok(true);
-                            }
-                        }
+            // Check allow list
+            if let Some(allow_list) = content.get("allow").and_then(|v| v.as_array()) {
+                for pattern in allow_list {
+                    if let Some(pattern_str) = pattern.as_str()
+                        && self.matches_server_pattern(server_name, pattern_str) {
+                        return Ok(true);
                     }
-                    return Ok(false); // Allow list exists but server not in it
                 }
+                return Ok(false); // Allow list exists but server not in it
             }
         }
 
@@ -894,12 +925,10 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(version) = content.get("room_version").and_then(|v| v.as_str()) {
-                    return Ok(version.to_string());
-                }
-            }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(version) = content.get("room_version").and_then(|v| v.as_str()) {
+            return Ok(version.to_string());
         }
 
         Ok("1".to_string()) // Default to version 1 if not specified
@@ -954,21 +983,20 @@ impl RoomRepository {
         let mut restricted_servers = Vec::new();
         let mut allowed_servers = Vec::new();
 
-        if let Some(acl_event) = acl_events.first() {
-            if let Some(content) = acl_event.get("content") {
-                if let Some(deny_list) = content.get("deny").and_then(|v| v.as_array()) {
-                    for pattern in deny_list {
-                        if let Some(pattern_str) = pattern.as_str() {
-                            restricted_servers.push(pattern_str.to_string());
-                        }
+        if let Some(acl_event) = acl_events.first()
+            && let Some(content) = acl_event.get("content") {
+            if let Some(deny_list) = content.get("deny").and_then(|v| v.as_array()) {
+                for pattern in deny_list {
+                    if let Some(pattern_str) = pattern.as_str() {
+                        restricted_servers.push(pattern_str.to_string());
                     }
                 }
+            }
 
-                if let Some(allow_list) = content.get("allow").and_then(|v| v.as_array()) {
-                    for pattern in allow_list {
-                        if let Some(pattern_str) = pattern.as_str() {
-                            allowed_servers.push(pattern_str.to_string());
-                        }
+            if let Some(allow_list) = content.get("allow").and_then(|v| v.as_array()) {
+                for pattern in allow_list {
+                    if let Some(pattern_str) = pattern.as_str() {
+                        allowed_servers.push(pattern_str.to_string());
                     }
                 }
             }
@@ -1006,10 +1034,9 @@ impl RoomRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                return Ok(content.clone());
-            }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content") {
+            return Ok(content.clone());
         }
 
         // Return default power levels
@@ -1042,7 +1069,7 @@ impl RoomRepository {
             .unwrap_or(power_levels.users_default);
 
         // Get required level for action
-        let required = required_level.unwrap_or_else(|| {
+        let required = required_level.unwrap_or({
             match action {
                 "ban" => power_levels.ban,
                 "kick" => power_levels.kick,
@@ -1646,7 +1673,7 @@ impl RoomRepository {
         let mut child_chunks = Vec::new();
         let mut inaccessible_children = Vec::new();
         
-        if max_depth.map_or(true, |depth| depth > 0) {
+        if max_depth.is_none_or(|depth| depth > 0) {
             for child in children {
                 if let Some(child_room_id) = child.get("child_room_id").and_then(|v| v.as_str()) {
                     // Try to get child room details
@@ -1795,6 +1822,332 @@ impl RoomRepository {
         Ok(())
     }
 
+    // TASK15 SUBTASK 3: Add public room methods
+
+    /// Get room member count
+    pub async fn get_room_member_count(&self, room_id: &str) -> Result<u32, RepositoryError> {
+        let query = "SELECT count() FROM membership WHERE room_id = $room_id AND membership = 'join' GROUP ALL";
+        
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_member_count".to_string(),
+            })?;
+
+        let count: Option<i64> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_member_count_parse".to_string(),
+        })?;
+
+        Ok(count.unwrap_or(0) as u32)
+    }
+
+    /// Get room public information
+    pub async fn get_room_public_info(&self, room_id: &str) -> Result<Option<crate::repository::public_rooms::PublicRoomInfo>, RepositoryError> {
+        let query = r#"
+            SELECT room_id, name, topic, avatar_url, canonical_alias, 
+                   world_readable, guest_can_join, join_rule, room_type, visibility,
+                   (SELECT count() FROM membership WHERE room_id = $parent.room_id AND membership = 'join') as num_joined_members
+            FROM room 
+            WHERE room_id = $room_id
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_public_info".to_string(),
+            })?;
+
+        let room_data: Option<RoomDataTuple> = 
+            response.take(0).map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_public_info_parse".to_string(),
+            })?;
+
+        if let Some((room_id, name, topic, avatar_url, canonical_alias, world_readable, guest_can_join, join_rule, room_type, visibility, num_joined_members)) = room_data {
+            let visibility_enum = match visibility.as_str() {
+                "public" => crate::repository::public_rooms::RoomDirectoryVisibility::Public,
+                _ => crate::repository::public_rooms::RoomDirectoryVisibility::Private,
+            };
+
+            Ok(Some(crate::repository::public_rooms::PublicRoomInfo {
+                room_id,
+                name,
+                topic,
+                avatar_url,
+                canonical_alias,
+                num_joined_members,
+                world_readable,
+                guest_can_join,
+                join_rule,
+                room_type,
+                visibility: visibility_enum,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update room public information
+    pub async fn update_room_public_info(&self, room_id: &str, info: &crate::repository::public_rooms::PublicRoomInfo) -> Result<(), RepositoryError> {
+        let visibility_str = match info.visibility {
+            crate::repository::public_rooms::RoomDirectoryVisibility::Public => "public",
+            crate::repository::public_rooms::RoomDirectoryVisibility::Private => "private",
+        };
+
+        let query = r#"
+            UPDATE room SET 
+                name = $name,
+                topic = $topic,
+                avatar_url = $avatar_url,
+                canonical_alias = $canonical_alias,
+                world_readable = $world_readable,
+                guest_can_join = $guest_can_join,
+                join_rule = $join_rule,
+                room_type = $room_type,
+                visibility = $visibility
+            WHERE room_id = $room_id
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("name", info.name.clone()))
+            .bind(("topic", info.topic.clone()))
+            .bind(("avatar_url", info.avatar_url.clone()))
+            .bind(("canonical_alias", info.canonical_alias.clone()))
+            .bind(("world_readable", info.world_readable))
+            .bind(("guest_can_join", info.guest_can_join))
+            .bind(("join_rule", info.join_rule.clone()))
+            .bind(("room_type", info.room_type.clone()))
+            .bind(("visibility", visibility_str.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "update_room_public_info".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+
+
+    /// Get room avatar URL
+    pub async fn get_room_avatar_url(&self, room_id: &str) -> Result<Option<String>, RepositoryError> {
+        let query = r#"
+            SELECT content FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.avatar' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC 
+            LIMIT 1
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_avatar_url".to_string(),
+            })?;
+
+        let content: Option<serde_json::Value> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_avatar_url_parse".to_string(),
+        })?;
+
+        if let Some(content) = content
+            && let Some(url) = content.get("url").and_then(|v| v.as_str()) {
+                return Ok(Some(url.to_string()));
+            }
+
+        Ok(None)
+    }
+
+    /// Get room canonical alias
+    pub async fn get_room_canonical_alias(&self, room_id: &str) -> Result<Option<String>, RepositoryError> {
+        let query = r#"
+            SELECT content FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.canonical_alias' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC 
+            LIMIT 1
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_canonical_alias".to_string(),
+            })?;
+
+        let content: Option<serde_json::Value> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_canonical_alias_parse".to_string(),
+        })?;
+
+        if let Some(content) = content
+            && let Some(alias) = content.get("alias").and_then(|v| v.as_str()) {
+                return Ok(Some(alias.to_string()));
+            }
+
+        Ok(None)
+    }
+
+    // TASK16 SUBTASK 3: Add room validation methods
+
+    /// Validate room access for a user and action
+    pub async fn validate_room_access(&self, room_id: &str, user_id: &str, action: crate::repository::room_operations::RoomAction) -> Result<bool, RepositoryError> {
+        // Check if room exists
+        let room = self.get_by_id(room_id).await?;
+        if room.is_none() {
+            return Ok(false);
+        }
+
+        // Get user's membership in the room
+        use crate::repository::membership::MembershipRepository;
+        let membership_repo = MembershipRepository::new(self.db.clone());
+        let membership = membership_repo.get_membership(room_id, user_id).await?;
+
+        match action {
+            crate::repository::room_operations::RoomAction::Read => {
+                // Can read if joined or if room is world readable
+                if let Some(membership) = membership {
+                    match membership.membership {
+                        matryx_entity::types::MembershipState::Join => Ok(true),
+                        _ => self.is_room_world_readable(room_id).await,
+                    }
+                } else {
+                    self.is_room_world_readable(room_id).await
+                }
+            },
+            crate::repository::room_operations::RoomAction::Write | 
+            crate::repository::room_operations::RoomAction::SendEvents => {
+                // Must be joined to write
+                if let Some(membership) = membership {
+                    Ok(membership.membership == matryx_entity::types::MembershipState::Join)
+                } else {
+                    Ok(false)
+                }
+            },
+            crate::repository::room_operations::RoomAction::Invite => {
+                self.can_user_invite(room_id, user_id).await
+            },
+            crate::repository::room_operations::RoomAction::Kick |
+            crate::repository::room_operations::RoomAction::Ban => {
+                // Check power levels for moderation actions
+                membership_repo.can_perform_action(
+                    room_id, 
+                    user_id, 
+                    if matches!(action, crate::repository::room_operations::RoomAction::Kick) {
+                        crate::repository::room_operations::MembershipAction::Kick
+                    } else {
+                        crate::repository::room_operations::MembershipAction::Ban
+                    }, 
+                    None
+                ).await
+            },
+            crate::repository::room_operations::RoomAction::RedactEvents |
+            crate::repository::room_operations::RoomAction::StateEvents => {
+                // Check if user has sufficient power level for these actions
+                if let Some(membership) = membership {
+                    if membership.membership == matryx_entity::types::MembershipState::Join {
+                        let user_power_level = membership_repo.get_user_power_level(room_id, user_id).await.unwrap_or(0);
+                        let required_level = match action {
+                            crate::repository::room_operations::RoomAction::RedactEvents => 50,
+                            crate::repository::room_operations::RoomAction::StateEvents => 50,
+                            _ => 0,
+                        };
+                        Ok(user_power_level >= required_level)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    Ok(false)
+                }
+            },
+        }
+    }
+
+
+
+    /// Check if room is invite only
+    pub async fn is_room_invite_only(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        let join_rules = self.get_room_join_rules(room_id).await?;
+        Ok(matches!(join_rules, JoinRules::Invite | JoinRules::Private))
+    }
+
+    /// Check if user can invite others to the room
+    pub async fn can_user_invite(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        use crate::repository::membership::MembershipRepository;
+        let membership_repo = MembershipRepository::new(self.db.clone());
+        
+        // User must be joined to invite
+        let membership = membership_repo.get_membership(room_id, user_id).await?;
+        if let Some(membership) = membership {
+            if membership.membership != matryx_entity::types::MembershipState::Join {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+
+        // Check power level for invite
+        membership_repo.can_perform_action(
+            room_id, 
+            user_id, 
+            crate::repository::room_operations::MembershipAction::Invite, 
+            None
+        ).await
+    }
+
+    /// Get room guest access settings
+    pub async fn get_room_guest_access(&self, room_id: &str) -> Result<GuestAccess, RepositoryError> {
+        let query = r#"
+            SELECT content FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.guest_access' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC 
+            LIMIT 1
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_guest_access".to_string(),
+            })?;
+
+        let content: Option<serde_json::Value> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_guest_access_parse".to_string(),
+        })?;
+
+        if let Some(content) = content
+            && let Some(guest_access) = content.get("guest_access").and_then(|ga| ga.as_str()) {
+                return Ok(match guest_access {
+                    "can_join" => GuestAccess::CanJoin,
+                    "forbidden" => GuestAccess::Forbidden,
+                    _ => GuestAccess::Forbidden, // Default
+                });
+            }
+
+        Ok(GuestAccess::Forbidden) // Default
+    }
+
     /// Get join rule allow conditions for restricted rooms (MSC3083)
     pub async fn get_join_rule_allow_conditions(
         &self,
@@ -1876,5 +2229,397 @@ impl RoomRepository {
 
         let room_id: Option<String> = response.take(0)?;
         Ok(room_id)
+    }
+
+    /// Check if room allows knocking by examining join rules
+    pub async fn check_room_allows_knocking(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT content.join_rule
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.join_rules' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct JoinRulesContent {
+            join_rule: Option<String>,
+        }
+
+        let join_rules: Option<JoinRulesContent> = response.take(0)?;
+
+        match join_rules {
+            Some(rules) => {
+                let join_rule = rules.join_rule.unwrap_or_else(|| "invite".to_string());
+                Ok(join_rule == "knock")
+            },
+            None => {
+                // No join rules event found, default is "invite" which doesn't allow knocking
+                Ok(false)
+            },
+        }
+    }
+
+    /// Check if server is allowed by room ACLs
+    pub async fn check_server_acls(&self, room_id: &str, server_name: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT content.allow, content.deny
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.server_acl' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct ServerAclContent {
+            allow: Option<Vec<String>>,
+            deny: Option<Vec<String>>,
+        }
+
+        let server_acl: Option<ServerAclContent> = response.take(0)?;
+
+        match server_acl {
+            Some(acl) => {
+                // Check deny list first
+                if let Some(deny_list) = acl.deny {
+                    for pattern in deny_list {
+                        if Self::server_matches_pattern(server_name, &pattern) {
+                            return Ok(false);
+                        }
+                    }
+                }
+
+                // Check allow list
+                if let Some(allow_list) = acl.allow {
+                    for pattern in allow_list {
+                        if Self::server_matches_pattern(server_name, &pattern) {
+                            return Ok(true);
+                        }
+                    }
+                    // If allow list exists but server doesn't match, deny
+                    Ok(false)
+                } else {
+                    // No allow list, server is allowed (unless denied above)
+                    Ok(true)
+                }
+            },
+            None => {
+                // No server ACL event, all servers allowed
+                Ok(true)
+            },
+        }
+    }
+
+    /// Check if server name matches ACL pattern (supports wildcards)
+    fn server_matches_pattern(server_name: &str, pattern: &str) -> bool {
+        if pattern == "*" {
+            return true;
+        }
+
+        if let Some(domain_suffix) = pattern.strip_prefix("*.") {
+            return server_name == domain_suffix ||
+                server_name.ends_with(&format!(".{}", domain_suffix));
+        }
+
+        server_name == pattern
+    }
+
+    /// Get room visibility settings from state events
+    pub async fn get_room_visibility_settings(&self, room_id: &str) -> Result<(String, bool, bool), RepositoryError> {
+        // Query for join rules, guest access, and history visibility
+        let query = "
+            SELECT event_type, content
+            FROM event
+            WHERE room_id = $room_id
+            AND event_type IN ['m.room.join_rules', 'm.room.guest_access', 'm.room.history_visibility']
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct StateEvent {
+            event_type: String,
+            content: serde_json::Value,
+        }
+
+        let state_events: Vec<StateEvent> = response.take(0)?;
+
+        let mut join_rule = "invite".to_string(); // Default
+        let mut guest_can_join = false; // Default
+        let mut world_readable = false; // Default
+
+        for event in state_events {
+            match event.event_type.as_str() {
+                "m.room.join_rules" => {
+                    if let Some(rule) = event.content.get("join_rule").and_then(|v| v.as_str()) {
+                        join_rule = rule.to_string();
+                    }
+                },
+                "m.room.guest_access" => {
+                    if let Some(access) = event.content.get("guest_access").and_then(|v| v.as_str()) {
+                        guest_can_join = access == "can_join";
+                    }
+                },
+                "m.room.history_visibility" => {
+                    if let Some(visibility) = event.content.get("history_visibility").and_then(|v| v.as_str()) {
+                        world_readable = visibility == "world_readable";
+                    }
+                },
+                _ => {},
+            }
+        }
+
+        Ok((join_rule, guest_can_join, world_readable))
+    }
+
+    /// Check if a server has permission to view room state
+    pub async fn check_server_state_permission(&self, room_id: &str, requesting_server: &str) -> Result<bool, RepositoryError> {
+        // Check if the requesting server has any users in the room
+        let query = "
+            SELECT COUNT() as count
+            FROM membership
+            WHERE room_id = $room_id
+            AND user_id CONTAINS $server_suffix
+            AND membership IN ['join', 'invite', 'leave']
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", requesting_server);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let count_result: Option<CountResult> = response.take(0)?;
+        let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
+
+        if has_users {
+            return Ok(true);
+        }
+
+        // Check if room is world-readable
+        let world_readable = self.is_room_world_readable(room_id).await?;
+        Ok(world_readable)
+    }
+
+
+
+    /// Get the full join rule content for a room
+    pub async fn get_room_join_rule_content(&self, room_id: &str) -> Result<serde_json::Value, RepositoryError> {
+        let query = "
+            SELECT content
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.join_rules' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct EventContent {
+            content: serde_json::Value,
+        }
+
+        let event_data: Option<EventContent> = response.take(0)?;
+        Ok(event_data
+            .map(|e| e.content)
+            .unwrap_or_else(|| serde_json::json!({"join_rule": "invite"})))
+    }
+
+    /// Get room join rules as string
+    pub async fn get_room_join_rules_string(&self, room_id: &str) -> Result<String, RepositoryError> {
+        let query = "
+            SELECT content.join_rule 
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.join_rules' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct JoinRuleContent {
+            join_rule: String,
+        }
+
+        let content: Option<JoinRuleContent> = response.take(0)?;
+        Ok(content.map(|c| c.join_rule).unwrap_or_else(|| "invite".to_string()))
+    }
+
+    /// Check if user has sufficient power level to invite users
+    pub async fn check_invite_power_level(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT content.invite, content.users
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.power_levels' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct PowerLevelsContent {
+            invite: Option<i64>,
+            users: Option<std::collections::HashMap<String, i64>>,
+        }
+
+        let power_levels: Option<PowerLevelsContent> = response.take(0)?;
+
+        match power_levels {
+            Some(pl) => {
+                let required_level = pl.invite.unwrap_or(0); // Default invite level is 0
+                let user_level = pl.users.and_then(|users| users.get(user_id).copied()).unwrap_or(0); // Default user level is 0
+
+                Ok(user_level >= required_level)
+            },
+            None => {
+                // No power levels event, default behavior allows invites
+                Ok(true)
+            },
+        }
+    }
+
+    /// Get room history visibility setting
+    pub async fn get_room_history_visibility(&self, room_id: &str) -> Result<String, RepositoryError> {
+        let query = "
+            SELECT content.history_visibility
+            FROM room_state_events 
+            WHERE room_id = $room_id AND type = 'm.room.history_visibility' AND state_key = ''
+            ORDER BY origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct HistoryVisibilityContent {
+            history_visibility: Option<String>,
+        }
+
+        let visibility_events: Vec<HistoryVisibilityContent> = response.take(0)?;
+
+        if let Some(event) = visibility_events.first()
+            && let Some(visibility) = &event.history_visibility {
+                return Ok(visibility.clone());
+            }
+
+        // Default to "shared" if no history visibility event found
+        Ok("shared".to_string())
+    }
+
+    /// Check if room is world readable
+    pub async fn is_room_world_readable(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        let visibility = self.get_room_history_visibility(room_id).await?;
+        Ok(visibility == "world_readable")
+    }
+
+    /// Check room membership for a user
+    pub async fn check_room_membership(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT content.membership
+            FROM room_memberships 
+            WHERE room_id = $room_id AND user_id = $user_id
+            ORDER BY origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct MembershipContent {
+            membership: Option<String>,
+        }
+
+        let membership_events: Vec<MembershipContent> = response.take(0)?;
+
+        if let Some(event) = membership_events.first()
+            && let Some(membership) = &event.membership {
+                return Ok(membership == "join");
+            }
+
+        Ok(false)
+    }
+
+    /// Get room state events for initial sync
+    pub async fn get_room_state_events(&self, room_id: &str) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        let query = "
+            SELECT type, state_key, content, sender, origin_server_ts, event_id
+            FROM room_state_events 
+            WHERE room_id = $room_id
+            ORDER BY origin_server_ts DESC
+            LIMIT 50
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let state_events: Vec<serde_json::Value> = response.take(0)?;
+        Ok(state_events)
+    }
+
+    /// Get room messages for initial sync
+    pub async fn get_room_messages(&self, room_id: &str, limit: u32) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        let query = "
+            SELECT type, content, sender, origin_server_ts, event_id
+            FROM room_timeline_events 
+            WHERE room_id = $room_id AND type = 'm.room.message'
+            ORDER BY origin_server_ts DESC
+            LIMIT $limit
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("limit", limit))
+            .await?;
+
+        let messages: Vec<serde_json::Value> = response.take(0)?;
+        Ok(messages)
     }
 }

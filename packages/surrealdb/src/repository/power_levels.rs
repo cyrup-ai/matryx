@@ -49,8 +49,7 @@ impl<C: Connection> PowerLevelsRepository<C> {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
+        if let Some(content) = events.first().and_then(|e| e.get("content")) {
                 let users = content
                     .get("users")
                     .and_then(|v| v.as_object())
@@ -91,7 +90,6 @@ impl<C: Connection> PowerLevelsRepository<C> {
                     redact: content.get("redact").and_then(|v| v.as_i64()).unwrap_or(50) as i32,
                     invite: content.get("invite").and_then(|v| v.as_i64()).unwrap_or(50) as i32,
                 });
-            }
         }
 
         // Return default power levels if no event found

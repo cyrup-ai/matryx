@@ -5,13 +5,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, extract_matrix_auth};
+use crate::auth::extract_matrix_auth;
 use crate::state::AppState;
+use matryx_surrealdb::repository::{PublicRoomsRepository, PublicRoomsFilter as RepoPublicRoomsFilter};
 
 #[derive(Deserialize)]
 pub struct PublicRoomsFilter {
@@ -75,91 +76,49 @@ pub async fn get(
 
     let since = params.get("since").cloned();
 
-    // Query public rooms from database
-    let query = r#"
-        SELECT room_id, name, topic, canonical_alias, num_joined_members,
-               avatar_url, world_readable, guest_can_join, join_rule, room_type
-        FROM public_rooms
-        ORDER BY num_joined_members DESC
-        LIMIT $limit
-    "#;
+    // Use PublicRoomsRepository for room listing
+    let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
+    let filter = RepoPublicRoomsFilter {
+        limit: Some(limit as u32),
+        since,
+        server: None,
+        include_all_known_networks: None,
+        third_party_instance_id: None,
+    };
 
-    let public_rooms = match state.db.query(query).bind(("limit", limit)).await {
-        Ok(mut result) => {
-            match result.take::<Vec<(
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                i64,
-                Option<String>,
-                bool,
-                bool,
-                String,
-                Option<String>,
-            )>>(0)
-            {
-                Ok(rooms) => rooms,
-                Err(e) => {
-                    error!("Failed to parse public rooms: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                },
-            }
-        },
+    let public_rooms_response = match public_rooms_repo.get_public_rooms(filter.limit, filter.since.as_deref()).await {
+        Ok(response) => response,
         Err(e) => {
-            error!("Failed to query public rooms: {}", e);
+            error!("Failed to get public rooms: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };
 
     // Convert to response format
-    let chunk: Vec<PublicRoom> = public_rooms
+    let chunk: Vec<PublicRoom> = public_rooms_response.chunk
         .into_iter()
-        .map(
-            |(
-                room_id,
-                name,
-                topic,
-                canonical_alias,
-                num_joined_members,
-                avatar_url,
-                world_readable,
-                guest_can_join,
-                join_rule,
-                room_type,
-            )| {
-                PublicRoom {
-                    room_id,
-                    name,
-                    topic,
-                    canonical_alias,
-                    num_joined_members: num_joined_members.max(0) as u64,
-                    avatar_url,
-                    world_readable,
-                    guest_can_join,
-                    join_rule: Some(join_rule),
-                    room_type,
-                }
-            },
-        )
+        .map(|entry| {
+            PublicRoom {
+                room_id: entry.room_id,
+                name: entry.name,
+                topic: entry.topic,
+                canonical_alias: entry.canonical_alias,
+                num_joined_members: entry.num_joined_members as u64,
+                avatar_url: entry.avatar_url,
+                world_readable: entry.world_readable,
+                guest_can_join: entry.guest_can_join,
+                join_rule: Some(entry.join_rule),
+                room_type: entry.room_type,
+            }
+        })
         .collect();
 
-    // Get total count estimate
-    let count_query = "SELECT count() FROM public_rooms GROUP ALL";
-    let total_count = match state.db.query(count_query).await {
-        Ok(mut result) => {
-            match result.take::<Vec<i64>>(0) {
-                Ok(counts) => counts.into_iter().next().unwrap_or(0) as u64,
-                Err(_) => chunk.len() as u64,
-            }
-        },
-        Err(_) => chunk.len() as u64,
-    };
+    let total_count = public_rooms_response.total_room_count_estimate.unwrap_or(chunk.len() as u64);
 
     Ok(Json(PublicRoomsResponse {
         chunk,
-        next_batch: None, // Implement pagination later
-        prev_batch: since,
+        next_batch: public_rooms_response.next_batch,
+        prev_batch: public_rooms_response.prev_batch,
         total_room_count_estimate: Some(total_count),
     }))
 }
@@ -183,116 +142,95 @@ pub async fn post(
 
     let limit = filter.limit.unwrap_or(10).min(100); // Cap at 100
 
-    let mut query = String::from(
-        r#"
-        SELECT room_id, name, topic, canonical_alias, num_joined_members,
-               avatar_url, world_readable, guest_can_join, join_rule, room_type
-        FROM public_rooms
-    "#,
-    );
+    // Handle Matrix specification federation parameters
+    let include_federated = filter.include_all_known_networks.unwrap_or(false);
+    let third_party_filter = filter.third_party_instance_id.as_deref();
+    
+    info!("Public rooms query - federated: {}, third_party_filter: {:?}", 
+          include_federated, third_party_filter);
 
-    let mut conditions = Vec::new();
-    let mut search_term_owned = None;
-    let mut room_types_owned = None;
-
-    // Apply search filter
-    if let Some(room_filter) = &filter.filter {
+    // Use PublicRoomsRepository for room search
+    let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
+    
+    let search_response = if let Some(room_filter) = &filter.filter {
         if let Some(search_term) = &room_filter.generic_search_term {
-            conditions.push("(name CONTAINS $search_term OR topic CONTAINS $search_term)");
-            search_term_owned = Some(search_term.clone());
-        }
-
-        if let Some(room_types) = &room_filter.room_types {
-            if !room_types.is_empty() {
-                conditions.push("room_type IN $room_types");
-                room_types_owned = Some(room_types.clone());
-            }
-        }
-    }
-
-    if !conditions.is_empty() {
-        query.push_str(" WHERE ");
-        query.push_str(&conditions.join(" AND "));
-    }
-
-    query.push_str(" ORDER BY num_joined_members DESC LIMIT $limit");
-
-    let mut db_query = state.db.query(&query);
-
-    if let Some(search_term) = search_term_owned {
-        db_query = db_query.bind(("search_term", search_term));
-    }
-
-    if let Some(room_types) = room_types_owned {
-        db_query = db_query.bind(("room_types", room_types));
-    }
-
-    db_query = db_query.bind(("limit", limit));
-
-    let public_rooms = match db_query.await {
-        Ok(mut result) => {
-            match result.take::<Vec<(
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                i64,
-                Option<String>,
-                bool,
-                bool,
-                String,
-                Option<String>,
-            )>>(0)
-            {
-                Ok(rooms) => rooms,
+            // Search with term
+            match public_rooms_repo.search_public_rooms(search_term, Some(limit as u32)).await {
+                Ok(mut response) => {
+                    // Apply room type filtering post-query (Matrix spec: filter by room types like m.space)
+                    if let Some(allowed_room_types) = &room_filter.room_types {
+                        response.chunk.retain(|room| {
+                            if let Some(room_type) = &room.room_type {
+                                allowed_room_types.contains(room_type)
+                            } else {
+                                // Include rooms with no room_type if "" is in allowed_room_types
+                                allowed_room_types.contains(&String::new())
+                            }
+                        });
+                    }
+                    response
+                },
                 Err(e) => {
-                    error!("Failed to parse filtered public rooms: {}", e);
+                    error!("Failed to search public rooms: {}", e);
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 },
             }
-        },
-        Err(e) => {
-            error!("Failed to query filtered public rooms: {}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        },
+        } else {
+            // No search term, get regular public rooms with filtering
+            match public_rooms_repo.get_public_rooms(Some(limit as u32), filter.since.as_deref()).await {
+                Ok(mut response) => {
+                    // Apply room type filtering post-query
+                    if let Some(allowed_room_types) = &room_filter.room_types {
+                        response.chunk.retain(|room| {
+                            if let Some(room_type) = &room.room_type {
+                                allowed_room_types.contains(room_type)
+                            } else {
+                                allowed_room_types.contains(&String::new())
+                            }
+                        });
+                    }
+                    response
+                },
+                Err(e) => {
+                    error!("Failed to get public rooms: {}", e);
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                },
+            }
+        }
+    } else {
+        // No filter, get regular public rooms
+        match public_rooms_repo.get_public_rooms(Some(limit as u32), filter.since.as_deref()).await {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to get public rooms: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        }
     };
 
     // Convert to response format
-    let chunk: Vec<PublicRoom> = public_rooms
+    let chunk: Vec<PublicRoom> = search_response.chunk
         .into_iter()
-        .map(
-            |(
-                room_id,
-                name,
-                topic,
-                canonical_alias,
-                num_joined_members,
-                avatar_url,
-                world_readable,
-                guest_can_join,
-                join_rule,
-                room_type,
-            )| {
-                PublicRoom {
-                    room_id,
-                    name,
-                    topic,
-                    canonical_alias,
-                    num_joined_members: num_joined_members.max(0) as u64,
-                    avatar_url,
-                    world_readable,
-                    guest_can_join,
-                    join_rule: Some(join_rule),
-                    room_type,
-                }
-            },
-        )
+        .map(|entry| {
+            PublicRoom {
+                room_id: entry.room_id,
+                name: entry.name,
+                topic: entry.topic,
+                canonical_alias: entry.canonical_alias,
+                num_joined_members: entry.num_joined_members as u64,
+                avatar_url: entry.avatar_url,
+                world_readable: entry.world_readable,
+                guest_can_join: entry.guest_can_join,
+                join_rule: Some(entry.join_rule),
+                room_type: entry.room_type,
+            }
+        })
         .collect();
 
     Ok(Json(PublicRoomsResponse {
         chunk,
-        next_batch: None, // Implement pagination later
-        prev_batch: filter.since,
-        total_room_count_estimate: None, // Could be expensive to calculate with filters
+        next_batch: search_response.next_batch,
+        prev_batch: search_response.prev_batch,
+        total_room_count_estimate: search_response.total_room_count_estimate,
     }))
 }

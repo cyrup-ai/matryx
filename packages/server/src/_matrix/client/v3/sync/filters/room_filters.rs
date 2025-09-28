@@ -1,7 +1,7 @@
 use super::basic_filters::apply_event_filter;
 use super::lazy_loading::{apply_cache_aware_lazy_loading_filter, apply_lazy_loading_filter};
 use super::url_filters::apply_contains_url_filter;
-use crate::cache::lazy_loading_cache::LazyLoadingCache;
+
 use crate::state::AppState;
 use matryx_entity::filter::RoomEventFilter;
 use matryx_entity::types::Event;

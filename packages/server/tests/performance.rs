@@ -2,7 +2,6 @@ mod common;
 mod test_config;
 
 use common::integration::performance::*;
-use common::integration::{MatrixTestServer, create_test_room, create_test_user};
 use test_config::TestConfig;
 
 #[tokio::test]

@@ -228,8 +228,8 @@ pub async fn transaction_id_middleware(
                 let mut response = next.run(request).await;
 
                 // Only store successful responses for idempotency
-                if response.status().is_success() {
-                    if let Ok(response_json) = response_to_json(&mut response).await {
+                if response.status().is_success()
+                    && let Ok(response_json) = response_to_json(&mut response).await {
                         // Store the transaction result (ignore errors - idempotency is best effort)
                         let _ = transaction_service
                             .store_transaction(
@@ -240,7 +240,6 @@ pub async fn transaction_id_middleware(
                             )
                             .await;
                     }
-                }
 
                 return Ok(response);
             },
@@ -255,7 +254,7 @@ pub async fn transaction_id_middleware(
 }
 
 /// Configuration for transaction ID handling
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransactionConfig {
     pub cleanup_interval_hours: u64,
     pub retention_days: i64,

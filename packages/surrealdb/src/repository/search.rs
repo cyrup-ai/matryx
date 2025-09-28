@@ -6,6 +6,11 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use crate::repository::RepositoryError;
 
+// Type aliases for complex tuple types to satisfy clippy::type_complexity
+type SearchResultTuple = (String, String, String, String, Option<String>, String, Option<f64>);
+type RoomDataTuple = (String, Option<String>, Option<String>, Option<String>, Option<u64>, Option<bool>, Option<bool>, Option<String>, Option<String>);
+type UserDataTuple = (String, Option<String>, Option<String>, Option<bool>);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub search_categories: SearchCriteria,
@@ -193,8 +198,8 @@ impl SearchRepository {
         );
 
         // Apply additional filters if present
-        if let Some(room_events) = &search_criteria.room_events {
-            if let Some(filter) = &room_events.filter {
+        if let Some(room_events) = &search_criteria.room_events
+            && let Some(filter) = &room_events.filter {
                 if filter.types.is_some() {
                     query.push_str(" AND event_type IN $types");
                 }
@@ -211,7 +216,6 @@ impl SearchRepository {
                     query.push_str(" AND room_id IN $filter_rooms");
                 }
             }
-        }
 
         // Add ordering
         query.push_str(" ORDER BY origin_server_ts DESC");
@@ -226,8 +230,8 @@ impl SearchRepository {
             .bind(("search_term", search_criteria.search_term.clone()));
 
         // Bind additional filter parameters
-        if let Some(room_events) = &search_criteria.room_events {
-            if let Some(filter) = &room_events.filter {
+        if let Some(room_events) = &search_criteria.room_events
+            && let Some(filter) = &room_events.filter {
                 if let Some(types) = &filter.types {
                     db_query = db_query.bind(("types", types.clone()));
                 }
@@ -244,19 +248,10 @@ impl SearchRepository {
                     db_query = db_query.bind(("filter_rooms", rooms.clone()));
                 }
             }
-        }
 
         let mut response = db_query.await.map_err(RepositoryError::Database)?;
 
-        let search_rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<f64>,
-        )> = response.take(0).map_err(RepositoryError::Database)?;
+        let search_rows: Vec<SearchResultTuple> = response.take(0).map_err(RepositoryError::Database)?;
 
         // Convert to search results format
         let mut results = Vec::new();
@@ -318,17 +313,7 @@ impl SearchRepository {
             .await
             .map_err(RepositoryError::Database)?;
 
-        let rooms: Vec<(
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<u64>,
-            Option<bool>,
-            Option<bool>,
-            Option<String>,
-            Option<String>,
-        )> = response.take(0).map_err(RepositoryError::Database)?;
+        let rooms: Vec<RoomDataTuple> = response.take(0).map_err(RepositoryError::Database)?;
 
         Ok(rooms
             .into_iter()
@@ -511,7 +496,7 @@ impl SearchRepository {
         // Index each event
         let mut indexed_count = 0u64;
         for event in events {
-            if let Err(_) = self.index_event_for_search(&event, room_id).await {
+            if (self.index_event_for_search(&event, room_id).await).is_err() {
                 // Continue indexing other events even if one fails
                 continue;
             }
@@ -605,7 +590,7 @@ impl SearchRepository {
             .await
             .map_err(RepositoryError::Database)?;
 
-        let users: Vec<(String, Option<String>, Option<String>, Option<bool>)> =
+        let users: Vec<UserDataTuple> =
             response.take(0).map_err(RepositoryError::Database)?;
 
         let user_count = users.len();

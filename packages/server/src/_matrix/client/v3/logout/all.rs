@@ -5,7 +5,7 @@ use axum::{
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
+
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 

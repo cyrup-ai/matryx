@@ -1,6 +1,7 @@
 use rand;
 use std::collections::HashMap;
 use std::time::Duration;
+use tracing::warn;
 
 /// Performance benchmarking configuration
 pub struct LazyLoadingBenchmarkConfig {
@@ -91,7 +92,10 @@ impl LazyLoadingBenchmarks {
                 .as_secs(),
         };
 
-        let mut results = self.results.lock().unwrap();
+        let mut results = self.results.lock().unwrap_or_else(|poisoned| {
+            warn!("Benchmark results mutex was poisoned, recovering with data");
+            poisoned.into_inner()
+        });
 
         // Maintain sample limit per bucket
         let bucket_samples = results
@@ -138,7 +142,7 @@ impl LazyLoadingPerformanceHistogram {
         let key = format!("{}_{}", room_size_bucket, cache_status);
         self.lazy_loading_duration_histogram
             .entry(key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(duration.as_secs_f64() * 1000.0); // Convert to milliseconds
     }
 
@@ -151,7 +155,7 @@ impl LazyLoadingPerformanceHistogram {
         let key = format!("{}_{}", room_size_bucket, query_type);
         self.db_query_duration_histogram
             .entry(key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(duration.as_secs_f64() * 1000.0); // Convert to milliseconds
     }
 }
@@ -171,7 +175,10 @@ pub struct LazyLoadingBenchmarkAnalysis {
 impl LazyLoadingBenchmarks {
     /// Generate comprehensive performance analysis
     pub fn analyze_performance(&self) -> HashMap<String, LazyLoadingBenchmarkAnalysis> {
-        let results = self.results.lock().unwrap();
+        let results = self.results.lock().unwrap_or_else(|poisoned| {
+            warn!("Benchmark results mutex was poisoned during analysis, recovering with data");
+            poisoned.into_inner()
+        });
         let mut analysis_by_bucket = HashMap::new();
 
         // Group results by room size bucket
@@ -179,7 +186,7 @@ impl LazyLoadingBenchmarks {
         for result in results.iter() {
             bucket_results
                 .entry(result.room_size_bucket.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(result);
         }
 
@@ -255,7 +262,7 @@ impl LazyLoadingBenchmarks {
         }
     }
 
-    fn calculate_percentile(&self, mut values: &[u64], percentile: f64) -> f64 {
+    fn calculate_percentile(&self, values: &[u64], percentile: f64) -> f64 {
         if values.is_empty() {
             return 0.0;
         }
@@ -269,7 +276,10 @@ impl LazyLoadingBenchmarks {
 
     /// Export benchmark data for external analysis
     pub fn export_csv(&self) -> String {
-        let results = self.results.lock().unwrap();
+        let results = self.results.lock().unwrap_or_else(|poisoned| {
+            warn!("Benchmark results mutex was poisoned during CSV export, recovering with data");
+            poisoned.into_inner()
+        });
         let mut csv = "timestamp,room_size_bucket,operation_type,cache_status,db_query_duration_ms,total_duration_ms\n".to_string();
 
         for result in results.iter() {
@@ -289,13 +299,19 @@ impl LazyLoadingBenchmarks {
 
     /// Reset all collected benchmark data
     pub fn reset(&self) {
-        let mut results = self.results.lock().unwrap();
+        let mut results = self.results.lock().unwrap_or_else(|poisoned| {
+            warn!("Benchmark results mutex was poisoned during reset, recovering with data");
+            poisoned.into_inner()
+        });
         results.clear();
     }
 
     /// Get current data collection statistics
     pub fn get_stats(&self) -> (usize, HashMap<String, usize>) {
-        let results = self.results.lock().unwrap();
+        let results = self.results.lock().unwrap_or_else(|poisoned| {
+            warn!("Benchmark results mutex was poisoned during stats collection, recovering with data");
+            poisoned.into_inner()
+        });
         let total = results.len();
 
         let mut by_bucket = HashMap::new();
@@ -314,9 +330,7 @@ static GLOBAL_BENCHMARKS: std::sync::OnceLock<LazyLoadingBenchmarks> = std::sync
 pub fn init_benchmarks(config: LazyLoadingBenchmarkConfig) {
     GLOBAL_BENCHMARKS
         .set(LazyLoadingBenchmarks::new(config))
-        .unwrap_or_else(|_| {
-            // Already initialized, ignore
-        });
+        .unwrap_or(());
 }
 
 pub fn record_lazy_loading_operation(

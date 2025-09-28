@@ -1,4 +1,3 @@
-use matryx_entity::{Event, EventContent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -6,6 +5,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::state::AppState;
+use matryx_surrealdb::repository::{
+    reactions::{ReactionsRepository, ReactionAggregation, ReactionSummary},
+    event::EventRepository,
+    error::RepositoryError,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReactionError {
@@ -19,426 +23,197 @@ pub enum ReactionError {
     ReactionNotFound,
     #[error("Database error: {0}")]
     DatabaseError(String),
+    #[error("Repository error: {0}")]
+    Repository(#[from] RepositoryError),
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ReactionAggregation {
-    pub key: String,
-    pub count: u64,
-    pub users: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ReactionSummary {
-    pub reactions: HashMap<String, ReactionAggregation>,
+/// Statistics about reactions in a room for monitoring and analytics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionStats {
     pub total_reactions: u64,
+    pub unique_reactions: u64,
+    pub top_reactions: HashMap<String, u64>,
+    pub active_users: u64,
 }
 
-pub struct ReactionManager;
+pub struct ReactionManager {
+    reactions_repo: ReactionsRepository<surrealdb::engine::any::Any>,
+    event_repo: EventRepository,
+}
 
 impl ReactionManager {
-    pub fn new() -> Self {
-        Self
+    pub fn new(state: &AppState) -> Self {
+        Self {
+            reactions_repo: ReactionsRepository::new(state.db.clone()),
+            event_repo: EventRepository::new(state.db.clone()),
+        }
     }
 
+    /// Validate that a reaction is allowed
     pub async fn validate_reaction(
         &self,
         target_event_id: &str,
         reaction_key: &str,
         sender: &str,
-        state: &AppState,
     ) -> Result<(), ReactionError> {
-        info!(
-            "Validating reaction '{}' from {} for event {}",
-            reaction_key, sender, target_event_id
-        );
+        info!("Validating reaction {} for event {} by {}", reaction_key, target_event_id, sender);
 
-        // Validate reaction key (emoji or custom)
-        self.validate_reaction_key(reaction_key)?;
+        // Validate reaction key format (basic Unicode emoji or shortcode)
+        if reaction_key.is_empty() || reaction_key.len() > 100 {
+            return Err(ReactionError::InvalidReactionKey(
+                "Reaction key must be 1-100 characters".to_string(),
+            ));
+        }
 
-        // Check target event exists
-        self.get_event(target_event_id, state).await?;
+        // Check if target event exists
+        match self.event_repo.get_by_id(target_event_id).await? {
+            Some(_) => {},
+            None => {
+                warn!("Target event {} not found for reaction", target_event_id);
+                return Err(ReactionError::TargetEventNotFound);
+            }
+        }
 
-        // Check for duplicate reaction from same user
-        let existing = self
-            .get_user_reaction(target_event_id, reaction_key, sender, state)
-            .await?;
-        if existing.is_some() {
-            warn!(
-                "User {} already has reaction '{}' on event {}",
-                sender, reaction_key, target_event_id
-            );
+        // Check for duplicate reaction
+        if self.reactions_repo.has_user_reacted(sender, target_event_id, reaction_key).await? {
+            warn!("User {} already reacted with {} to event {}", sender, reaction_key, target_event_id);
             return Err(ReactionError::DuplicateReaction);
         }
 
-        info!("Reaction validation successful");
+        info!("Reaction validation passed");
         Ok(())
     }
 
+    /// Add a reaction to an event
     pub async fn add_reaction(
         &self,
         target_event_id: &str,
         reaction_key: &str,
         sender: &str,
         room_id: &str,
-        state: &AppState,
     ) -> Result<String, ReactionError> {
-        info!("Adding reaction '{}' from {} for event {}", reaction_key, sender, target_event_id);
+        let reaction_event_id = format!("$reaction_{}_{}", Uuid::new_v4(), target_event_id);
 
-        // Create reaction event
-        let reaction_event_id = format!("${}", Uuid::new_v4());
-        let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-
-        let query = "
-            CREATE room_timeline_events SET
-                event_id = $event_id,
-                room_id = $room_id,
-                sender = $sender,
-                type = 'm.reaction',
-                content = {
-                    'm.relates_to': {
-                        'rel_type': 'm.annotation',
-                        'event_id': $target_event_id,
-                        'key': $reaction_key
-                    }
-                },
-                origin_server_ts = $timestamp,
-                created_at = time::now()
-        ";
-
-        state
-            .db
-            .query(query)
-            .bind(("event_id", reaction_event_id.clone()))
-            .bind(("room_id", room_id.to_string()))
-            .bind(("sender", sender.to_string()))
-            .bind(("target_event_id", target_event_id.to_string()))
-            .bind(("reaction_key", reaction_key.to_string()))
-            .bind(("timestamp", timestamp))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        // Store relation
-        let relation_query = "
-            CREATE event_relations SET
-                event_id = $reaction_event_id,
-                relates_to_event_id = $target_event_id,
-                rel_type = 'm.annotation',
-                room_id = $room_id,
-                sender = $sender,
-                created_at = time::now()
-        ";
-
-        state
-            .db
-            .query(relation_query)
-            .bind(("reaction_event_id", reaction_event_id.clone()))
-            .bind(("target_event_id", target_event_id.to_string()))
-            .bind(("room_id", room_id.to_string()))
-            .bind(("sender", sender.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        // Update aggregation
-        self.update_reaction_aggregation(target_event_id, reaction_key, 1, sender, state)
+        self.reactions_repo
+            .add_reaction(&reaction_event_id, room_id, sender, target_event_id, reaction_key)
             .await?;
 
-        info!("Successfully added reaction {} for event {}", reaction_event_id, target_event_id);
+        info!("Successfully added reaction {} to event {}", reaction_key, target_event_id);
         Ok(reaction_event_id)
     }
 
+    /// Remove a reaction from an event
     pub async fn remove_reaction(
         &self,
         target_event_id: &str,
         reaction_key: &str,
-        user_id: &str,
-        state: &AppState,
+        sender: &str,
     ) -> Result<(), ReactionError> {
-        info!(
-            "Removing reaction '{}' from {} for event {}",
-            reaction_key, user_id, target_event_id
-        );
-
-        // Find the user's reaction event
-        let reaction_event = self
-            .get_user_reaction(target_event_id, reaction_key, user_id, state)
+        self.reactions_repo
+            .remove_reaction(sender, target_event_id, reaction_key)
             .await?;
 
-        if let Some(event) = reaction_event {
-            // Redact the reaction event
-            self.redact_event(&event.event_id, user_id, state).await?;
-
-            // Update aggregation
-            self.update_reaction_aggregation(target_event_id, reaction_key, -1, user_id, state)
-                .await?;
-
-            info!("Successfully removed reaction for event {}", target_event_id);
-        } else {
-            return Err(ReactionError::ReactionNotFound);
-        }
-
+        info!("Successfully removed reaction {} from event {}", reaction_key, target_event_id);
         Ok(())
     }
 
+    /// Get reaction summary for an event
     pub async fn get_reaction_summary(
         &self,
         target_event_id: &str,
-        state: &AppState,
     ) -> Result<ReactionSummary, ReactionError> {
-        let query = "
-            SELECT
-                content.m.relates_to.key as reaction_key,
-                COUNT(*) as count,
-                array::group(sender) as users
-            FROM room_timeline_events e
-            JOIN event_relations r ON e.event_id = r.event_id
-            WHERE r.relates_to_event_id = $target_event_id
-            AND r.rel_type = 'm.annotation'
-            AND e.type = 'm.reaction'
-            GROUP BY content.m.relates_to.key
-        ";
+        let summary = self.reactions_repo
+            .get_reaction_summary(target_event_id)
+            .await?;
 
-        let mut result = state
-            .db
-            .query(query)
-            .bind(("target_event_id", target_event_id.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
+        Ok(summary)
+    }
 
-        let aggregations: Vec<Value> =
-            result.take(0).map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
+    /// Get all reactions by a specific user
+    pub async fn get_user_reactions(
+        &self,
+        user_id: &str,
+        room_id: Option<&str>,
+    ) -> Result<Vec<Value>, ReactionError> {
+        let reactions = self.reactions_repo
+            .get_user_reactions(user_id, room_id)
+            .await?;
 
-        let mut reactions = HashMap::new();
+        Ok(reactions)
+    }
+
+    /// Get reaction statistics for a room using HashMap for aggregation
+    pub async fn get_reaction_stats(
+        &self,
+        room_id: &str,
+    ) -> Result<ReactionStats, ReactionError> {
+        info!("Calculating reaction statistics for room {}", room_id);
+        
+        // Get all reactions for the room and aggregate them
+        let reactions = self.reactions_repo
+            .get_room_reactions(room_id)
+            .await?;
+
+        let mut reaction_counts: HashMap<String, u64> = HashMap::new();
+        let mut users_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut total_reactions = 0u64;
 
-        for agg_data in aggregations {
-            if let (Some(key), Some(count), Some(users)) = (
-                agg_data.get("reaction_key").and_then(|k| k.as_str()),
-                agg_data.get("count").and_then(|c| c.as_u64()),
-                agg_data.get("users").and_then(|u| u.as_array()),
+        // Process reactions and build statistics
+        for reaction in reactions {
+            if let (Some(key), Some(sender)) = (
+                reaction.get("reaction_key").and_then(|v| v.as_str()),
+                reaction.get("sender").and_then(|v| v.as_str())
             ) {
-                let user_list: Vec<String> =
-                    users.iter().filter_map(|u| u.as_str().map(|s| s.to_string())).collect();
-
-                reactions.insert(key.to_string(), ReactionAggregation {
-                    key: key.to_string(),
-                    count,
-                    users: user_list,
-                });
-
-                total_reactions += count;
+                *reaction_counts.entry(key.to_string()).or_insert(0) += 1;
+                users_set.insert(sender.to_string());
+                total_reactions += 1;
             }
         }
 
-        Ok(ReactionSummary { reactions, total_reactions })
-    }
+        let unique_reactions = reaction_counts.len() as u64;
+        let active_users = users_set.len() as u64;
 
-    pub async fn get_user_reactions(
-        &self,
-        target_event_id: &str,
-        user_id: &str,
-        state: &AppState,
-    ) -> Result<Vec<String>, ReactionError> {
-        let query = "
-            SELECT content.m.relates_to.key as reaction_key
-            FROM room_timeline_events e
-            JOIN event_relations r ON e.event_id = r.event_id
-            WHERE r.relates_to_event_id = $target_event_id
-            AND r.rel_type = 'm.annotation'
-            AND e.type = 'm.reaction'
-            AND e.sender = $user_id
-        ";
-
-        let mut result = state
-            .db
-            .query(query)
-            .bind(("target_event_id", target_event_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        let reactions: Vec<Value> =
-            result.take(0).map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        let reaction_keys: Vec<String> = reactions
+        // Keep only top 10 reactions for the response
+        let mut sorted_reactions: Vec<_> = reaction_counts.into_iter().collect();
+        sorted_reactions.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_reactions: HashMap<String, u64> = sorted_reactions
             .into_iter()
-            .filter_map(|r| r.get("reaction_key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+            .take(10)
             .collect();
 
-        Ok(reaction_keys)
+        let stats = ReactionStats {
+            total_reactions,
+            unique_reactions,
+            top_reactions,
+            active_users,
+        };
+
+        info!("Room {} has {} total reactions, {} unique reactions, {} active users", 
+              room_id, stats.total_reactions, stats.unique_reactions, stats.active_users);
+
+        Ok(stats)
     }
 
-    fn validate_reaction_key(&self, key: &str) -> Result<(), ReactionError> {
-        // Basic validation - key should not be empty and should be reasonable length
-        if key.is_empty() {
-            return Err(ReactionError::InvalidReactionKey(
-                "Reaction key cannot be empty".to_string(),
-            ));
-        }
-
-        if key.len() > 100 {
-            return Err(ReactionError::InvalidReactionKey("Reaction key too long".to_string()));
-        }
-
-        // Allow emoji and custom reaction keys
-        // In a full implementation, you might want to validate Unicode emoji sequences
-        Ok(())
-    }
-
-    async fn get_user_reaction(
+    /// Get detailed reaction aggregation data using ReactionAggregation
+    pub async fn get_reaction_aggregation(
         &self,
         target_event_id: &str,
-        reaction_key: &str,
-        user_id: &str,
-        state: &AppState,
-    ) -> Result<Option<Event>, ReactionError> {
-        let query = "
-            SELECT e.* FROM room_timeline_events e
-            JOIN event_relations r ON e.event_id = r.event_id
-            WHERE r.relates_to_event_id = $target_event_id
-            AND r.rel_type = 'm.annotation'
-            AND e.type = 'm.reaction'
-            AND e.sender = $user_id
-            AND content.m.relates_to.key = $reaction_key
-            LIMIT 1
-        ";
+    ) -> Result<Vec<ReactionAggregation>, ReactionError> {
+        info!("Getting reaction aggregation for event {}", target_event_id);
+        
+        let aggregations = self.reactions_repo
+            .get_reaction_aggregations(target_event_id)
+            .await?;
 
-        let mut result = state
-            .db
-            .query(query)
-            .bind(("target_event_id", target_event_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .bind(("reaction_key", reaction_key.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        let events: Vec<Value> =
-            result.take(0).map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        if let Some(event_data) = events.first() {
-            let event = self.value_to_event(event_data.clone())?;
-            Ok(Some(event))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn get_event(&self, event_id: &str, state: &AppState) -> Result<Event, ReactionError> {
-        let query = "
-            SELECT event_id, room_id, sender, content, origin_server_ts, type
-            FROM room_timeline_events
-            WHERE event_id = $event_id
-            LIMIT 1
-        ";
-
-        let mut result = state
-            .db
-            .query(query)
-            .bind(("event_id", event_id.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        let events: Vec<Value> =
-            result.take(0).map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        if let Some(event_data) = events.first() {
-            self.value_to_event(event_data.clone())
-        } else {
-            Err(ReactionError::TargetEventNotFound)
-        }
-    }
-
-    fn value_to_event(&self, event_data: Value) -> Result<Event, ReactionError> {
-        Ok(Event::new(
-            event_data["event_id"].as_str().unwrap_or("").to_string(),
-            event_data["sender"].as_str().unwrap_or("").to_string(),
-            event_data["origin_server_ts"].as_u64().unwrap_or(0) as i64,
-            event_data["type"].as_str().unwrap_or("").to_string(),
-            event_data["room_id"].as_str().unwrap_or("").to_string(),
-            EventContent::unknown(event_data["content"].clone()),
-        ))
-    }
-
-    async fn update_reaction_aggregation(
-        &self,
-        target_event_id: &str,
-        reaction_key: &str,
-        delta: i64,
-        user_id: &str,
-        state: &AppState,
-    ) -> Result<(), ReactionError> {
-        // Update or create aggregation record
-        let query = "
-            UPDATE reaction_aggregations SET
-                count = math::max(0, count + $delta),
-                users = IF($delta > 0,
-                    array::union(users, [$user_id]),
-                    array::difference(users, [$user_id])
-                ),
-                updated_at = time::now()
-            WHERE target_event_id = $target_event_id AND reaction_key = $reaction_key
-            ELSE CREATE reaction_aggregations SET
-                id = rand::uuid(),
-                target_event_id = $target_event_id,
-                reaction_key = $reaction_key,
-                count = math::max(0, $delta),
-                users = IF($delta > 0, [$user_id], []),
-                created_at = time::now(),
-                updated_at = time::now()
-        ";
-
-        state
-            .db
-            .query(query)
-            .bind(("target_event_id", target_event_id.to_string()))
-            .bind(("reaction_key", reaction_key.to_string()))
-            .bind(("delta", delta))
-            .bind(("user_id", user_id.to_string()))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn redact_event(
-        &self,
-        event_id: &str,
-        redactor_id: &str,
-        state: &AppState,
-    ) -> Result<(), ReactionError> {
-        let redaction_event_id = format!("${}", Uuid::new_v4());
-        let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-
-        let query = "
-            CREATE room_timeline_events SET
-                event_id = $redaction_event_id,
-                room_id = (SELECT room_id FROM room_timeline_events WHERE event_id = $event_id LIMIT 1),
-                sender = $redactor_id,
-                type = 'm.room.redaction',
-                content = {
-                    'reason': 'Reaction removed'
-                },
-                redacts = $event_id,
-                origin_server_ts = $timestamp,
-                created_at = time::now()
-        ";
-
-        state
-            .db
-            .query(query)
-            .bind(("redaction_event_id", redaction_event_id))
-            .bind(("event_id", event_id.to_string()))
-            .bind(("redactor_id", redactor_id.to_string()))
-            .bind(("timestamp", timestamp))
-            .await
-            .map_err(|e| ReactionError::DatabaseError(e.to_string()))?;
-
-        Ok(())
+        Ok(aggregations)
     }
 }
 
 impl Default for ReactionManager {
     fn default() -> Self {
-        Self::new()
+        // This is a placeholder - in practice, this should be constructed with proper state
+        panic!("ReactionManager must be constructed with AppState using new()")
     }
 }
+
+// Re-export types for convenience - removed duplicate imports

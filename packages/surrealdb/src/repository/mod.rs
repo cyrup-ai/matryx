@@ -1,6 +1,7 @@
 pub mod account_data;
 pub mod auth;
 pub mod auth_service;
+pub mod bridge;
 pub mod capabilities;
 pub mod captcha;
 pub mod client_api_service;
@@ -9,12 +10,16 @@ pub mod crypto;
 pub mod crypto_service;
 #[cfg(test)]
 pub mod crypto_tests;
+pub mod database_health;
 pub mod device;
 pub mod directory;
 pub mod edu;
 pub mod error;
 pub mod event;
+pub mod event_replacement;
+pub mod reactions;
 pub mod federation;
+pub mod federation_media_trait;
 // pub mod federation_management;
 // pub mod federation_service;
 pub mod crypto_keys;
@@ -22,10 +27,13 @@ pub mod filter;
 pub mod infrastructure_service;
 pub mod key_backup;
 pub mod key_server;
+pub mod keys;
+// pub mod matrix_service; // Disabled due to compilation errors - experimental code not yet used
 pub mod media;
 pub mod media_service;
 pub mod membership;
 pub mod mention;
+pub mod messaging;
 pub mod metrics;
 pub mod monitoring;
 pub mod monitoring_service;
@@ -35,6 +43,7 @@ pub mod pdu;
 pub mod performance;
 pub mod power_levels;
 pub mod presence;
+pub mod profile;
 pub mod profile_service;
 pub mod public_rooms;
 pub mod push;
@@ -43,7 +52,7 @@ pub mod push_notification;
 pub mod push_rule;
 pub mod push_service;
 pub mod pusher;
-pub mod reactions;
+pub mod receipt;
 pub mod registration;
 pub mod relations;
 pub mod reports;
@@ -60,9 +69,12 @@ pub mod server_notices;
 pub mod session;
 // pub mod supporting_systems;
 pub mod sync;
+pub mod sync_service;
+pub mod room_discovery_service;
 pub mod tags;
 pub mod third_party;
 pub mod third_party_invite;
+pub mod third_party_service;
 pub mod third_party_validation_session;
 pub mod thread;
 pub mod threads;
@@ -75,6 +87,7 @@ pub mod websocket;
 pub use account_data::*;
 pub use auth::*;
 pub use auth_service::*;
+pub use bridge::*;
 pub use capabilities::CapabilitiesResponse as ServerCapabilitiesResponse;
 pub use capabilities::{CapabilitiesRepository, RoomVersionCapabilities, ServerCapabilities};
 pub use captcha::*;
@@ -99,6 +112,7 @@ pub use crypto::OneTimeKey as CryptoOneTimeKey;
 pub use crypto::{CryptoRepository, Signature as CryptoSignature};
 pub use crypto_service::CryptoService;
 pub use crypto_service::DeviceKey as CryptoServiceDeviceKey;
+pub use database_health::{DatabaseHealthRepository, DatabaseHealthStatus};
 pub use device::DeviceRepository;
 pub use device::OneTimeKey as DeviceOneTimeKey;
 pub use directory::{DirectoryRepository};
@@ -106,17 +120,31 @@ pub use edu::*;
 pub use error::*;
 pub use event::{EventRepository, EventValidationResult, SignatureValidation as EventSignatureValidation, EventContext as EventEventContext, EventReport as EventEventReport};
 pub use federation::{FederationRepository, FederationValidationResult, SignatureValidation as FederationSignatureValidation, FederationSettings as FederationFederationSettings, JoinResult as FederationJoinResult};
+pub use federation_media_trait::FederationMediaClientTrait;
 // pub use federation_management::*;
 // pub use federation_service::*;
-pub use crypto_keys::*;
+pub use crypto_keys::{
+    DeviceKeysQuery, 
+    DeviceKeysResponse, 
+    OneTimeKeysClaim, 
+    OneTimeKeysResponse, 
+    CrossSigningKey, 
+    CrossSigningKeys, 
+    CryptoKeysRepository
+};
+// Re-export canonical DeviceKeys from entity package
+pub use matryx_entity::types::DeviceKeys;
 pub use filter::*;
 pub use infrastructure_service::*;
 pub use key_backup::*;
 pub use key_server::*;
+pub use keys::*;
+// pub use matrix_service::*; // Disabled - experimental code not yet used
 pub use media::*;
 pub use media_service::*;
 pub use membership::*;
 pub use mention::*;
+pub use messaging::{MessagingRepository, ToDeviceMessage as MessagingToDeviceMessage};
 pub use metrics::*;
 pub use monitoring::*;
 pub use monitoring_service::*;
@@ -126,14 +154,16 @@ pub use pdu::*;
 pub use performance::*;
 pub use power_levels::*;
 pub use presence::*;
+pub use profile::*;
 pub use profile_service::*;
-pub use public_rooms::*;
+
 pub use push::{PushRepository, PushRule, PushCondition as PushPushCondition};
 pub use push_gateway::*;
 pub use push_notification::*;
 pub use push_rule::*;
 pub use push_service::{PushService, PushAction as PushServicePushAction};
 pub use pusher::{PusherRepository, RoomMember as PusherRoomMember};
+pub use receipt::*;
 pub use reactions::*;
 pub use registration::*;
 pub use relations::*;
@@ -144,20 +174,28 @@ pub use room_keys::*;
 // pub use room_authorization::*;
 pub use room_join::{RoomJoinService, JoinResult as RoomJoinJoinResult};
 pub use room_management::*;
-pub use room_operations::{RoomOperationsService, RoomMember as RoomOperationsRoomMember};
+pub use room_operations::{
+    RoomOperationsService, RoomMember as RoomOperationsRoomMember,
+    MembershipAction, RoomAction, MembershipEvent, KickResult, BanResult, UnbanResult,
+    InviteResult, JoinResult, LeaveResult, ForgetResult
+};
 pub use search::{SearchRepository, RoomEventFilter as SearchRoomEventFilter};
 pub use server_notice::*;
 pub use server_notices::*;
 pub use session::*;
 // pub use supporting_systems::*;
-pub use sync::{SyncRepository, RoomEventFilter as SyncRoomEventFilter};
+pub use sync::{SyncRepository, RoomEventFilter as SyncRoomEventFilter, TimelineEvent, StateEvent, EphemeralEvent, AccountDataEvent, PresenceEvent, PresenceState};
+pub use sync_service::SyncService;
+pub use public_rooms::{PublicRoomsRepository, PublicRoomsResponse, PublicRoomEntry, PublicRoomsFilter, RoomDirectoryVisibility, RoomDirectoryInfo, PublicRoomInfo};
+pub use room_discovery_service::{RoomDiscoveryService, RoomStatistics};
 pub use tags::*;
 pub use third_party::*;
 pub use third_party_invite::*;
+pub use third_party_service::*;
 pub use third_party_validation_session::*;
 pub use thread::*;
 pub use threads::*;
-pub use to_device::*;
+pub use to_device::{ToDeviceRepository, ToDeviceMessage};
 pub use transaction::*;
 pub use uia::*;
 pub use user::*;

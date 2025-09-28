@@ -4,11 +4,11 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use uuid::Uuid;
 
-use crate::{AppState, auth::MatrixSessionService};
+
+
+
+use crate::AppState;
 use matryx_surrealdb::repository::ProfileManagementService;
 
 #[derive(Deserialize)]
@@ -52,10 +52,10 @@ pub async fn post(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    if let Some(score) = request.score {
-        if score < -100 || score > 0 {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    if let Some(score) = request.score
+        && !(-100..=0).contains(&score)
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Prevent self-reporting
@@ -66,11 +66,7 @@ pub async fn post(
     let profile_service = ProfileManagementService::new(state.db.clone());
 
     // Create report content with score if provided
-    let content = if let Some(score) = request.score {
-        Some(serde_json::json!({ "score": score }))
-    } else {
-        None
-    };
+    let content = request.score.map(|score| serde_json::json!({ "score": score }));
 
     // Report user using ProfileManagementService
     match profile_service

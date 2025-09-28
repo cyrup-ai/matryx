@@ -14,10 +14,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
-use matryx_surrealdb::repository::{
-    RepositoryError,
-    device::DeviceRepository,
-};
+use matryx_surrealdb::repository::device::DeviceRepository;
 
 /// Matrix Client-Server API v1.11 device list response
 #[derive(Serialize)]

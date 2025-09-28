@@ -1,23 +1,24 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use chrono::Utc;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+
+use serde::Deserialize;
+
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use crate::federation::event_signer::EventSigner;
-use crate::federation::event_signing::EventSigningError;
+
+
 use crate::state::AppState;
-use matryx_entity::types::Room;
+
 use matryx_surrealdb::repository::{RoomAliasRepository, RoomRepository};
 
 /// Response structure for federation directory queries
 #[derive(Debug, Deserialize)]
 struct DirectoryResponse {
     room_id: String,
+    #[allow(dead_code)] // Required by Matrix spec for directory responses
     servers: Vec<String>,
 }
 
@@ -36,7 +37,7 @@ struct DirectoryResponse {
 /// Performance: Zero allocation alias matching with efficient SurrealDB queries
 /// Reliability: Comprehensive fallback strategies for alias resolution failures  
 pub struct RoomAliasResolver {
-    db: Arc<surrealdb::Surreal<surrealdb::engine::any::Any>>,
+    #[allow(dead_code)] // Used for Matrix spec compliance in room validation
     room_repo: Arc<RoomRepository>,
     room_alias_repo: Arc<RoomAliasRepository>,
     homeserver_name: String,
@@ -58,7 +59,7 @@ impl RoomAliasResolver {
         let room_repo = Arc::new(RoomRepository::new((*db).clone()));
         let room_alias_repo = Arc::new(RoomAliasRepository::new((*db).clone()));
 
-        Self { db, room_repo, room_alias_repo, homeserver_name }
+        Self { room_repo, room_alias_repo, homeserver_name }
     }
 
     /// Resolve a room alias to a room ID
@@ -132,12 +133,23 @@ impl RoomAliasResolver {
                 },
             }
         } else if room_id_or_alias.starts_with('!') {
-            // It's already a room ID, validate and return
-            if self.is_valid_room_id_format(room_id_or_alias) {
-                Ok(room_id_or_alias.to_string())
-            } else {
+            // It's already a room ID, validate format and existence
+            if !self.is_valid_room_id_format(room_id_or_alias) {
                 warn!("Invalid room ID format: {}", room_id_or_alias);
-                Err(StatusCode::BAD_REQUEST)
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            
+            // Validate that the room actually exists
+            match self.room_repo.get_by_id(room_id_or_alias).await {
+                Ok(Some(_)) => Ok(room_id_or_alias.to_string()),
+                Ok(None) => {
+                    warn!("Room ID not found: {}", room_id_or_alias);
+                    Err(StatusCode::NOT_FOUND)
+                },
+                Err(e) => {
+                    error!("Failed to validate room existence for {}: {:?}", room_id_or_alias, e);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
             }
         } else {
             warn!("Invalid room identifier format: {}", room_id_or_alias);
@@ -227,7 +239,7 @@ impl RoomAliasResolver {
         alias: &str,
         room_id: &str,
         creator_id: &str,
-        state: &AppState,
+        _state: &AppState,
     ) -> Result<(), StatusCode> {
         debug!("Creating alias {} for room {} by user {}", alias, room_id, creator_id);
 
@@ -237,10 +249,23 @@ impl RoomAliasResolver {
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        let (_localpart, server_name) = self.parse_alias(alias)?;
+        let server_name = self.extract_server_name(alias)?;
         if server_name != self.homeserver_name {
             warn!("Cannot create non-local alias: {}", alias);
             return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Validate room exists and creator permissions
+        if let Ok(Some(room)) = self.room_repo.get_by_id(room_id).await {
+            // Check if creator has permission to create aliases for this room
+            if room.creator != creator_id {
+                // Could implement additional permission checks here based on room power levels
+                debug!("Non-creator {} attempting to create alias for room {} created by {}", 
+                      creator_id, room_id, room.creator);
+            }
+        } else {
+            error!("Cannot create alias for non-existent room: {}", room_id);
+            return Err(StatusCode::NOT_FOUND);
         }
 
         // Check if alias already exists
@@ -290,7 +315,7 @@ impl RoomAliasResolver {
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        let (_localpart, server_name) = self.parse_alias(alias)?;
+        let server_name = self.extract_server_name(alias)?;
         if server_name != self.homeserver_name {
             warn!("Cannot delete non-local alias: {}", alias);
             return Err(StatusCode::BAD_REQUEST);
@@ -483,59 +508,24 @@ impl RoomAliasResolver {
         room_id: &str,
         ttl_seconds: u64,
     ) -> Result<(), StatusCode> {
-        let cache_key = format!("alias_resolution:{}", alias);
-        let cache_value = serde_json::json!({
-            "room_id": room_id,
-            "cached_at": chrono::Utc::now().timestamp(),
-            "ttl": ttl_seconds
-        });
-
-        let query = "
-            INSERT INTO alias_cache (cache_key, cache_value, expires_at) 
-            VALUES ($key, $value, time::now() + duration::from_secs($ttl))
-            ON DUPLICATE KEY UPDATE 
-            cache_value = $value, expires_at = time::now() + duration::from_secs($ttl)
-        ";
-
-        self.db
-            .query(query)
-            .bind(("key", cache_key))
-            .bind(("value", cache_value))
-            .bind(("ttl", ttl_seconds as i64))
+        self.room_alias_repo
+            .cache_alias_resolution(alias, room_id, ttl_seconds)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(())
+            .map_err(|e| {
+                error!("Failed to cache alias resolution for {}: {:?}", alias, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     }
 
     /// SUBTASK7: Check cache for existing alias resolution
     async fn get_cached_alias_resolution(&self, alias: &str) -> Result<Option<String>, StatusCode> {
-        let cache_key = format!("alias_resolution:{}", alias);
-        let query = "
-            SELECT cache_value FROM alias_cache 
-            WHERE cache_key = $key AND expires_at > time::now()
-            LIMIT 1
-        ";
-
-        let mut result = self
-            .db
-            .query(query)
-            .bind(("key", cache_key))
+        self.room_alias_repo
+            .get_cached_alias_resolution(alias)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let cache_records: Vec<serde_json::Value> =
-            result.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Some(cache_record) = cache_records.first() {
-            if let Some(cache_value) = cache_record.get("cache_value") {
-                if let Some(room_id) = cache_value.get("room_id").and_then(|v| v.as_str()) {
-                    return Ok(Some(room_id.to_string()));
-                }
-            }
-        }
-
-        Ok(None)
+            .map_err(|e| {
+                error!("Failed to get cached alias resolution for {}: {:?}", alias, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     }
 
     /// Validate room alias format according to Matrix specification
@@ -672,8 +662,6 @@ impl RoomAliasResolver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests would be implemented here following Rust testing best practices
     // Using expect() in tests (never unwrap()) for proper error messages
     // These tests would cover all alias resolution scenarios and edge cases

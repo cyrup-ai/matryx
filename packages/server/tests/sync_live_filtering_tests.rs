@@ -24,7 +24,7 @@ async fn setup_test_matrix_server() -> TestServer {
     TestServer { /* implement basic test server structure */ }
 }
 
-async fn create_test_user(server: &TestServer) -> String {
+async fn create_test_user(_server: &TestServer) -> String {
     // Return mock access token
     "test_access_token".to_string()
 }
@@ -40,18 +40,18 @@ fn create_test_matrix_filter() -> matryx_entity::types::MatrixFilter {
 }
 
 async fn create_filter_via_api(
-    server: &TestServer,
-    token: &str,
-    filter: &matryx_entity::types::MatrixFilter,
+    _server: &TestServer,
+    _token: &str,
+    _filter: &matryx_entity::types::MatrixFilter,
 ) -> String {
     // Return mock filter ID
     "test_filter_id".to_string()
 }
 
 async fn start_sync_with_filter(
-    server: &TestServer,
-    token: &str,
-    filter_id: &str,
+    _server: &TestServer,
+    _token: &str,
+    _filter_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Mock sync start - return success
     Ok(())
@@ -71,10 +71,10 @@ fn modify_test_filter(
 }
 
 async fn update_filter_via_api(
-    server: &TestServer,
-    token: &str,
-    filter_id: &str,
-    filter: &matryx_entity::types::MatrixFilter,
+    _server: &TestServer,
+    _token: &str,
+    _filter_id: &str,
+    _filter: &matryx_entity::types::MatrixFilter,
 ) {
     // Mock filter update via API
 }

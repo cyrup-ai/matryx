@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::env;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Support contact information for the Matrix homeserver
 #[derive(Debug, Clone, Serialize, Deserialize)]

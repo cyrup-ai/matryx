@@ -1,13 +1,10 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::Response,
 };
-use serde_json::Value;
-use std::collections::HashMap;
-use tokio::fs;
-use tokio_util::io::ReaderStream;
+
 
 use crate::AppState;
 use matryx_surrealdb::repository::{

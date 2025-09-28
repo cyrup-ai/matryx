@@ -3,15 +3,15 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Serialize;
+use std::sync::Arc;
 use tracing::error;
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::MembershipRepository;
 
 #[derive(Serialize)]
 pub struct JoinedRoomsResponse {
@@ -38,21 +38,9 @@ pub async fn get(
         _ => return Err(StatusCode::FORBIDDEN),
     };
 
-    let query = "
-        SELECT room_id 
-        FROM membership 
-        WHERE user_id = $user_id 
-          AND membership = 'join'
-        ORDER BY updated_at DESC
-    ";
-
-    let mut response = state.db.query(query).bind(("user_id", user_id)).await.map_err(|e| {
-        error!("Database query failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let joined_rooms: Vec<String> = response.take(0).map_err(|e| {
-        error!("Failed to parse query result: {}", e);
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let joined_rooms = membership_repo.get_joined_rooms_for_user(&user_id).await.map_err(|e| {
+        error!("Failed to get joined rooms: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

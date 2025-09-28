@@ -170,6 +170,7 @@ impl NotificationRepository {
         user_id: &str,
         from: Option<&str>,
         limit: Option<u32>,
+        only: Option<&str>,
     ) -> Result<NotificationResponse, RepositoryError> {
         let mut query = String::from("SELECT * FROM notifications WHERE user_id = $user_id");
 
@@ -182,6 +183,13 @@ impl NotificationRepository {
                 db_query = db_query.bind(("from_time", from_time));
             }
         }
+
+        // Filter by notification type if 'only' parameter is provided
+        if let Some("highlight") = only {
+            query.push_str(" AND highlight = true");
+        }
+        // For other filter types, we can add them as needed
+        // For now, ignore unknown filter types to maintain compatibility
 
         query.push_str(" ORDER BY created_at DESC");
 

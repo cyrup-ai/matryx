@@ -1,7 +1,5 @@
 use super::{MatrixTestServer, create_test_room, create_test_user};
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use tokio::time::{Duration, timeout};
 
 /// Federation Testing for Multi-Homeserver scenarios
 pub struct FederationTest {
@@ -26,6 +24,10 @@ impl FederationTest {
         let room_id = create_test_room(&self.server1, &user1_token, "Federation Test Room").await?;
 
         // Test federation invite (simulated - in real federation this would be cross-server)
+        // Validate the user IDs are properly formatted for federation
+        assert!(user1_id.starts_with('@'), "User 1 ID should be properly formatted: {}", user1_id);
+        assert!(user2_id.starts_with('@'), "User 2 ID should be properly formatted: {}", user2_id);
+        
         let invite_body = json!({
             "user_id": user2_id
         });
@@ -34,6 +36,13 @@ impl FederationTest {
             .server1
             .test_authenticated_endpoint("POST", &path, &user1_token, Some(invite_body))
             .await;
+
+        // Validate that user2_token works for authentication on server2
+        let whoami_response = self
+            .server2
+            .test_authenticated_endpoint("GET", "/_matrix/client/v3/account/whoami", &user2_token, None)
+            .await;
+        assert_eq!(whoami_response.status_code(), 200, "User 2 should be able to authenticate on server 2");
 
         // In a real federation test, this would involve actual server-to-server communication
         // For now, we test that the invite endpoint responds correctly

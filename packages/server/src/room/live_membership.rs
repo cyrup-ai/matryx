@@ -1,18 +1,14 @@
-use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::config::ServerConfig;
 use crate::room::{JoinRulesValidator, PowerLevelValidator, RoomAliasResolver};
-use crate::state::AppState;
-use matryx_entity::types::{Event, Membership, MembershipState, Room};
+use matryx_entity::types::{Membership, MembershipState};
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 
 /// Real-time Membership Updates Service with Advanced Authorization
@@ -44,7 +40,7 @@ pub struct LiveMembershipService {
 #[derive(Debug, Clone, Serialize)]
 pub struct MembershipUpdate {
     /// Update type (create, update, delete)
-    pub action: MembershipAction,
+    pub action: MembershipOperation,
     /// Room ID where membership changed
     pub room_id: String,
     /// User whose membership changed
@@ -61,9 +57,9 @@ pub struct MembershipUpdate {
     pub timestamp: i64,
 }
 
-/// Type of membership action
+/// Type of membership database operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MembershipAction {
+pub enum MembershipOperation {
     Create,
     Update,
     Delete,
@@ -95,7 +91,12 @@ impl LiveMembershipService {
         // Initialize authorization components
         let join_rules_validator = Arc::new(JoinRulesValidator::new(db.clone()));
         let power_level_validator = Arc::new(PowerLevelValidator::new(db.clone()));
-        let homeserver_name = ServerConfig::get().homeserver_name.clone();
+        let homeserver_name = ServerConfig::get()
+            .map(|config| config.homeserver_name.clone())
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to get server config in LiveMembershipService: {:?}", e);
+                "localhost".to_string()
+            });
 
         let alias_resolver = Arc::new(RoomAliasResolver::new(db.clone(), homeserver_name.clone()));
 
@@ -131,17 +132,8 @@ impl LiveMembershipService {
 
         // Create comprehensive LiveQuery for all membership changes in rooms where user is joined
         let mut stream = self
-            .db
-            .query(
-                r#"
-                LIVE SELECT *, meta::id(id) as membership_id FROM membership
-                WHERE room_id IN (
-                    SELECT VALUE room_id FROM membership 
-                    WHERE user_id = $user_id AND membership IN ['join', 'invite']
-                )
-            "#,
-            )
-            .bind(("user_id", user_id.to_string()))
+            .membership_repo
+            .create_user_membership_live_query(user_id)
             .await
             .map_err(|e| {
                 error!("Failed to create membership LiveQuery for user {}: {}", user_id, e);
@@ -216,14 +208,8 @@ impl LiveMembershipService {
 
         // Create LiveQuery for membership changes in this specific room
         let mut stream = self
-            .db
-            .query(
-                r#"
-                LIVE SELECT *, meta::id(id) as membership_id FROM membership
-                WHERE room_id = $room_id
-            "#,
-            )
-            .bind(("room_id", room_id.to_string()))
+            .membership_repo
+            .create_room_membership_live_query(room_id)
             .await
             .map_err(|e| {
                 error!("Failed to create room membership LiveQuery for room {}: {}", room_id, e);
@@ -279,9 +265,9 @@ impl LiveMembershipService {
     ) -> Result<Option<FilteredMembershipUpdate>, StatusCode> {
         let membership = notification.data;
         let action = match notification.action {
-            surrealdb::Action::Create => MembershipAction::Create,
-            surrealdb::Action::Update => MembershipAction::Update,
-            surrealdb::Action::Delete => MembershipAction::Delete,
+            surrealdb::Action::Create => MembershipOperation::Create,
+            surrealdb::Action::Update => MembershipOperation::Update,
+            surrealdb::Action::Delete => MembershipOperation::Delete,
             _ => return Ok(None), // Ignore other actions
         };
 
@@ -441,6 +427,7 @@ impl LiveMembershipService {
                     matryx_surrealdb::repository::room::JoinRules::Public => "public",
                     matryx_surrealdb::repository::room::JoinRules::Invite => "invite",
                     matryx_surrealdb::repository::room::JoinRules::Knock => "knock",
+                    matryx_surrealdb::repository::room::JoinRules::Private => "private",
                     matryx_surrealdb::repository::room::JoinRules::Restricted => "restricted",
                 };
                 Ok(join_rule_str.to_string())
@@ -502,15 +489,12 @@ impl LiveMembershipService {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+        // Log the room IDs for debugging and monitoring
+        debug!("Creating live membership stream for rooms: {}", room_ids_json);
+
         let mut stream = self
-            .db
-            .query(
-                r#"
-                LIVE SELECT *, meta::id(id) as membership_id FROM membership
-                WHERE room_id IN $room_ids
-            "#,
-            )
-            .bind(("room_ids", room_ids))
+            .membership_repo
+            .create_batched_membership_live_query(room_ids)
             .await
             .map_err(|e| {
                 error!("Failed to create batched membership LiveQuery: {}", e);
@@ -588,8 +572,6 @@ impl Clone for LiveMembershipService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests would be implemented here following Rust testing best practices
     // Using expect() in tests (never unwrap()) for proper error messages
     // These tests would cover all LiveQuery scenarios and authorization filtering

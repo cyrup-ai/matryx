@@ -12,23 +12,25 @@ use crate::_matrix::client::v3::sync::data::{
     apply_account_data_filter,
     apply_presence_filter,
     convert_events_to_matrix_format,
-    get_default_timeline_events,
     get_invited_member_count,
+    get_invited_rooms,
     get_joined_member_count,
+    get_joined_rooms,
+    get_left_rooms,
     get_room_ephemeral_events,
     get_room_heroes,
     get_room_state_events,
+    get_room_timeline_events,
     get_user_account_data,
-    get_user_memberships,
     get_user_presence_events,
     set_user_presence,
 };
 use crate::_matrix::client::v3::sync::filters::{
     apply_event_fields_filter,
     apply_lazy_loading_filter,
-    apply_room_filter,
     get_filtered_timeline_events,
     resolve_filter,
+    apply_room_event_filter,
 };
 use crate::_matrix::client::v3::sync::streaming::get_sse_stream;
 use crate::auth::AuthenticatedUser;
@@ -41,10 +43,7 @@ use matryx_entity::types::{
     JoinedRoomResponse,
     LeftRoomResponse,
     MatrixFilter,
-    Membership,
-    MembershipState,
     PresenceResponse,
-    Room,
     RoomSummary,
     RoomsResponse,
     StateResponse,
@@ -121,51 +120,50 @@ pub async fn get_json_sync(
     // Generate batch token - in production this would be more sophisticated
     let next_batch = format!("s{}", Utc::now().timestamp_millis());
 
-    // Get user's room memberships
-    let memberships = get_user_memberships(&state, user_id)
+    // Get user's room memberships by state
+    let joined_memberships = get_joined_rooms(&state, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let invited_memberships = get_invited_rooms(&state, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let left_memberships = get_left_rooms(&state, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Apply filter to memberships
-    let filtered_memberships = if let Some(ref filter) = applied_filter {
-        apply_room_filter(memberships, filter)
-    } else {
-        memberships
-    };
-
-    // Separate rooms by membership state
+    // Build room responses
     let mut joined_rooms = HashMap::new();
     let mut invited_rooms = HashMap::new();
     let mut left_rooms = HashMap::new();
 
-    for membership in filtered_memberships {
-        match membership.membership {
-            MembershipState::Join => {
-                let room_response = build_joined_room_response(
-                    &state,
-                    &membership.room_id,
-                    user_id,
-                    &query,
-                    applied_filter.as_ref(),
-                )
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                joined_rooms.insert(membership.room_id, room_response);
-            },
-            MembershipState::Invite => {
-                let room_response = build_invited_room_response(&state, &membership.room_id)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                invited_rooms.insert(membership.room_id, room_response);
-            },
-            MembershipState::Leave => {
-                let room_response = build_left_room_response(&state, &membership.room_id, user_id)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                left_rooms.insert(membership.room_id, room_response);
-            },
-            _ => {}, // Skip ban, knock for now
-        }
+    // Process joined rooms
+    for membership in joined_memberships {
+        let room_response = build_joined_room_response(
+            &state,
+            &membership.room_id,
+            user_id,
+            &query,
+            applied_filter.as_ref(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        joined_rooms.insert(membership.room_id, room_response);
+    }
+
+    // Process invited rooms
+    for membership in invited_memberships {
+        let room_response = build_invited_room_response(&state, &membership.room_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        invited_rooms.insert(membership.room_id, room_response);
+    }
+
+    // Process left rooms
+    for membership in left_memberships {
+        let room_response = build_left_room_response(&state, &membership.room_id, user_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        left_rooms.insert(membership.room_id, room_response);
     }
 
     // Apply presence filtering
@@ -223,19 +221,24 @@ pub async fn build_joined_room_response(
     _query: &SyncQuery,
     filter: Option<&MatrixFilter>,
 ) -> Result<JoinedRoomResponse, Box<dyn std::error::Error + Send + Sync>> {
-    // Get room information
-    let room: Option<Room> = state.db.select(("room", room_id)).await?;
-    let _room = room.ok_or("Room not found")?;
+    // Get room information using repository pattern
+    use matryx_surrealdb::repository::RoomRepository;
+    let room_repo = RoomRepository::new(state.db.clone());
+    let _room = room_repo.get_by_id(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        .ok_or("Room not found")?;
 
     // Extract room filter for this room
     let room_filter = filter.and_then(|f| f.room.as_ref());
 
-    // Get timeline events with filter-aware database queries
+    // Get timeline events with enhanced room filtering including URL and lazy loading
     let timeline_events =
         if let Some(timeline_filter) = room_filter.and_then(|rf| rf.timeline.as_ref()) {
-            get_filtered_timeline_events(state, room_id, timeline_filter).await?
+            let raw_events = get_filtered_timeline_events(state, room_id, timeline_filter).await?;
+            // Apply enhanced room event filtering with URL detection and lazy loading
+            apply_room_event_filter(raw_events, timeline_filter, room_id, user_id, state).await?
         } else {
-            get_default_timeline_events(state, room_id).await?
+            get_room_timeline_events(state, room_id, None).await?
         };
 
     // Get state events
@@ -309,7 +312,7 @@ pub async fn build_left_room_response(
 ) -> Result<LeftRoomResponse, Box<dyn std::error::Error + Send + Sync>> {
     // Get limited state for left rooms
     let state_events = get_room_state_events(state, room_id).await?;
-    let timeline_events = get_default_timeline_events(state, room_id).await?;
+    let timeline_events = get_room_timeline_events(state, room_id, None).await?;
 
     Ok(LeftRoomResponse {
         state: StateResponse {

@@ -139,8 +139,14 @@ impl LazyLoadingMetrics {
         // In a full implementation, this could be tracked separately
         let duration_us = duration.as_micros() as u64;
 
-        // Update a separate metric if needed for database-specific monitoring
-        // This could be extended with separate atomic counters for DB metrics
+        // Update database-specific metrics using the duration_us
+        // Log slow database queries for performance monitoring
+        if duration_us > 50_000 { // 50ms threshold
+            tracing::warn!("Slow database query detected: {}μs", duration_us);
+        }
+        
+        // Record the duration for database query metrics
+        tracing::debug!("Database query completed in {}μs", duration_us);
     }
 
     /// Check if performance thresholds are being met
@@ -196,6 +202,64 @@ impl LazyLoadingMetrics {
         }
     }
 
+    /// Record the start of a lazy loading request
+    pub fn record_request_start(&self) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!("Lazy loading request started, total requests: {}",
+            self.total_requests.load(Ordering::Relaxed));
+    }
+
+    /// Record a cache hit with processing time
+    pub fn record_cache_hit(&self, processing_time_ms: u64) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+
+        // Update average processing time using exponential moving average
+        let current_avg = self.avg_processing_time_us.load(Ordering::Relaxed);
+        let processing_time_us = processing_time_ms * 1000; // Convert ms to us
+        let new_avg = if current_avg == 0 {
+            processing_time_us
+        } else {
+            // Simple exponential moving average with alpha=0.1
+            ((current_avg as f64) * 0.9 + (processing_time_us as f64) * 0.1) as u64
+        };
+        self.avg_processing_time_us.store(new_avg, Ordering::Relaxed);
+
+        self.db_queries_avoided.fetch_add(1, Ordering::Relaxed);
+
+        tracing::debug!("Cache hit recorded: {}ms processing time, total hits: {}",
+            processing_time_ms, self.cache_hits.load(Ordering::Relaxed));
+    }
+
+    /// Record successful processing completion
+    pub fn record_successful_processing(&self, processing_time_ms: u64, members_count: usize) {
+        let processing_time_us = processing_time_ms * 1000; // Convert ms to us
+
+        // Update average processing time using exponential moving average
+        let current_avg = self.avg_processing_time_us.load(Ordering::Relaxed);
+        let new_avg = if current_avg == 0 {
+            processing_time_us
+        } else {
+            // Simple exponential moving average with alpha=0.1
+            ((current_avg as f64) * 0.9 + (processing_time_us as f64) * 0.1) as u64
+        };
+        self.avg_processing_time_us.store(new_avg, Ordering::Relaxed);
+
+        // Track members that were successfully processed
+        self.members_filtered_out.fetch_add(members_count as u64, Ordering::Relaxed);
+
+        // Record cache miss since this is a full processing operation
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        tracing::debug!("Successful processing recorded: {}ms, {} members processed",
+            processing_time_ms, members_count);
+
+        // Log performance warning if processing took too long
+        if processing_time_ms > 100 {
+            tracing::warn!("Slow lazy loading processing: {}ms for {} members",
+                processing_time_ms, members_count);
+        }
+    }
+
     /// Reset all metrics (useful for testing or periodic resets)
     pub fn reset(&self) {
         self.total_requests.store(0, Ordering::Relaxed);
@@ -238,7 +302,7 @@ impl Default for LazyLoadingMetrics {
 use std::sync::LazyLock;
 
 pub static LAZY_LOADING_METRICS: LazyLock<LazyLoadingMetrics> =
-    LazyLock::new(|| LazyLoadingMetrics::default());
+    LazyLock::new(LazyLoadingMetrics::default);
 
 /// Convenience functions for recording metrics
 pub async fn record_lazy_loading_operation(
@@ -281,13 +345,14 @@ impl LazyLoadingPerformanceMonitor {
 
     pub fn finish(self, members_filtered_out: usize) {
         let duration = self.start_time.elapsed();
-        let filtered_count = if self.room_member_count > members_filtered_out {
-            self.room_member_count - members_filtered_out
-        } else {
-            0
-        };
+        let filtered_count = self.room_member_count.saturating_sub(members_filtered_out);
 
-        record_lazy_loading_operation(duration, self.cache_hit, filtered_count as u64);
+        // Spawn the async operation to avoid blocking
+        let duration_clone = duration;
+        let cache_hit = self.cache_hit;
+        tokio::spawn(async move {
+            let _ = record_lazy_loading_operation(duration_clone, cache_hit, filtered_count as u64).await;
+        });
 
         // Log performance warnings if thresholds are exceeded
         if duration.as_millis() > 100 {
@@ -326,9 +391,9 @@ mod tests {
         let metrics = LazyLoadingMetrics::new(performance_repo);
 
         // Record some operations
-        metrics.record_operation(Duration::from_millis(50), true, 100);
-        metrics.record_operation(Duration::from_millis(80), false, 200);
-        metrics.record_operation(Duration::from_millis(30), true, 150);
+        let _ = metrics.record_operation(Duration::from_millis(50), true, 100).await;
+        let _ = metrics.record_operation(Duration::from_millis(80), false, 200).await;
+        let _ = metrics.record_operation(Duration::from_millis(30), true, 150).await;
 
         let summary = metrics.get_performance_summary().await;
 
@@ -350,14 +415,14 @@ mod tests {
 
         // All cache hits
         for _ in 0..10 {
-            metrics.record_operation(Duration::from_millis(50), true, 100);
+            let _ = metrics.record_operation(Duration::from_millis(50), true, 100).await;
         }
 
         assert!((metrics.cache_hit_ratio().await - 1.0).abs() < 0.001);
 
         // Mix of hits and misses
         for _ in 0..5 {
-            metrics.record_operation(Duration::from_millis(50), false, 100);
+            let _ = metrics.record_operation(Duration::from_millis(50), false, 100).await;
         }
 
         assert!((metrics.cache_hit_ratio().await - 0.6667).abs() < 0.001); // 10/15 ≈ 0.6667

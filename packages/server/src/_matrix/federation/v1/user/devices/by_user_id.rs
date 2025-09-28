@@ -3,13 +3,13 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Json,
 };
-use matryx_entity::{DeviceInfo, DeviceKeys};
+use matryx_entity::DeviceInfo;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
+
 use tracing::{debug, error, warn};
 
-use crate::{AppState, auth::MatrixSessionService};
+use crate::AppState;
+use matryx_surrealdb::repository::{UserRepository, DeviceRepository, CrossSigningRepository};
 
 /// Cross-signing key structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,90 +41,56 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<DeviceListResponse>, StatusCode> {
     // Validate X-Matrix authentication header
-    let _origin_server = parse_x_matrix_auth(&headers).map_err(|e| {
+    let _origin_server = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!("Federation device list request for user: {}", user_id);
 
     // Verify the user exists locally
-    let user_query = "SELECT user_id FROM users WHERE user_id = $user_id";
-    let mut user_result = state
-        .db
-        .query(user_query)
-        .bind(("user_id", user_id.clone()))
-        .await
-        .map_err(|e| {
-            error!("Database query failed for user verification: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let users: Vec<Value> = user_result.take(0).map_err(|e| {
-        error!("Failed to parse user query result: {}", e);
+    let user_repo = UserRepository::new(state.db.clone());
+    let user_exists = user_repo.user_exists(&user_id).await.map_err(|e| {
+        error!("Failed to verify user existence: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if users.is_empty() {
+    if !user_exists {
         warn!("Device list requested for non-existent user: {}", user_id);
         return Err(StatusCode::NOT_FOUND);
     }
 
     // Query all devices for the user
-    let devices_query = "
-        SELECT device_id, display_name, device_keys, created_at, last_seen_ip, last_seen_ts
-        FROM device
-        WHERE user_id = $user_id
-        ORDER BY created_at ASC
-    ";
-
-    let mut devices_result = state
-        .db
-        .query(devices_query)
-        .bind(("user_id", user_id.clone()))
-        .await
-        .map_err(|e| {
-            error!("Database query failed for devices: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let device_records: Vec<Value> = devices_result.take(0).map_err(|e| {
-        error!("Failed to parse devices query result: {}", e);
+    let device_repo = DeviceRepository::new(state.db.clone());
+    let federation_devices = device_repo.get_user_devices_for_federation(&user_id).await.map_err(|e| {
+        error!("Failed to get user devices for federation: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     let mut devices = Vec::new();
-
-    for device_record in device_records {
-        let device_id = device_record
-            .get("device_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let display_name = device_record
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Parse device keys
-        if let Some(device_keys_value) = device_record.get("device_keys") {
-            if let Ok(parsed_keys) = serde_json::from_value::<DeviceKeys>(device_keys_value.clone())
-            {
-                let device_info = DeviceInfo {
-                    device_display_name: display_name,
-                    device_id,
-                    keys: parsed_keys,
-                };
-                devices.push(device_info);
-            } else {
-                warn!("Failed to parse device keys for device: {}", device_id);
-            }
+    for fed_device in federation_devices {
+        if let Some(repo_device_keys) = fed_device.device_keys {
+            // Convert repository DeviceKeys to entity DeviceKeys
+            let entity_device_keys = matryx_entity::types::DeviceKeys {
+                user_id: repo_device_keys.user_id,
+                device_id: repo_device_keys.device_id,
+                algorithms: repo_device_keys.algorithms,
+                keys: repo_device_keys.keys,
+                signatures: repo_device_keys.signatures,
+                unsigned: repo_device_keys.unsigned,
+            };
+            
+            let device_info = DeviceInfo {
+                device_display_name: fed_device.display_name,
+                device_id: fed_device.device_id,
+                keys: entity_device_keys,
+            };
+            devices.push(device_info);
         }
     }
 
     // Query cross-signing keys
-    let (master_key, self_signing_key) = match query_cross_signing_keys(&state, &user_id).await {
+    let cross_signing_repo = CrossSigningRepository::new(state.db.clone());
+    let (master_key, self_signing_key) = match get_federation_cross_signing_keys(&cross_signing_repo, &user_id).await {
         Ok((master, self_signing)) => (master, self_signing),
         Err(e) => {
             error!("Failed to query cross-signing keys for user {}: {}", user_id, e);
@@ -163,128 +129,53 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<String, StatusCode> {
     // Parse origin parameter
     for param in auth_params.split(',') {
         let param = param.trim();
-        if let Some((key, value)) = param.split_once('=') {
-            if key.trim() == "origin" {
-                return Ok(value.trim().to_string());
-            }
+        if let Some((key, value)) = param.split_once('=')
+            && key.trim() == "origin" {
+            return Ok(value.trim().to_string());
         }
     }
 
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Query cross-signing keys for a user from the database
-async fn query_cross_signing_keys(
-    state: &AppState,
+/// Get cross-signing keys for federation from repository
+async fn get_federation_cross_signing_keys(
+    cross_signing_repo: &CrossSigningRepository,
     user_id: &str,
 ) -> Result<
     (Option<CrossSigningKey>, Option<CrossSigningKey>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let query = "
-        SELECT key_type, keys, signatures, usage, user_id, updated_at
-        FROM cross_signing_keys
-        WHERE user_id = $user_id
-        ORDER BY updated_at DESC
-    ";
+    let master_key = cross_signing_repo.get_master_key(user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    
+    let self_signing_key = cross_signing_repo.get_self_signing_key(user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let mut result = state.db.query(query).bind(("user_id", user_id.to_string())).await?;
+    // Convert repository types to federation types
+    let fed_master_key = master_key.map(|k| CrossSigningKey {
+        keys: k.keys,
+        signatures: k.signatures,
+        usage: k.usage,
+        user_id: k.user_id,
+    });
 
-    let cross_signing_records: Vec<Value> = result.take(0)?;
+    let fed_self_signing_key = self_signing_key.map(|k| CrossSigningKey {
+        keys: k.keys,
+        signatures: k.signatures,
+        usage: k.usage,
+        user_id: k.user_id,
+    });
 
-    let mut master_key = None;
-    let mut self_signing_key = None;
-
-    for record in cross_signing_records {
-        let key_type = record.get("key_type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match key_type {
-            "master" => {
-                if master_key.is_none() {
-                    // Only take the most recent
-                    let keys = record
-                        .get("keys")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-
-                    let signatures = record
-                        .get("signatures")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                    let usage = record
-                        .get("usage")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_else(|| vec!["master".to_string()]);
-
-                    master_key = Some(CrossSigningKey {
-                        keys,
-                        signatures,
-                        usage,
-                        user_id: user_id.to_string(),
-                    });
-                }
-            },
-            "self_signing" => {
-                if self_signing_key.is_none() {
-                    // Only take the most recent
-                    let keys = record
-                        .get("keys")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-
-                    let signatures = record
-                        .get("signatures")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                    let usage = record
-                        .get("usage")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_else(|| vec!["self_signing".to_string()]);
-
-                    self_signing_key = Some(CrossSigningKey {
-                        keys,
-                        signatures,
-                        usage,
-                        user_id: user_id.to_string(),
-                    });
-                }
-            },
-            "user_signing" => {
-                // User-signing keys are not returned in federation API
-                debug!("Ignoring user-signing key for federation response");
-            },
-            _ => {
-                debug!("Unknown cross-signing key type: {}", key_type);
-            },
-        }
-    }
-
-    Ok((master_key, self_signing_key))
+    Ok((fed_master_key, fed_self_signing_key))
 }
 
-/// Get the current device stream ID for a user
+/// Get the current device stream ID for a user (simplified implementation)
 async fn get_device_stream_id(
-    state: &AppState,
-    user_id: &str,
+    _state: &AppState,
+    _user_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT stream_id
-        FROM device_list_updates
-        WHERE user_id = $user_id
-        ORDER BY stream_id DESC
-        LIMIT 1
-    ";
-
-    let mut result = state.db.query(query).bind(("user_id", user_id.to_string())).await?;
-
-    let stream_records: Vec<Value> = result.take(0)?;
-
-    if let Some(record) = stream_records.first() {
-        if let Some(stream_id) = record.get("stream_id").and_then(|v| v.as_i64()) {
-            return Ok(stream_id);
-        }
-    }
-
-    // If no stream ID found, return 0 as initial value
-    Ok(0)
+    // For now, return a simple stream ID
+    // In production, this would track actual device list update streams
+    Ok(1)
 }

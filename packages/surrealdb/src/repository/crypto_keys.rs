@@ -4,14 +4,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use surrealdb::{Connection, Surreal};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub user_id: String,
-    pub device_id: String,
-    pub algorithms: Vec<String>,
-    pub keys: HashMap<String, String>,
-    pub signatures: HashMap<String, HashMap<String, String>>,
-}
+// Import canonical DeviceKeys from entity package
+use matryx_entity::types::DeviceKeys;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceKeysQuery {
@@ -470,12 +464,16 @@ impl<C: Connection> CryptoKeysRepository<C> {
             value.get("keys"),
             value.get("signatures"),
         ) {
+            let unsigned = value.get("unsigned")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            
             Ok(Some(DeviceKeys {
                 user_id: user_id.to_string(),
                 device_id: device_id.to_string(),
                 algorithms: serde_json::from_value(algorithms.clone()).unwrap_or_default(),
                 keys: serde_json::from_value(keys.clone()).unwrap_or_default(),
                 signatures: serde_json::from_value(signatures.clone()).unwrap_or_default(),
+                unsigned,
             }))
         } else {
             Ok(None)

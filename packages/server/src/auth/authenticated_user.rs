@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::MatrixAuthError;
 use crate::state::AppState;
+use matryx_surrealdb::repository::auth::AuthRepository;
 
 /// Represents an authenticated Matrix user
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,27 +29,16 @@ impl AuthenticatedUser {
 
     /// Check if this user can access a specific room
     pub async fn can_access_room(&self, state: &AppState, room_id: String) -> bool {
-        // Check if user has membership in the room
-        let membership_exists: Result<Option<bool>, _> = state.db
-            .query("SELECT VALUE true FROM membership WHERE user_id = $user_id AND room_id = $room_id AND membership IN ['join', 'invite'] LIMIT 1")
-            .bind(("user_id", self.user_id.clone()))
-            .bind(("room_id", room_id))
-            .await
-            .and_then(|mut response| response.take(0));
-
-        membership_exists.unwrap_or(Some(false)).unwrap_or(false)
+        let auth_repo = AuthRepository::new(state.db.clone());
+        
+        auth_repo.check_user_membership(&self.user_id, &room_id).await.unwrap_or_default()
     }
 
     /// Check if this user is an admin
     pub async fn is_admin(&self, state: &AppState) -> bool {
-        let is_admin: Result<Option<bool>, _> = state
-            .db
-            .query("SELECT VALUE is_admin FROM user WHERE user_id = $user_id")
-            .bind(("user_id", self.user_id.clone()))
-            .await
-            .and_then(|mut response| response.take(0));
-
-        is_admin.unwrap_or(Some(false)).unwrap_or(false)
+        let auth_repo = AuthRepository::new(state.db.clone());
+        
+        auth_repo.is_user_admin(&self.user_id).await.unwrap_or_default()
     }
 
     /// Get the Matrix user ID in proper format
@@ -107,31 +97,21 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
 
-                let user_exists: Result<Option<bool>, _> = state.db
-                    .query("SELECT VALUE true FROM user WHERE user_id = $user_id AND is_active = true LIMIT 1")
-                    .bind(("user_id", user_id.clone()))
-                    .await
-                    .and_then(|mut response| response.take(0));
+                let auth_repo = AuthRepository::new(state.db.clone());
 
-                if !user_exists
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .unwrap_or(false)
-                {
+                // Check if user exists and is active
+                let user_active = auth_repo.is_user_active(&user_id).await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                if !user_active {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
 
                 // Verify device exists and is associated with user
-                let device_exists: Result<Option<bool>, _> = state.db
-                    .query("SELECT VALUE true FROM device WHERE device_id = $device_id AND user_id = $user_id LIMIT 1")
-                    .bind(("device_id", device_id.clone()))
-                    .bind(("user_id", user_id.clone()))
-                    .await
-                    .and_then(|mut response| response.take(0));
+                let device_valid = auth_repo.validate_device(&device_id, &user_id).await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                if !device_exists
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    .unwrap_or(false)
-                {
+                if !device_valid {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
 

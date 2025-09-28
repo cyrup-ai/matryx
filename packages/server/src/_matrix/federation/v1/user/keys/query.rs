@@ -1,29 +1,19 @@
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing::{debug, error};
 
 use crate::AppState;
+use matryx_surrealdb::repository::{DeviceRepository, CrossSigningRepository};
+// Use fully qualified path to avoid import conflicts
+use matryx_entity::types::DeviceKeys;
 
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
     device_keys: std::collections::HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DeviceKeys {
-    algorithms: Vec<String>,
-    device_id: String,
-    keys: std::collections::HashMap<String, String>,
-    signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-    unsigned: Option<UnsignedDeviceInfo>,
-    user_id: String,
-}
 
-#[derive(Debug, Serialize)]
-pub struct UnsignedDeviceInfo {
-    device_display_name: Option<String>,
-}
 
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
@@ -50,85 +40,57 @@ pub async fn post(
 
         let mut user_device_keys = std::collections::HashMap::new();
 
-        // Query devices for this user
-        let query = if device_list.is_empty() {
-            // Get all devices for user
-            "SELECT device_id, display_name, device_keys FROM device WHERE user_id = $user_id"
+        // Query devices for this user using repository
+        let device_repo = DeviceRepository::new(state.db.clone());
+        
+        let device_keys_result = if device_list.is_empty() {
+            device_repo.get_user_device_keys_for_federation_batch(&user_id).await
         } else {
-            // Get specific devices
-            "SELECT device_id, display_name, device_keys FROM device WHERE user_id = $user_id AND device_id IN $device_list"
+            device_repo.get_device_keys_for_federation(&user_id, &device_list).await
+                .map(|response| response.device_keys.get(&user_id).cloned().unwrap_or_default())
         };
 
-        let mut result = state
-            .db
-            .query(query)
-            .bind(("user_id", user_id.clone()))
-            .bind(("device_list", device_list.clone()))
-            .await
-            .map_err(|e| {
-                error!("Database query failed: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        if let Ok(devices) = result.take::<Vec<serde_json::Value>>(0) {
-            for device_data in devices {
-                if let (Some(device_id), device_keys) = (
-                    device_data.get("device_id").and_then(|v| v.as_str()),
-                    device_data.get("device_keys"),
-                ) {
-                    if let Some(keys_obj) = device_keys.and_then(|v| v.as_object()) {
-                        // Extract device key information
-                        let algorithms = keys_obj
-                            .get("algorithms")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+        match device_keys_result {
+            Ok(device_keys_map) => {
+                for (device_id, repo_device_keys) in device_keys_map {
+                    let device_keys = matryx_entity::types::DeviceKeys {
+                        algorithms: repo_device_keys.algorithms,
+                        device_id: repo_device_keys.device_id,
+                        keys: repo_device_keys.keys,
+                        signatures: repo_device_keys.signatures,
+                        unsigned: repo_device_keys.unsigned,
+                        user_id: repo_device_keys.user_id,
+                    };
 
-                        let keys = keys_obj
-                            .get("keys")
-                            .and_then(|v| v.as_object())
-                            .map(|obj| {
-                                obj.iter()
-                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        let signatures = keys_obj
-                            .get("signatures")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-
-                        let device_keys = DeviceKeys {
-                            algorithms,
-                            device_id: device_id.to_string(),
-                            keys,
-                            signatures,
-                            unsigned: device_data.get("display_name").and_then(|v| v.as_str()).map(
-                                |name| {
-                                    UnsignedDeviceInfo {
-                                        device_display_name: Some(name.to_string()),
-                                    }
-                                },
-                            ),
-                            user_id: user_id.clone(),
-                        };
-
-                        user_device_keys.insert(device_id.to_string(), device_keys);
-                    }
+                    user_device_keys.insert(device_id, device_keys);
                 }
+            },
+            Err(e) => {
+                error!("Failed to query device keys for user {}: {}", user_id, e);
+                // Continue without device keys rather than failing entire request
             }
-        } // Query cross-signing keys for this user
-        match query_cross_signing_keys(&state, &user_id).await {
+        }
+        
+        // Query cross-signing keys for this user using repository
+        let cross_signing_repo = CrossSigningRepository::new(state.db.clone());
+        
+        match get_federation_cross_signing_keys(&cross_signing_repo, &user_id).await {
             Ok((master_key, self_signing_key)) => {
                 if let Some(master) = master_key {
-                    master_keys.insert(user_id.clone(), master);
+                    master_keys.insert(user_id.clone(), json!({
+                        "keys": master.keys,
+                        "signatures": master.signatures,
+                        "usage": master.usage,
+                        "user_id": master.user_id
+                    }));
                 }
                 if let Some(self_signing) = self_signing_key {
-                    self_signing_keys.insert(user_id.clone(), self_signing);
+                    self_signing_keys.insert(user_id.clone(), json!({
+                        "keys": self_signing.keys,
+                        "signatures": self_signing.signatures,
+                        "usage": self_signing.usage,
+                        "user_id": self_signing.user_id
+                    }));
                 }
             },
             Err(e) => {
@@ -159,52 +121,19 @@ pub async fn post(
     }))
 }
 
-/// Query cross-signing keys for a user from the database
-async fn query_cross_signing_keys(
-    state: &AppState,
+/// Get cross-signing keys for federation from repository
+async fn get_federation_cross_signing_keys(
+    cross_signing_repo: &CrossSigningRepository,
     user_id: &str,
 ) -> Result<
-    (Option<serde_json::Value>, Option<serde_json::Value>),
+    (Option<matryx_surrealdb::repository::cross_signing::CrossSigningKey>, Option<matryx_surrealdb::repository::cross_signing::CrossSigningKey>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let query = "
-        SELECT key_type, keys, signatures, usage, user_id
-        FROM cross_signing_keys
-        WHERE user_id = $user_id
-    ";
-
-    let mut result = state.db.query(query).bind(("user_id", user_id.to_string())).await?;
-
-    let cross_signing_records: Vec<serde_json::Value> = result.take(0)?;
-
-    let mut master_key = None;
-    let mut self_signing_key = None;
-
-    for record in cross_signing_records {
-        let key_type = record.get("key_type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match key_type {
-            "master" => {
-                master_key = Some(json!({
-                    "keys": record.get("keys").cloned().unwrap_or_default(),
-                    "signatures": record.get("signatures").cloned().unwrap_or_default(),
-                    "usage": record.get("usage").cloned().unwrap_or_default(),
-                    "user_id": user_id
-                }));
-            },
-            "self_signing" => {
-                self_signing_key = Some(json!({
-                    "keys": record.get("keys").cloned().unwrap_or_default(),
-                    "signatures": record.get("signatures").cloned().unwrap_or_default(),
-                    "usage": record.get("usage").cloned().unwrap_or_default(),
-                    "user_id": user_id
-                }));
-            },
-            _ => {
-                debug!("Unknown cross-signing key type: {}", key_type);
-            },
-        }
-    }
+    let master_key = cross_signing_repo.get_master_key(user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    
+    let self_signing_key = cross_signing_repo.get_self_signing_key(user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok((master_key, self_signing_key))
 }

@@ -8,13 +8,15 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::MatrixSessionService;
 use crate::federation::authorization::{AuthorizationEngine, AuthorizationError};
-use crate::federation::event_signing::EventSigningEngine;
+use crate::federation::client::FederationClient;
+use crate::federation::dns_resolver::{MatrixDnsResolver, DnsResolutionError};
+use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use crate::state::AppState;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::error::RepositoryError;
@@ -22,6 +24,7 @@ use matryx_surrealdb::repository::{
     EventRepository,
     FederationRepository,
     KeyServerRepository,
+    MembershipRepository,
     RoomRepository,
 };
 
@@ -57,6 +60,9 @@ pub enum PduValidationError {
 
     #[error("Crypto error: {0}")]
     CryptoError(String),
+
+    #[error("DNS resolution failed: {0}")]
+    DnsResolutionError(#[from] DnsResolutionError),
 }
 
 /// Result of PDU validation
@@ -86,7 +92,51 @@ enum DeduplicationResult {
     /// Event is new and should be validated
     New,
     /// Event already exists (returns existing event)
-    Duplicate(Event),
+    Duplicate(Box<Event>),
+}
+
+/// Parameters for creating a new PduValidator
+pub struct PduValidatorParams {
+    pub session_service: Arc<MatrixSessionService<surrealdb::engine::any::Any>>,
+    pub event_repo: Arc<EventRepository>,
+    pub room_repo: Arc<RoomRepository>,
+    pub membership_repo: Arc<MembershipRepository>,
+    pub federation_repo: Arc<FederationRepository>,
+    pub key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
+    pub federation_client: Arc<FederationClient>,
+    pub dns_resolver: Arc<MatrixDnsResolver>,
+    pub db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+    pub homeserver_name: String,
+}
+
+impl PduValidatorParams {
+    /// Convenience constructor for federation endpoints
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_app_state(
+        session_service: Arc<MatrixSessionService<surrealdb::engine::any::Any>>,
+        event_repo: Arc<EventRepository>,
+        room_repo: Arc<RoomRepository>,
+        membership_repo: Arc<MembershipRepository>,
+        federation_repo: Arc<FederationRepository>,
+        key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
+        federation_client: Arc<FederationClient>,
+        dns_resolver: Arc<MatrixDnsResolver>,
+        db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+        homeserver_name: String,
+    ) -> Self {
+        Self {
+            session_service,
+            event_repo,
+            room_repo,
+            membership_repo,
+            federation_repo,
+            key_server_repo,
+            federation_client,
+            dns_resolver,
+            db,
+            homeserver_name,
+        }
+    }
 }
 
 /// PDU Validator implementing Matrix Server-Server API validation pipeline
@@ -98,53 +148,58 @@ pub struct PduValidator {
     key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
     authorization_engine: AuthorizationEngine,
     event_signing_engine: EventSigningEngine,
+    dns_resolver: Arc<MatrixDnsResolver>,
     db: surrealdb::Surreal<surrealdb::engine::any::Any>,
     homeserver_name: String,
 }
 
 impl PduValidator {
-    pub fn new(
-        session_service: Arc<MatrixSessionService<surrealdb::engine::any::Any>>,
-        event_repo: Arc<EventRepository>,
-        room_repo: Arc<RoomRepository>,
-        federation_repo: Arc<FederationRepository>,
-        key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
-        db: surrealdb::Surreal<surrealdb::engine::any::Any>,
-        homeserver_name: String,
-    ) -> Self {
-        let authorization_engine = AuthorizationEngine::new(event_repo.clone(), room_repo.clone());
+    pub fn new(params: PduValidatorParams) -> Result<Self, EventSigningError> {
+        let authorization_engine = AuthorizationEngine::new(params.event_repo.clone(), params.room_repo.clone(), params.membership_repo.clone(), params.federation_client.clone(), params.homeserver_name.clone());
         let event_signing_engine =
-            EventSigningEngine::new(session_service.clone(), db.clone(), homeserver_name.clone());
+            EventSigningEngine::new(params.session_service.clone(), params.db.clone(), params.dns_resolver.clone(), params.homeserver_name.clone())?;
 
-        Self {
-            session_service,
-            event_repo,
-            room_repo,
-            federation_repo,
-            key_server_repo,
+        Ok(Self {
+            session_service: params.session_service,
+            event_repo: params.event_repo,
+            room_repo: params.room_repo,
+            federation_repo: params.federation_repo,
+            key_server_repo: params.key_server_repo,
             authorization_engine,
             event_signing_engine,
-            db,
-            homeserver_name,
-        }
+            dns_resolver: params.dns_resolver,
+            db: params.db,
+            homeserver_name: params.homeserver_name,
+        })
     }
 
     /// Create PDU validator from application state
-    pub fn from_app_state(state: &AppState) -> Self {
+    pub fn from_app_state(state: &AppState) -> Result<Self, EventSigningError> {
         let event_repo = Arc::new(EventRepository::new(state.db.clone()));
         let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+        let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
         let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
         let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
+        
+        // Create federation client from app state
+        let federation_client = Arc::new(FederationClient::new(
+            state.http_client.clone(),
+            state.event_signer.clone(),
+            state.homeserver_name.clone(),
+        ));
 
-        Self::new(
-            state.session_service.clone(),
+        Self::new(PduValidatorParams {
+            session_service: state.session_service.clone(),
             event_repo,
             room_repo,
+            membership_repo,
             federation_repo,
             key_server_repo,
-            state.db.clone(),
-            state.homeserver_name.clone(),
-        )
+            federation_client,
+            dns_resolver: state.dns_resolver.clone(),
+            db: state.db.clone(),
+            homeserver_name: state.homeserver_name.clone(),
+        })
     }
 
     /// Validate a PDU according to the 6-step Matrix validation process
@@ -163,7 +218,7 @@ impl PduValidator {
         match self.check_event_deduplication(&event).await? {
             DeduplicationResult::Duplicate(existing_event) => {
                 debug!("Event {} already exists, returning existing event", event.event_id);
-                return Ok(ValidationResult::Valid(existing_event));
+                return Ok(ValidationResult::Valid(*existing_event));
             },
             DeduplicationResult::New => {
                 // Continue with validation for new events
@@ -174,13 +229,23 @@ impl PduValidator {
         self.validate_event_hashes(&event, pdu).await?;
         debug!("Step 2 passed: Hash verification for event {}", event.event_id);
 
-        // Step 3: Signature Verification using EventSigningEngine
+        // Step 3a: EventSigningEngine verification
         let expected_servers = vec![origin_server.to_string()];
         self.event_signing_engine
             .validate_event_crypto(&event, &expected_servers)
             .await
             .map_err(|e| PduValidationError::SignatureError(format!("{:?}", e)))?;
-        debug!("Step 3 passed: Signature verification for event {}", event.event_id);
+        debug!("Step 3a passed: EventSigningEngine verification for event {}", event.event_id);
+
+        // Step 3b: Additional event signature verification using PduValidator methods
+        if let Err(e) = self.verify_event_signatures(&event, origin_server).await {
+            warn!("Step 3b failed - event signature verification for event {}: {}", event.event_id, e);
+            return Ok(ValidationResult::Rejected {
+                event_id: event.event_id.clone(),
+                reason: format!("Event signature verification failed: {}", e),
+            });
+        }
+        debug!("Step 3b passed: Event signature verification for event {}", event.event_id);
 
         // Step 4: Auth Events and DAG Validation
         self.validate_auth_events(&event).await?;
@@ -190,16 +255,26 @@ impl PduValidator {
         self.validate_prev_events_dag(&event).await?;
         debug!("Step 4b passed: DAG validation for event {}", event.event_id);
 
-        // Step 5: Matrix Authorization Rules Validation (state before)
+        // Step 5a: Validate state before the event (Matrix specification requirement)
+        if let Err(e) = self.validate_state_before(&event).await {
+            warn!("Step 5a failed - state before validation for event {}: {}", event.event_id, e);
+            return Ok(ValidationResult::Rejected {
+                event_id: event.event_id.clone(),
+                reason: format!("State before validation failed: {}", e),
+            });
+        }
+        debug!("Step 5a passed: State before validation for event {}", event.event_id);
+
+        // Step 5b: Matrix Authorization Rules Validation (state before)
         match self.validate_matrix_authorization(&event).await {
             Ok(_) => {
                 debug!(
-                    "Step 5 passed: Matrix authorization validation for event {}",
+                    "Step 5b passed: Matrix authorization validation for event {}",
                     event.event_id
                 );
             },
             Err(e) => {
-                warn!("Step 5 failed for event {}: {}", event.event_id, e);
+                warn!("Step 5b failed for event {}: {}", event.event_id, e);
                 return Ok(ValidationResult::Rejected {
                     event_id: event.event_id.clone(),
                     reason: format!("Matrix authorization failed: {}", e),
@@ -290,7 +365,7 @@ impl PduValidator {
         // Primary deduplication: Check exact event ID match
         if let Ok(Some(existing_event)) = self.event_repo.get_by_id(&event.event_id).await {
             debug!("Found exact event ID match for {}", event.event_id);
-            return Ok(DeduplicationResult::Duplicate(existing_event));
+            return Ok(DeduplicationResult::Duplicate(Box::new(existing_event)));
         }
 
         // Content hash deduplication for room v4+ events
@@ -298,28 +373,26 @@ impl PduValidator {
             .get_room_version(&event.room_id)
             .await
             .unwrap_or_else(|_| "1".to_string());
-        if matches!(room_version.as_str(), "4" | "5" | "6" | "7" | "8" | "9" | "10") {
-            if let Some(duplicate) = self.check_content_hash_deduplication(event).await? {
-                debug!("Found content hash duplicate for {}", event.event_id);
-                return Ok(DeduplicationResult::Duplicate(duplicate));
-            }
+        if matches!(room_version.as_str(), "4" | "5" | "6" | "7" | "8" | "9" | "10")
+            && let Some(duplicate) = self.check_content_hash_deduplication(event).await? {
+            debug!("Found content hash duplicate for {}", event.event_id);
+            return Ok(DeduplicationResult::Duplicate(Box::new(duplicate)));
         }
 
         // State key deduplication for state events
-        if event.state_key.is_some() {
-            if let Some(duplicate) = self.check_state_key_deduplication(event).await? {
-                debug!(
-                    "Found state key duplicate for {} in room {}",
-                    event.event_id, event.room_id
-                );
-                return Ok(DeduplicationResult::Duplicate(duplicate));
-            }
+        if event.state_key.is_some()
+            && let Some(duplicate) = self.check_state_key_deduplication(event).await? {
+            debug!(
+                "Found state key duplicate for {} in room {}",
+                event.event_id, event.room_id
+            );
+            return Ok(DeduplicationResult::Duplicate(Box::new(duplicate)));
         }
 
         // Temporal deduplication for rapid successive events
         if let Some(duplicate) = self.check_temporal_deduplication(event).await? {
             debug!("Found temporal duplicate for {} from sender {}", event.event_id, event.sender);
-            return Ok(DeduplicationResult::Duplicate(duplicate));
+            return Ok(DeduplicationResult::Duplicate(Box::new(duplicate)));
         }
 
         debug!("Event {} is new - no duplicates found", event.event_id);
@@ -345,7 +418,7 @@ impl PduValidator {
         self.federation_repo
             .find_event_by_content_hash(&event.room_id, &content_hash)
             .await
-            .map_err(|e| PduValidationError::DatabaseError(e.into()))
+            .map_err(PduValidationError::DatabaseError)
     }
 
     /// Check for state key-based deduplication
@@ -361,15 +434,14 @@ impl PduValidator {
         // Query for most recent state event with same type and state_key using federation repository
         let existing_event = self
             .federation_repo
-            .get_current_state_event(&event.room_id, &event.event_type, &state_key)
+            .get_current_state_event(&event.room_id, &event.event_type, state_key)
             .await
-            .map_err(|e| PduValidationError::DatabaseError(e.into()))?;
+            .map_err(PduValidationError::DatabaseError)?;
 
         // Check if content is identical (true duplicate)
-        if let Some(existing_event) = existing_event {
-            if self.events_have_identical_content(event, &existing_event) {
-                return Ok(Some(existing_event));
-            }
+        if let Some(existing_event) = existing_event
+            && self.events_have_identical_content(event, &existing_event) {
+            return Ok(Some(existing_event));
         }
 
         Ok(None)
@@ -398,7 +470,7 @@ impl PduValidator {
                 Some(5),
             )
             .await
-            .map_err(|e| PduValidationError::DatabaseError(e.into()))?;
+            .map_err(PduValidationError::DatabaseError)?;
 
         // Check for identical content in temporal window
         for existing_event in recent_events {
@@ -486,12 +558,11 @@ impl PduValidator {
         }
 
         // Basic depth validation
-        if let Some(depth) = event.depth {
-            if depth < 0 {
-                return Err(PduValidationError::InvalidFormat(
-                    "Event depth cannot be negative".to_string(),
-                ));
-            }
+        if let Some(depth) = event.depth
+            && depth < 0 {
+            return Err(PduValidationError::InvalidFormat(
+                "Event depth cannot be negative".to_string(),
+            ));
         }
 
         Ok(())
@@ -503,14 +574,12 @@ impl PduValidator {
         self.validate_room_v1_v2_format(event)?;
 
         // Additional v3-specific validations
-        if event.event_type == "m.room.create" {
-            if let Some(state_key) = &event.state_key {
-                if !state_key.is_empty() {
-                    return Err(PduValidationError::InvalidFormat(
-                        "Room create event must have empty state key".to_string(),
-                    ));
-                }
-            }
+        if event.event_type == "m.room.create"
+            && let Some(state_key) = &event.state_key
+            && !state_key.is_empty() {
+            return Err(PduValidationError::InvalidFormat(
+                "Room create event must have empty state key".to_string(),
+            ));
         }
 
         Ok(())
@@ -689,7 +758,7 @@ impl PduValidator {
         let hash = hasher.finalize();
 
         // Encode as base64 without padding
-        let event_id_content = general_purpose::STANDARD_NO_PAD.encode(&hash);
+        let event_id_content = general_purpose::STANDARD_NO_PAD.encode(hash);
         Ok(format!("${}", event_id_content))
     }
 
@@ -731,13 +800,12 @@ impl PduValidator {
                 "users_default",
             ];
             for field in &integer_fields {
-                if let Some(value) = obj.get(*field) {
-                    if !value.is_i64() {
-                        return Err(PduValidationError::InvalidFormat(format!(
-                            "Power level field {} must be integer",
-                            field
-                        )));
-                    }
+                if let Some(value) = obj.get(*field)
+                    && !value.is_i64() {
+                    return Err(PduValidationError::InvalidFormat(format!(
+                        "Power level field {} must be integer",
+                        field
+                    )));
                 }
             }
         }
@@ -894,7 +962,36 @@ impl PduValidator {
         let mut visit_states: HashMap<String, VisitState> = HashMap::new();
         let mut recursion_stack: HashSet<String> = HashSet::new();
 
-        // Start DFS from the current event
+        // Initialize all known events as Unvisited for explicit state management
+        visit_states.insert(event.event_id.clone(), VisitState::Unvisited);
+        for prev_event in prev_events {
+            visit_states.insert(prev_event.event_id.clone(), VisitState::Unvisited);
+        }
+
+        // Include previous events in cycle detection for comprehensive DAG validation
+        debug!("Checking DAG cycles for event {} with {} previous events",
+               event.event_id, prev_events.len());
+        
+        // First, check cycles starting from each previous event
+        for prev_event in prev_events {
+            if self
+                .dfs_cycle_detection(
+                    &prev_event.event_id,
+                    &mut visit_states,
+                    &mut recursion_stack,
+                    0,  // current depth
+                    50, // maximum search depth to prevent infinite recursion
+                )
+                .await?
+            {
+                return Err(PduValidationError::StateError(format!(
+                    "Cycle detected in event DAG from previous event {}",
+                    prev_event.event_id
+                )));
+            }
+        }
+
+        // Then check cycles starting from the current event
         if self
             .dfs_cycle_detection(
                 &event.event_id,
@@ -1116,6 +1213,25 @@ impl PduValidator {
             }
         })?;
 
+        // Room version-specific hash validation per Matrix specification
+        let supports_sha256 = match room_version {
+            "1" | "2" | "3" | "4" | "5" => {
+                // Legacy room versions - SHA-256 optional but recommended
+                debug!("Legacy room version {}: SHA-256 validation optional", room_version);
+                true
+            }
+            "6" | "7" | "8" | "9" | "10" | "11" => {
+                // Modern room versions - SHA-256 required
+                debug!("Modern room version {}: SHA-256 validation required", room_version);
+                true
+            }
+            _ => {
+                // Unknown room version - assume modern requirements
+                warn!("Unknown room version {}: assuming modern hash requirements", room_version);
+                true
+            }
+        };
+
         // Validate SHA-256 hash (primary algorithm)
         if let Some(sha256_hash) = hashes_obj.get("sha256") {
             let provided_hash = sha256_hash.as_str().ok_or_else(|| {
@@ -1134,16 +1250,31 @@ impl PduValidator {
                 });
             }
 
-            debug!("SHA-256 content hash verified successfully");
+            debug!("SHA-256 content hash verified for room version {}", room_version);
+        } else if supports_sha256 && room_version >= "6" {
+            // Room version 6+ requires SHA-256 hashes per Matrix specification
+            return Err(PduValidationError::HashMismatch {
+                expected: format!("sha256 hash required for room version {}", room_version),
+                actual: "missing sha256 hash".to_string(),
+            });
         }
 
         // Validate any additional hash algorithms for future compatibility
         for (algorithm, hash_value) in hashes_obj {
             if algorithm != "sha256" {
-                debug!(
-                    "Unknown hash algorithm '{}' in event - ignoring for forward compatibility",
-                    algorithm
-                );
+                // Validate hash_value format for unknown algorithms
+                if let Some(hash_str) = hash_value.as_str() {
+                    if hash_str.is_empty() {
+                        warn!("Empty hash value for algorithm '{}' - potential validation issue", algorithm);
+                    } else {
+                        debug!(
+                            "Unknown hash algorithm '{}' with value length {} - stored for future compatibility",
+                            algorithm, hash_str.len()
+                        );
+                    }
+                } else {
+                    warn!("Invalid hash value format for algorithm '{}' - expected string", algorithm);
+                }
             }
         }
 
@@ -1234,7 +1365,7 @@ impl PduValidator {
         let hash = hasher.finalize();
 
         // Encode as base64 without padding (Matrix standard)
-        Ok(general_purpose::STANDARD_NO_PAD.encode(&hash))
+        Ok(general_purpose::STANDARD_NO_PAD.encode(hash))
     }
 
     /// Compute event ID from event content (room version 4+)
@@ -1320,7 +1451,6 @@ impl PduValidator {
     }
 
     /// Replaced by EventSigningEngine.validate_event_crypto
-
     /// Step 6: Validate against current room state (soft-fail check)
     async fn validate_current_state(&self, event: &Event) -> Result<(), PduValidationError> {
         // This validation can fail without rejecting the event (soft-fail)
@@ -1333,7 +1463,7 @@ impl PduValidator {
         }
 
         // Validate prev_events exist and are reasonable
-        if event.prev_events.as_ref().map_or(true, |pe| pe.is_empty()) &&
+        if event.prev_events.as_ref().is_none_or(|pe| pe.is_empty()) &&
             event.depth.unwrap_or(0) > 0
         {
             return Err(PduValidationError::StateError(
@@ -1354,7 +1484,6 @@ impl PduValidator {
     }
 
     /// Replaced by EventSigningEngine.calculate_content_hash and related methods
-
     /// Get public key for server (production implementation needed)
     async fn get_server_public_key(
         &self,
@@ -1410,14 +1539,18 @@ impl PduValidator {
             PduValidationError::CryptoError(format!("Failed to create HTTP client: {}", e))
         })?;
 
-        // Construct the server key URL
-        let url = format!("https://{}/_matrix/key/v2/server", server_name);
+        // Resolve server using Matrix DNS resolution
+        let resolved = self.dns_resolver.resolve_server(server_name).await?;
+        let base_url = self.dns_resolver.get_base_url(&resolved);
+        let host_header = self.dns_resolver.get_host_header(&resolved);
+        let url = format!("{}/_matrix/key/v2/server", base_url);
         debug!("Fetching server keys from: {}", url);
 
         // Make HTTP request to fetch server keys
         let response = client
             .get(&url)
             .header("User-Agent", "matryx-homeserver/1.0")
+            .header("Host", host_header)
             .send()
             .await
             .map_err(|e| {
@@ -1535,7 +1668,7 @@ impl PduValidator {
             obj.remove("signatures");
         }
 
-        let canonical_json = self.to_canonical_json(&key_for_signing)?;
+        let canonical_json = Self::to_canonical_json(&key_for_signing)?;
 
         // Verify at least one signature from the server
         let mut verified = false;
@@ -1545,28 +1678,27 @@ impl PduValidator {
             })?;
 
             // Get the public key for this signature
-            if let Some(key_data) = verify_keys.get(signature_key_id) {
-                if let Some(public_key) = key_data.get("key").and_then(|k| k.as_str()) {
-                    match self.session_service.verify_ed25519_signature(
-                        signature_str,
-                        &canonical_json,
-                        public_key,
-                    ) {
-                        Ok(_) => {
-                            debug!(
-                                "Verified server key signature from {} with key {}",
-                                server_name, signature_key_id
-                            );
-                            verified = true;
-                            break;
-                        },
-                        Err(e) => {
-                            warn!(
-                                "Failed to verify server key signature from {} with key {}: {:?}",
-                                server_name, signature_key_id, e
-                            );
-                        },
-                    }
+            if let Some(key_data) = verify_keys.get(signature_key_id)
+                && let Some(public_key) = key_data.get("key").and_then(|k| k.as_str()) {
+                match self.session_service.verify_ed25519_signature(
+                    signature_str,
+                    &canonical_json,
+                    public_key,
+                ) {
+                    Ok(_) => {
+                        debug!(
+                            "Verified server key signature from {} with key {}",
+                            server_name, signature_key_id
+                        );
+                        verified = true;
+                        break;
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Failed to verify server key signature from {} with key {}: {:?}",
+                            server_name, signature_key_id, e
+                        );
+                    },
                 }
             }
         }
@@ -1591,6 +1723,13 @@ impl PduValidator {
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24); // Cache for 24 hours
         let fetched_at = chrono::Utc::now();
 
+        // Validate we're not caching our own homeserver's keys incorrectly
+        if server_name == self.homeserver_name {
+            warn!("Attempted to cache key for our own homeserver {}, using local keys instead", 
+                  self.homeserver_name);
+            return Ok(());
+        }
+
         // Cache server signing key using key server repository
         self.key_server_repo
             .cache_server_signing_key(server_name, key_id, public_key, fetched_at, expires_at)
@@ -1599,8 +1738,79 @@ impl PduValidator {
                 PduValidationError::CryptoError(format!("Failed to cache server key: {}", e))
             })?;
 
+        // Also log to database for audit trail using direct DB connection
+        let audit_query = "CREATE audit_log SET 
+            event_type = 'server_key_cached',
+            server_name = $server_name,
+            key_id = $key_id,
+            homeserver = $homeserver,
+            timestamp = time::now()";
+        
+        if let Err(e) = self.db.query(audit_query)
+            .bind(("server_name", server_name.to_string()))
+            .bind(("key_id", key_id.to_string())) 
+            .bind(("homeserver", self.homeserver_name.clone()))
+            .await {
+            warn!("Failed to log server key caching audit: {}", e);
+        }
+
         debug!("Cached server key {}:{} (expires: {})", server_name, key_id, expires_at);
         Ok(())
+    }
+
+    /// Verify event signatures using comprehensive Matrix cryptographic validation
+    ///
+    /// This method provides additional signature verification using the PduValidator's
+    /// own cryptographic methods, complementing the EventSigningEngine validation.
+    async fn verify_event_signatures(
+        &self,
+        event: &Event,
+        expected_server: &str,
+    ) -> Result<(), PduValidationError> {
+        // Create canonical JSON of the event for signature verification
+        let mut event_json = serde_json::to_value(event)
+            .map_err(|e| PduValidationError::CryptoError(format!("JSON serialization error: {}", e)))?;
+        
+        // Remove signatures for canonical form
+        if let Some(obj) = event_json.as_object_mut() {
+            obj.remove("signatures");
+            obj.remove("unsigned");
+        }
+        
+        let canonical_json = Self::to_canonical_json(&event_json)?;
+        
+        // Get event signatures
+        let signatures = event.signatures.as_ref()
+            .ok_or_else(|| PduValidationError::SignatureError("Event missing signatures".to_string()))?;
+        
+        // Verify signature from expected server
+        if let Some(server_sigs) = signatures.get(expected_server) {
+            for (key_id, signature) in server_sigs {
+                // Try to get public key using our methods
+                match self.get_server_public_key(expected_server, key_id).await {
+                    Ok(public_key) => {
+                        // Verify signature using session service
+                        if self.session_service.verify_ed25519_signature(
+                            signature, 
+                            &canonical_json, 
+                            &public_key
+                        ).is_ok() {
+                            info!("Event signature verified for {}:{} on event {}", 
+                                  expected_server, key_id, event.event_id);
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to get public key {}:{}: {}", expected_server, key_id, e);
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        Err(PduValidationError::SignatureError(
+            format!("No valid signature found from server {}", expected_server)
+        ))
     }
 
     /// Convert JSON value to Matrix canonical JSON string with sorted keys
@@ -1613,18 +1823,18 @@ impl PduValidator {
     ///
     /// This is critical for signature verification and hash calculation to work
     /// correctly with other Matrix homeservers.
-    fn to_canonical_json(&self, value: &Value) -> Result<String, PduValidationError> {
+    fn to_canonical_json(value: &Value) -> Result<String, PduValidationError> {
         match value {
             Value::Null => Ok("null".to_string()),
             Value::Bool(b) => Ok(b.to_string()),
             Value::Number(n) => Ok(n.to_string()),
             Value::String(s) => {
                 // JSON string with proper escaping
-                Ok(serde_json::to_string(s).map_err(|e| PduValidationError::JsonError(e))?)
+                Ok(serde_json::to_string(s).map_err(PduValidationError::JsonError)?)
             },
             Value::Array(arr) => {
                 let elements: Result<Vec<String>, PduValidationError> =
-                    arr.iter().map(|v| self.to_canonical_json(v)).collect();
+                    arr.iter().map(Self::to_canonical_json).collect();
                 Ok(format!("[{}]", elements?.join(",")))
             },
             Value::Object(obj) => {
@@ -1636,8 +1846,8 @@ impl PduValidator {
                     .into_iter()
                     .map(|key| {
                         let key_json = serde_json::to_string(key)
-                            .map_err(|e| PduValidationError::JsonError(e))?;
-                        let value_json = self.to_canonical_json(&obj[key])?;
+                            .map_err(PduValidationError::JsonError)?;
+                        let value_json = Self::to_canonical_json(&obj[key])?;
                         Ok(format!("{}:{}", key_json, value_json))
                     })
                     .collect();

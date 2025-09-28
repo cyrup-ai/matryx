@@ -5,14 +5,14 @@ use axum::{
     response::Json,
 };
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
 use crate::auth::{MatrixAuthError, extract_matrix_auth};
 use crate::state::AppState;
+use matryx_surrealdb::repository::{UserRepository, DeviceRepository, SessionRepository};
 
 #[derive(Serialize)]
 pub struct WhoisResponse {
@@ -63,19 +63,10 @@ pub async fn get(
         user_id, addr, target_user_id
     );
 
-    // Check if user is admin
-    let admin_check_query = "SELECT is_admin FROM users WHERE user_id = $user_id";
-    let is_admin = match state.db.query(admin_check_query).bind(("user_id", user_id.clone())).await
-    {
-        Ok(mut result) => {
-            match result.take::<Vec<bool>>(0) {
-                Ok(admin_flags) => admin_flags.into_iter().next().unwrap_or(false),
-                Err(e) => {
-                    error!("Failed to parse admin status: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                },
-            }
-        },
+    // Check if user is admin using repository
+    let user_repo = UserRepository::new(state.db.clone());
+    let is_admin = match user_repo.is_admin(&user_id).await {
+        Ok(admin_status) => admin_status,
         Err(e) => {
             error!("Failed to check admin status: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -87,25 +78,11 @@ pub async fn get(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Check if target user exists
-    let user_exists_query = "SELECT user_id FROM users WHERE user_id = $user_id";
-    let user_exists = match state
-        .db
-        .query(user_exists_query)
-        .bind(("user_id", target_user_id.clone()))
-        .await
-    {
-        Ok(mut result) => {
-            match result.take::<Vec<String>>(0) {
-                Ok(users) => !users.is_empty(),
-                Err(e) => {
-                    error!("Failed to check user existence: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                },
-            }
-        },
+    // Check if target user exists using repository
+    let user_exists = match user_repo.user_exists_admin(&target_user_id).await {
+        Ok(exists) => exists,
         Err(e) => {
-            error!("Failed to query user existence: {}", e);
+            error!("Failed to check user existence: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };
@@ -114,31 +91,10 @@ pub async fn get(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Get user's devices and sessions
-    let devices_query = r#"
-        SELECT d.device_id, d.display_name, d.last_seen_ip, d.last_seen_ts, d.user_agent
-        FROM devices d
-        WHERE d.user_id = $user_id
-    "#;
-
-    let devices = match state
-        .db
-        .query(devices_query)
-        .bind(("user_id", target_user_id.clone()))
-        .await
-    {
-        Ok(mut result) => {
-            match result
-                .take::<Vec<(String, Option<String>, Option<String>, Option<i64>, Option<String>)>>(
-                    0,
-                ) {
-                Ok(devices) => devices,
-                Err(e) => {
-                    error!("Failed to parse devices: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                },
-            }
-        },
+    // Get user's devices using repository
+    let device_repo = DeviceRepository::new(state.db.clone());
+    let devices = match device_repo.get_user_devices_for_admin(&target_user_id).await {
+        Ok(devices) => devices,
         Err(e) => {
             error!("Failed to query devices: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -160,38 +116,25 @@ pub async fn get(
         device_info_map.insert(device_id, WhoisDeviceInfo { sessions });
     }
 
-    // Get additional session information from access tokens
-    let tokens_query = r#"
-        SELECT device_id, last_used_ip, last_used_ts
-        FROM user_access_tokens
-        WHERE user_id = $user_id AND expires_at > time::now()
-    "#;
-
-    if let Ok(mut result) = state
-        .db
-        .query(tokens_query)
-        .bind(("user_id", target_user_id.clone()))
-        .await
-    {
-        if let Ok(tokens) = result.take::<Vec<(String, Option<String>, Option<i64>)>>(0) {
-            for (device_id, last_used_ip, last_used_ts) in tokens {
-                if let Some(device_info) = device_info_map.get_mut(&device_id) {
-                    if let (Some(ip), Some(ts)) = (last_used_ip, last_used_ts) {
-                        // Add or update connection info
-                        if let Some(session) = device_info.sessions.get_mut(0) {
-                            // Check if we already have this IP, if not add it
-                            let has_ip = session.connections.iter().any(|c| c.ip == ip);
-                            if !has_ip {
-                                session.connections.push(ConnectionInfo {
-                                    ip,
-                                    last_seen: ts as u64,
-                                    user_agent: None,
-                                });
-                            }
+    // Get additional session information from access tokens using repository
+    let session_repo = SessionRepository::new(state.db.clone());
+    if let Ok(tokens) = session_repo.get_user_access_tokens_for_admin(&target_user_id).await {
+        for (device_id, last_used_ip, last_used_ts) in tokens {
+            if let Some(device_info) = device_info_map.get_mut(&device_id)
+                && let (Some(ip), Some(ts)) = (last_used_ip, last_used_ts) {
+                    // Add or update connection info
+                    if let Some(session) = device_info.sessions.get_mut(0) {
+                        // Check if we already have this IP, if not add it
+                        let has_ip = session.connections.iter().any(|c| c.ip == ip);
+                        if !has_ip {
+                            session.connections.push(ConnectionInfo {
+                                ip,
+                                last_seen: ts as u64,
+                                user_agent: None,
+                            });
                         }
                     }
                 }
-            }
         }
     }
 

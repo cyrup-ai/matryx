@@ -240,8 +240,9 @@ impl ClientApiService {
         user_id: &str,
         from: Option<&str>,
         limit: Option<u32>,
+        only: Option<&str>,
     ) -> Result<NotificationResponse, RepositoryError> {
-        self.notification_repo.get_user_notifications(user_id, from, limit).await
+        self.notification_repo.get_user_notifications(user_id, from, limit, only).await
     }
 
     pub async fn handle_capabilities_request(

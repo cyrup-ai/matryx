@@ -1,5 +1,4 @@
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use surrealdb::{Surreal, engine::local::Mem};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -173,7 +172,7 @@ impl DatabaseTestHarness {
 
         for table in tables_to_test {
             let result: Vec<Value> =
-                self.db.query(&format!("SELECT * FROM {} LIMIT 1", table)).await?.take(0)?;
+                self.db.query(format!("SELECT * FROM {} LIMIT 1", table)).await?.take(0)?;
 
             // Table should exist and be queryable (empty result is fine)
             assert!(

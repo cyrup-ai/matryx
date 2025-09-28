@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -82,6 +81,18 @@ pub async fn post(
         },
         _ => return Err(StatusCode::FORBIDDEN),
     };
+
+    // Handle User Interactive Authentication (UIA) if provided
+    // According to Matrix spec, device signing key upload may require UIA for cross-signing setup
+    if let Some(auth_data) = &request.auth {
+        info!(
+            "Device signing upload with UIA auth data for user: {} - Type: {}",
+            user_id,
+            auth_data.get("type").and_then(|v| v.as_str()).unwrap_or("unknown")
+        );
+        // TODO: Implement proper UIA (User Interactive Authentication) validation
+        // This should validate the auth data against current UIA session flows
+    }
 
     // Store master key
     if let Some(master_key) = request.master_key {

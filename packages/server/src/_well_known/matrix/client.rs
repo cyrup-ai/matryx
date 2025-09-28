@@ -15,10 +15,10 @@ use tracing::{error, info, warn};
 /// Matrix client auto-discovery information with validation
 pub async fn get() -> Result<Json<Value>, StatusCode> {
     // Get configuration from centralized ServerConfig
-    let config = match std::panic::catch_unwind(|| ServerConfig::get()) {
+    let config = match ServerConfig::get() {
         Ok(config) => config,
-        Err(_) => {
-            error!("Failed to get server configuration for client discovery");
+        Err(e) => {
+            error!("Failed to get server configuration for client discovery: {:?}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };
@@ -58,17 +58,16 @@ pub async fn get() -> Result<Json<Value>, StatusCode> {
     });
 
     // Add identity server information if configured
-    if let Ok(identity_server) = env::var("MATRIX_IDENTITY_SERVER") {
-        if !identity_server.is_empty() {
-            discovery_info.as_object_mut().and_then(|obj| {
-                obj.insert(
-                    "m.identity_server".to_string(),
-                    json!({
-                        "base_url": identity_server
-                    }),
-                )
-            });
-        }
+    if let Ok(identity_server) = env::var("MATRIX_IDENTITY_SERVER")
+        && !identity_server.is_empty() {
+        discovery_info.as_object_mut().and_then(|obj| {
+            obj.insert(
+                "m.identity_server".to_string(),
+                json!({
+                    "base_url": identity_server
+                }),
+            )
+        });
     }
 
     Ok(Json(discovery_info))

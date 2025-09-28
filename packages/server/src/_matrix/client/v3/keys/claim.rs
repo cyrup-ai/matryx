@@ -3,8 +3,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 
@@ -12,6 +11,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::KeysRepository;
 
 #[derive(Deserialize)]
 pub struct KeysClaimRequest {
@@ -42,113 +42,74 @@ pub async fn post(
 
     let mut claimed_keys = std::collections::HashMap::new();
     let mut failures = std::collections::HashMap::new();
+    let keys_repo = KeysRepository::new(state.db.clone());
+
+    // Handle timeout parameter from request (Matrix spec: max time client will wait)
+    let timeout_ms = request.timeout.unwrap_or(10000); // Default 10 seconds
+    if timeout_ms > 0 {
+        info!("Keys claim request with timeout: {}ms", timeout_ms);
+    }
 
     // Process each user's device key claims
     for (user_id, device_algorithms) in &request.one_time_keys {
         let mut user_claimed_keys = std::collections::HashMap::new();
 
         for (device_id, algorithm) in device_algorithms {
-            // Find an available one-time key for this user/device/algorithm
-            let query = "
-                SELECT * FROM one_time_keys 
-                WHERE user_id = $user_id 
-                  AND device_id = $device_id 
-                  AND key_id LIKE $algorithm_pattern
-                  AND claimed = false 
-                LIMIT 1
-            ";
-
-            let algorithm_pattern = format!("{}:%", algorithm);
-            let mut response = state
-                .db
-                .query(query)
-                .bind(("user_id", user_id.clone()))
-                .bind(("device_id", device_id.clone()))
-                .bind(("algorithm_pattern", algorithm_pattern.clone()))
-                .await
-                .map_err(|e| {
-                    error!(
-                        "Failed to query one-time keys for user {} device {}: {}",
-                        user_id, device_id, e
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-
-            let key_record: Option<Value> =
-                response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if let Some(key_data) = key_record {
-                let key_id =
-                    key_data.get("key_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let key_value = key_data.get("key").cloned().unwrap_or(json!({}));
-
-                // Mark the key as claimed
-                let update_query = "UPDATE one_time_keys SET claimed = true WHERE user_id = $user_id AND device_id = $device_id AND key_id = $key_id";
-                let _update_result = state
-                    .db
-                    .query(update_query)
-                    .bind(("user_id", user_id.clone()))
-                    .bind(("device_id", device_id.clone()))
-                    .bind(("key_id", key_id.clone()))
-                    .await
-                    .map_err(|e| {
-                        error!("Failed to mark one-time key as claimed: {}", e);
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
-
-                // Add to claimed keys response
-                let mut device_keys = std::collections::HashMap::new();
-                device_keys.insert(key_id.clone(), key_value);
-                user_claimed_keys.insert(device_id.clone(), device_keys);
-
-                info!(
-                    "One-time key claimed: user={} device={} algorithm={} key_id={}",
-                    user_id, device_id, algorithm, key_id
-                );
-            } else {
-                // No available key found - check for fallback keys
-                let fallback_query = "
-                    SELECT * FROM fallback_keys 
-                    WHERE user_id = $user_id 
-                      AND device_id = $device_id 
-                      AND key_id LIKE $algorithm_pattern
-                    LIMIT 1
-                ";
-
-                let mut fallback_response = state
-                    .db
-                    .query(fallback_query)
-                    .bind(("user_id", user_id.clone()))
-                    .bind(("device_id", device_id.clone()))
-                    .bind(("algorithm_pattern", algorithm_pattern))
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                let fallback_key: Option<Value> =
-                    fallback_response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if let Some(fallback_data) = fallback_key {
-                    let key_id = fallback_data
-                        .get("key_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let key_value = fallback_data.get("key").cloned().unwrap_or(json!({}));
-
+            // Try to claim a one-time key first
+            match keys_repo.claim_one_time_keys(user_id, device_id, algorithm).await {
+                Ok(Some((key_id, key_value))) => {
+                    // Successfully claimed a one-time key
                     let mut device_keys = std::collections::HashMap::new();
                     device_keys.insert(key_id.clone(), key_value);
                     user_claimed_keys.insert(device_id.clone(), device_keys);
 
                     info!(
-                        "Fallback key used: user={} device={} algorithm={} key_id={}",
+                        "One-time key claimed: user={} device={} algorithm={} key_id={}",
                         user_id, device_id, algorithm, key_id
                     );
-                } else {
-                    // No keys available
+                },
+                Ok(None) => {
+                    // No one-time key available, try fallback keys
+                    match keys_repo.find_fallback_keys(user_id, device_id, algorithm).await {
+                        Ok(Some((key_id, key_value))) => {
+                            let mut device_keys = std::collections::HashMap::new();
+                            device_keys.insert(key_id.clone(), key_value);
+                            user_claimed_keys.insert(device_id.clone(), device_keys);
+
+                            info!(
+                                "Fallback key used: user={} device={} algorithm={} key_id={}",
+                                user_id, device_id, algorithm, key_id
+                            );
+                        },
+                        Ok(None) => {
+                            // No keys available
+                            failures.insert(
+                                format!("{}:{}", user_id, device_id),
+                                json!({
+                                    "error": "No one-time keys available"
+                                }),
+                            );
+                        },
+                        Err(e) => {
+                            error!("Failed to find fallback keys: {}", e);
+                            failures.insert(
+                                format!("{}:{}", user_id, device_id),
+                                json!({
+                                    "error": "Failed to query fallback keys"
+                                }),
+                            );
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!(
+                        "Failed to claim one-time keys for user {} device {}: {}",
+                        user_id, device_id, e
+                    );
                     failures.insert(
                         format!("{}:{}", user_id, device_id),
                         json!({
-                            "error": "No one-time keys available"
+                            "error": "Failed to claim one-time keys"
                         }),
                     );
                 }

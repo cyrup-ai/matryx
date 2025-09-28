@@ -76,4 +76,43 @@ impl<C: Connection> EDURepository<C> {
             }
         })
     }
+
+    /// Record device list stream ID for a user
+    pub async fn record_device_list_stream_id(&self, user_id: &str, stream_id: u64) -> Result<(), RepositoryError> {
+        use matryx_entity::types::{EphemeralEvent, EventContent};
+        
+        let ephemeral_event = EphemeralEvent::new(
+            EventContent::unknown(serde_json::json!({
+                "user_id": user_id,
+                "stream_id": stream_id
+            })),
+            "m.device_list_stream".to_string(),
+            None, // No room_id for device list streams
+            user_id.to_string(),
+        );
+
+        let edu = EDU::new(ephemeral_event, true); // Non-persistent
+
+        self.create(&edu).await?;
+        Ok(())
+    }
+
+    /// Get the latest device list stream ID for a user
+    pub async fn get_latest_device_list_stream_id(&self, user_id: &str) -> Result<Option<u64>, RepositoryError> {
+        let user_id_owned = user_id.to_string();
+        let edus: Vec<EDU> = self
+            .db
+            .query("SELECT * FROM edu WHERE ephemeral_event.event_type = 'm.device_list_stream' AND ephemeral_event.sender = $user_id ORDER BY created_at DESC LIMIT 1")
+            .bind(("user_id", user_id_owned))
+            .await?
+            .take(0)?;
+
+        if let Some(edu) = edus.first()
+            && let Some(stream_id_value) = edu.ephemeral_event.content.get("stream_id")
+            && let Some(stream_id) = stream_id_value.as_u64() {
+            return Ok(Some(stream_id));
+        }
+
+        Ok(None)
+    }
 }

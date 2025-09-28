@@ -2,7 +2,7 @@ mod common;
 mod test_config;
 
 use common::integration::compliance::*;
-use common::integration::{MatrixTestServer, create_test_room, create_test_user};
+use common::integration::MatrixTestServer;
 use test_config::TestConfig;
 
 #[tokio::test]

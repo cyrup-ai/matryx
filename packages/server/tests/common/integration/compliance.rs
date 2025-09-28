@@ -1,8 +1,9 @@
 use super::{MatrixTestServer, create_test_room, create_test_user};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashMap;
 use std::process::Command;
 use tempfile::TempDir;
+use tracing::warn;
 
 /// SyTest Runner for Matrix compliance testing
 pub struct SyTestRunner {
@@ -35,12 +36,18 @@ impl SyTestRunner {
             });
         }
 
+        // Use temp_dir for test output and working directory
+        let test_output_dir = self.temp_dir.path().join("sytest_output");
+        std::fs::create_dir_all(&test_output_dir)?;
+        
         let output = Command::new("perl")
             .arg(format!("{}/run-tests.pl", self.sytest_path))
             .arg("--homeserver-url")
             .arg(&self.homeserver_url)
             .arg("--output-format")
             .arg("tap")
+            .arg("--output-dir")
+            .arg(&test_output_dir)
             .current_dir(&self.sytest_path)
             .output();
 
@@ -48,6 +55,11 @@ impl SyTestRunner {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
+
+                // Log stderr if there are any error messages from the test runner
+                if !stderr.trim().is_empty() {
+                    warn!("Compliance test stderr output: {}", stderr);
+                }
 
                 // Parse TAP output for basic results
                 let lines: Vec<&str> = stdout.lines().collect();
@@ -107,10 +119,79 @@ pub struct SyTestResults {
     pub status: String,
 }
 
+impl SyTestResults {
+    /// Get a summary of test results
+    pub fn get_summary(&self) -> String {
+        format!(
+            "Tests: {} total, {} passed, {} failed, {} skipped. Status: {}. {} failure details.",
+            self.total_tests, self.passed, self.failed, self.skipped, self.status, self.failures.len()
+        )
+    }
+    
+    /// Check if all tests passed
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0 && self.failures.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct TestFailure {
     pub test_name: String,
     pub error: String,
+}
+
+impl TestFailure {
+    /// Create a new test failure
+    pub fn new(test_name: String, error: String) -> Self {
+        Self { test_name, error }
+    }
+    
+    /// Get formatted failure message
+    pub fn get_formatted_message(&self) -> String {
+        format!("Test '{}' failed: {}", self.test_name, self.error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sytest_results_usage() {
+        let failure = TestFailure::new("test_login".to_string(), "Connection refused".to_string());
+        let results = SyTestResults {
+            total_tests: 100,
+            passed: 95,
+            failed: 5,
+            skipped: 0,
+            failures: vec![failure],
+            status: "completed".to_string(),
+        };
+        
+        // Use all SyTestResults fields and methods
+        let summary = results.get_summary();
+        assert!(summary.contains("100 total"));
+        assert!(summary.contains("95 passed"));
+        assert!(summary.contains("5 failed"));
+        assert!(summary.contains("1 failure details"));
+        
+        assert!(!results.all_passed());
+        assert_eq!(results.total_tests, 100);
+        assert_eq!(results.failures.len(), 1);
+    }
+    
+    #[test]
+    fn test_test_failure_usage() {
+        let failure = TestFailure::new("test_sync".to_string(), "Timeout".to_string());
+        
+        // Use TestFailure fields and methods
+        assert_eq!(failure.test_name, "test_sync");
+        assert_eq!(failure.error, "Timeout");
+        
+        let message = failure.get_formatted_message();
+        assert!(message.contains("test_sync"));
+        assert!(message.contains("Timeout"));
+    }
 }
 
 /// Endpoint Compliance Testing for all 222 implemented endpoints
@@ -354,13 +435,9 @@ impl ComplianceReport {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
     #[tokio::test]
     async fn test_endpoint_compliance_foundation() {
-        let mut compliance_test = EndpointComplianceTest::new().await.unwrap();
+        let compliance_test = EndpointComplianceTest::new().await.unwrap();
         let report = compliance_test.test_foundation_api().await.unwrap();
 
         // Should have at least basic endpoints working
@@ -420,4 +497,3 @@ mod tests {
                 results.status == "ERROR"
         );
     }
-}

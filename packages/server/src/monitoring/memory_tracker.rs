@@ -2,7 +2,7 @@ use matryx_surrealdb::repository::{HealthStatus, MonitoringRepository, Performan
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use surrealdb::engine::any::Any;
 use tracing::warn;
 
@@ -121,9 +121,16 @@ impl LazyLoadingMemoryTracker {
             1.0
         };
 
-        if current_mb >= CRITICAL_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO * 2.0 {
+        // Use peak_mb for additional health assessment
+        let peak_growth_ratio = if baseline_mb > 0.0 {
+            peak_mb / baseline_mb
+        } else {
+            1.0
+        };
+
+        if current_mb >= CRITICAL_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO * 2.0 || peak_growth_ratio >= GROWTH_WARNING_RATIO * 3.0 {
             MemoryHealthStatus::Critical
-        } else if current_mb >= WARNING_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO {
+        } else if current_mb >= WARNING_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO || peak_growth_ratio >= GROWTH_WARNING_RATIO * 1.5 {
             MemoryHealthStatus::Warning
         } else {
             MemoryHealthStatus::Healthy
@@ -179,6 +186,26 @@ impl LazyLoadingMemoryTracker {
         self.measurement_count.store(0, Ordering::Relaxed);
         if let Ok(mut last) = self.last_measurement.lock() {
             *last = None;
+        }
+    }
+
+    /// Get current memory usage in megabytes
+    pub fn get_current_memory_mb(&self) -> Option<f64> {
+        let bytes = self.current_memory.load(Ordering::Relaxed);
+        if bytes > 0 {
+            Some(bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            None
+        }
+    }
+
+    /// Get peak memory usage in megabytes
+    pub fn get_peak_memory_mb(&self) -> Option<f64> {
+        let bytes = self.peak_memory.load(Ordering::Relaxed);
+        if bytes > 0 {
+            Some(bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            None
         }
     }
 }

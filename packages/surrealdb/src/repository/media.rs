@@ -77,13 +77,12 @@ impl<C: Connection> MediaRepository<C> {
             .await?;
         let content_data: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(data) = content_data.first() {
-            if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
-                // In a real implementation, this would be stored as binary data
-                // For now, we'll decode from base64
-                if let Ok(bytes) = general_purpose::STANDARD.decode(content) {
-                    return Ok(Some(bytes));
-                }
+        if let Some(data) = content_data.first()
+            && let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+            // In a real implementation, this would be stored as binary data
+            // For now, we'll decode from base64
+            if let Ok(bytes) = general_purpose::STANDARD.decode(content) {
+                return Ok(Some(bytes));
             }
         }
 
@@ -155,12 +154,10 @@ impl<C: Connection> MediaRepository<C> {
             .await?;
         let thumbnail_data: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(data) = thumbnail_data.first() {
-            if let Some(thumbnail) = data.get("thumbnail_data").and_then(|v| v.as_str()) {
-                if let Ok(bytes) = general_purpose::STANDARD.decode(thumbnail) {
-                    return Ok(Some(bytes));
-                }
-            }
+        if let Some(data) = thumbnail_data.first()
+            && let Some(thumbnail) = data.get("thumbnail_data").and_then(|v| v.as_str())
+            && let Ok(bytes) = general_purpose::STANDARD.decode(thumbnail) {
+            return Ok(Some(bytes));
         }
 
         Ok(None)
@@ -345,10 +342,8 @@ impl<C: Connection> MediaRepository<C> {
             if let (Some(media_id), Some(server_name)) = (
                 media.get("media_id").and_then(|v| v.as_str()),
                 media.get("server_name").and_then(|v| v.as_str()),
-            ) {
-                if self.delete_media(media_id, server_name).await.is_ok() {
-                    deleted_count += 1;
-                }
+            ) && self.delete_media(media_id, server_name).await.is_ok() {
+                deleted_count += 1;
             }
         }
 

@@ -102,7 +102,22 @@ pub async fn post_register(
     headers: HeaderMap,
     Json(request): Json<RegistrationRequest>,
 ) -> Result<Json<RegistrationResponse>, StatusCode> {
-    info!("Processing user registration request");
+    // Extract client information for audit logging
+    let client_ip = extract_client_ip(&headers);
+    let user_agent = extract_user_agent(&headers);
+    
+    info!("Processing user registration request from IP: {}, User-Agent: {}", client_ip, user_agent);
+
+    // Handle User Interactive Authentication (UIA) if required
+    if let Some(auth_data) = &request.auth {
+        info!("Processing UIA authentication data for registration");
+        // TODO: Implement full UIA flow according to Matrix spec
+        // For now, validate that auth data is properly formatted
+        if !auth_data.is_object() {
+            error!("Invalid UIA auth data format");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
 
     // Validate registration request
     let username = validate_registration_request(&request)?;
@@ -150,23 +165,30 @@ pub async fn post_register(
     let device_id = request.device_id.as_deref();
 
     match infrastructure_service
-        .register_new_user(
+        .register_new_user_with_options(
             &username,
             password,
             device_id,
             request.initial_device_display_name.as_deref(),
+            request.refresh_token, // Pass refresh token preference
         )
         .await
     {
         Ok(registration_result) => {
             info!("User registration completed successfully for: {}", registration_result.user_id);
 
-            // Return registration response
+            // Return registration response with refresh token if requested and supported
+            let refresh_token = if request.refresh_token {
+                registration_result.refresh_token
+            } else {
+                None
+            };
+
             Ok(Json(RegistrationResponse {
                 user_id: registration_result.user_id,
                 access_token: Some(registration_result.access_token),
                 device_id: Some(registration_result.device_id),
-                refresh_token: registration_result.refresh_token,
+                refresh_token,
                 expires_in_ms: registration_result.expires_in_ms,
                 well_known: Some(serde_json::json!({
                     "m.homeserver": {
@@ -222,12 +244,11 @@ fn validate_registration_request(
     };
 
     // Validate password strength if provided
-    if let Some(password) = &request.password {
-        if !is_strong_password(password) {
+    if let Some(password) = &request.password
+        && !is_strong_password(password) {
             warn!("Weak password provided for user: {}", username);
             return Err(RegistrationError::WeakPassword);
         }
-    }
 
     Ok(username)
 }

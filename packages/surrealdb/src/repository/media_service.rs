@@ -1,4 +1,5 @@
 use crate::repository::error::RepositoryError;
+use crate::repository::federation_media_trait::FederationMediaClientTrait;
 use crate::repository::media::{MediaInfo, MediaRepository};
 use crate::repository::membership::MembershipRepository;
 use crate::repository::room::RoomRepository;
@@ -8,6 +9,41 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use surrealdb::Connection;
 use uuid::Uuid;
+
+/// Matrix-compatible error enum for MediaService operations
+#[derive(Debug, thiserror::Error)]
+pub enum MediaError {
+    #[error("Media not found")]
+    NotFound,
+    #[error("Content not yet uploaded")]
+    NotYetUploaded,
+    #[error("Content too large")]
+    TooLarge,
+    #[error("Unsupported format")]
+    UnsupportedFormat,
+    #[error("Database error: {0}")]
+    Database(String),
+    #[error("Access denied: {0}")]
+    AccessDenied(String),
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+    #[error("Validation error: {0}")]
+    Validation(String),
+}
+
+impl From<RepositoryError> for MediaError {
+    fn from(repo_error: RepositoryError) -> Self {
+        match repo_error {
+            RepositoryError::NotFound { .. } => MediaError::NotFound,
+            RepositoryError::AccessDenied { reason } => MediaError::AccessDenied(reason),
+            RepositoryError::InvalidOperation { reason } => MediaError::InvalidOperation(reason),
+            RepositoryError::Validation { field, message } => {
+                MediaError::Validation(format!("{}: {}", field, message))
+            },
+            _ => MediaError::Database(repo_error.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaUploadResult {
@@ -57,10 +93,16 @@ pub struct MediaResponse {
     pub content_length: u64,
 }
 
+// Content size limits for Matrix specification compliance
+const MAX_MEDIA_SIZE: u64 = 50_000_000; // 50MB default
+const MAX_THUMBNAIL_SOURCE_SIZE: u64 = 20_000_000; // 20MB for thumbnailing
+
 pub struct MediaService<C: Connection> {
     media_repo: Arc<MediaRepository<C>>,
     room_repo: Arc<RoomRepository>,
     membership_repo: Arc<MembershipRepository>,
+    federation_media_client: Option<Arc<dyn FederationMediaClientTrait>>,
+    homeserver_name: String,
 }
 
 impl<C: Connection> MediaService<C> {
@@ -69,7 +111,24 @@ impl<C: Connection> MediaService<C> {
         room_repo: Arc<RoomRepository>,
         membership_repo: Arc<MembershipRepository>,
     ) -> Self {
-        Self { media_repo, room_repo, membership_repo }
+        Self { 
+            media_repo, 
+            room_repo, 
+            membership_repo,
+            federation_media_client: None,
+            homeserver_name: "localhost".to_string(), // Default, will be overridden
+        }
+    }
+
+    /// Configure federation client for remote media downloads
+    pub fn with_federation_client(
+        mut self,
+        client: Arc<dyn FederationMediaClientTrait>,
+        homeserver_name: String,
+    ) -> Self {
+        self.federation_media_client = Some(client);
+        self.homeserver_name = homeserver_name;
+        self
     }
 
     /// Upload media with validation and storage
@@ -117,43 +176,42 @@ impl<C: Connection> MediaService<C> {
         })
     }
 
-    /// Download media with access validation
+    /// Download media with access validation and remote server support
     pub async fn download_media(
         &self,
         media_id: &str,
         server_name: &str,
         requesting_user: &str,
-    ) -> Result<MediaDownloadResult, RepositoryError> {
+    ) -> Result<MediaDownloadResult, MediaError> {
+        // Check if this is a remote media request
+        if server_name != self.homeserver_name {
+            return self.download_remote_media(media_id, server_name, requesting_user).await;
+        }
+
+        // Existing local media logic (unchanged)
         // Validate media access
-        if !self.validate_media_access(media_id, server_name, requesting_user).await? {
-            return Err(RepositoryError::AccessDenied {
-                reason: "User does not have access to this media".to_string(),
-            });
+        if !self.validate_media_access(media_id, server_name, requesting_user).await
+            .map_err(MediaError::from)? {
+            return Err(MediaError::AccessDenied(
+                "User does not have access to this media".to_string()
+            ));
         }
 
         // Get media info
         let media_info =
             self.media_repo
                 .get_media_info(media_id, server_name)
-                .await?
-                .ok_or_else(|| {
-                    RepositoryError::NotFound {
-                        entity_type: "MediaInfo".to_string(),
-                        id: media_id.to_string(),
-                    }
-                })?;
+                .await
+                .map_err(MediaError::from)?
+                .ok_or(MediaError::NotFound)?;
 
         // Get media content
         let content = self
             .media_repo
             .get_media_content(media_id, server_name)
-            .await?
-            .ok_or_else(|| {
-                RepositoryError::NotFound {
-                    entity_type: "MediaInfo".to_string(),
-                    id: media_id.to_string(),
-                }
-            })?;
+            .await
+            .map_err(MediaError::from)?
+            .ok_or(MediaError::NotFound)?;
 
         Ok(MediaDownloadResult {
             content,
@@ -161,6 +219,25 @@ impl<C: Connection> MediaService<C> {
             content_length: media_info.content_length,
             filename: media_info.upload_name,
         })
+    }
+
+    /// Download media from remote Matrix server
+    async fn download_remote_media(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        _requesting_user: &str, // For future access control
+    ) -> Result<MediaDownloadResult, MediaError> {
+        let federation_client = self.federation_media_client
+            .as_ref()
+            .ok_or_else(|| MediaError::InvalidOperation(
+                "Federation media client not configured for remote media downloads".to_string()
+            ))?;
+
+        federation_client
+            .download_media(server_name, media_id)
+            .await
+            .map_err(MediaError::from)
     }
 
     /// Generate thumbnail with caching
@@ -171,12 +248,13 @@ impl<C: Connection> MediaService<C> {
         width: u32,
         height: u32,
         method: &str,
-    ) -> Result<ThumbnailResult, RepositoryError> {
+    ) -> Result<ThumbnailResult, MediaError> {
         // Check for existing thumbnail
         if let Some(existing_thumbnail) = self
             .media_repo
             .get_media_thumbnail(media_id, server_name, width, height, method)
-            .await?
+            .await
+            .map_err(MediaError::from)?
         {
             return Ok(ThumbnailResult {
                 thumbnail: existing_thumbnail,
@@ -190,38 +268,37 @@ impl<C: Connection> MediaService<C> {
         let media_info =
             self.media_repo
                 .get_media_info(media_id, server_name)
-                .await?
-                .ok_or_else(|| {
-                    RepositoryError::NotFound {
-                        entity_type: "MediaInfo".to_string(),
-                        id: media_id.to_string(),
-                    }
-                })?;
+                .await
+                .map_err(MediaError::from)?
+                .ok_or(MediaError::NotFound)?;
+
+        // Check source media size against thumbnail generation limits
+        if media_info.content_length > MAX_THUMBNAIL_SOURCE_SIZE {
+            return Err(MediaError::TooLarge);
+        }
 
         // Validate that this is an image
         if !media_info.content_type.starts_with("image/") {
-            return Err(RepositoryError::InvalidOperation { reason: "Not an image".to_string() });
+            return Err(MediaError::UnsupportedFormat);
         }
 
         // Get original content
         let original_content = self
             .media_repo
             .get_media_content(media_id, server_name)
-            .await?
-            .ok_or_else(|| {
-                RepositoryError::NotFound {
-                    entity_type: "MediaInfo".to_string(),
-                    id: media_id.to_string(),
-                }
-            })?;
+            .await
+            .map_err(MediaError::from)?
+            .ok_or(MediaError::NotFound)?;
 
         // Generate thumbnail (simplified - in real implementation would use image processing library)
-        let thumbnail = self.process_thumbnail(&original_content, width, height, method)?;
+        let thumbnail = self.process_thumbnail(&original_content, width, height, method)
+            .map_err(MediaError::from)?;
 
         // Store generated thumbnail
         self.media_repo
             .store_media_thumbnail(media_id, server_name, width, height, method, &thumbnail)
-            .await?;
+            .await
+            .map_err(MediaError::from)?;
 
         Ok(ThumbnailResult {
             thumbnail,
@@ -353,16 +430,13 @@ impl<C: Connection> MediaService<C> {
         
         // Check if upload_name follows Matrix media naming convention
         // Matrix media URLs often include room context in the filename or path
-        if let Some(upload_name) = &media_info.upload_name {
-            if upload_name.contains("room_") {
-                // Extract room ID from upload_name (simplified implementation)
-                if let Some(start) = upload_name.find("room_") {
-                    let room_part = &upload_name[start + 5..];
-                    if let Some(end) = room_part.find('_') {
-                        let potential_room_id = &room_part[..end];
-                        return Ok(Some(format!("!{}:example.com", potential_room_id)));
-                    }
-                }
+        if let Some(upload_name) = &media_info.upload_name
+            && upload_name.contains("room_")
+            && let Some(start) = upload_name.find("room_") {
+            let room_part = &upload_name[start + 5..];
+            if let Some(end) = room_part.find('_') {
+                let potential_room_id = &room_part[..end];
+                return Ok(Some(format!("!{}:example.com", potential_room_id)));
             }
         }
         
@@ -427,16 +501,29 @@ impl<C: Connection> MediaService<C> {
         media_id: &str,
         server_name: &str,
         requesting_server: &str,
-    ) -> Result<MediaResponse, RepositoryError> {
+    ) -> Result<MediaResponse, MediaError> {
         // Validate federation access (simplified - would check server allowlist)
         if requesting_server.is_empty() {
-            return Err(RepositoryError::AccessDenied {
-                reason: "User does not have access to this media".to_string(),
-            });
+            return Err(MediaError::AccessDenied(
+                "User does not have access to this media".to_string()
+            ));
+        }
+
+        // Get media info first to check size limits
+        let media_info = self.media_repo
+            .get_media_info(media_id, server_name)
+            .await
+            .map_err(MediaError::from)?
+            .ok_or(MediaError::NotFound)?;
+
+        // Check content size against limits before serving
+        if media_info.content_length > MAX_MEDIA_SIZE {
+            return Err(MediaError::TooLarge);
         }
 
         // Get media content
-        let download_result = self.download_media(media_id, server_name, requesting_server).await?;
+        let download_result = self.download_media(media_id, server_name, requesting_server).await
+            .map_err(MediaError::from)?;
 
         Ok(MediaResponse {
             content: download_result.content,
@@ -452,29 +539,26 @@ impl<C: Connection> MediaService<C> {
         width: u32,
         height: u32,
         method: &str,
-    ) -> Result<Vec<u8>, RepositoryError> {
+    ) -> Result<Vec<u8>, MediaError> {
         // Validate input parameters
         if original_content.is_empty() {
-            return Err(RepositoryError::Validation {
-                field: "original_content".to_string(),
-                message: "Original content cannot be empty".to_string(),
-            });
+            return Err(MediaError::Validation(
+                "Original content cannot be empty".to_string()
+            ));
         }
 
         if width == 0 || height == 0 {
-            return Err(RepositoryError::Validation {
-                field: "dimensions".to_string(),
-                message: "Width and height must be greater than 0".to_string(),
-            });
+            return Err(MediaError::Validation(
+                "Width and height must be greater than 0".to_string()
+            ));
         }
 
         // Validate resize method
         match method {
             "crop" | "scale" => {},
-            _ => return Err(RepositoryError::Validation {
-                field: "method".to_string(),
-                message: "Method must be 'crop' or 'scale'".to_string(),
-            }),
+            _ => return Err(MediaError::Validation(
+                "Method must be 'crop' or 'scale'".to_string()
+            )),
         }
 
         // For production use, this would integrate with an image processing library like image-rs
@@ -504,6 +588,46 @@ impl<C: Connection> MediaService<C> {
         // 4. Return the processed bytes
         
         Ok(thumbnail_data)
+    }
+
+    /// Update media metadata with new filename and content type
+    pub async fn update_media_metadata(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        filename: &str,
+        content_type: &str,
+    ) -> Result<(), RepositoryError> {
+        // Get existing media info and update it
+        if let Some(mut media_info) = self.media_repo.get_media_info(media_id, server_name).await? {
+            media_info.upload_name = Some(filename.to_string());
+            media_info.content_type = content_type.to_string();
+            
+            // Store the updated media info
+            self.media_repo
+                .store_media_info(media_id, server_name, &media_info)
+                .await
+                .map_err(|e| {
+                    tracing::warn!("Failed to update media metadata: {}", e);
+                    e
+                })?;
+        }
+        
+        Ok(())
+    }
+
+    /// Check if media exists in storage
+    pub async fn media_exists(
+        &self,
+        media_id: &str,
+        server_name: &str,
+    ) -> Result<bool, RepositoryError> {
+        // Check if media exists in the repository
+        match self.media_repo.get_media_info(media_id, server_name).await {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 

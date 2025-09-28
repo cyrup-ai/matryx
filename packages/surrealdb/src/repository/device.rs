@@ -1,9 +1,12 @@
 use crate::repository::error::RepositoryError;
 use futures_util::StreamExt;
-use matryx_entity::types::{Device, DeviceKey};
+use matryx_entity::types::{Device, DeviceKey, DeviceKeys};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
+
+/// Type alias for device query result tuple
+type DeviceQueryResult = (String, Option<String>, Option<String>, Option<i64>, Option<String>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientDeviceInfo {
@@ -25,15 +28,7 @@ pub struct FederationDevice {
     pub last_seen_ts: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub user_id: String,
-    pub device_id: String,
-    pub algorithms: Vec<String>,
-    pub keys: HashMap<String, String>,
-    pub signatures: HashMap<String, HashMap<String, String>>,
-    pub unsigned: Option<serde_json::Value>,
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceListResponse {
@@ -655,5 +650,132 @@ impl DeviceRepository {
         }
 
         Ok(counts)
+    }
+
+    /// Get user device keys for federation batch query
+    pub async fn get_user_device_keys_for_federation_batch(&self, user_id: &str) -> Result<HashMap<String, DeviceKeys>, RepositoryError> {
+        let query = "
+            SELECT device_id, device_keys FROM device 
+            WHERE user_id = $user_id AND device_keys IS NOT NULL
+        ";
+        
+        let mut result = self.db.query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+        let devices_data: Vec<serde_json::Value> = result.take(0)?;
+
+        let mut device_keys = HashMap::new();
+        for device_data in devices_data {
+            if let (Some(device_id), Some(keys_value)) = (
+                device_data.get("device_id").and_then(|v| v.as_str()),
+                device_data.get("device_keys"),
+            )
+                && let Ok(keys) = serde_json::from_value::<DeviceKeys>(keys_value.clone()) {
+                    device_keys.insert(device_id.to_string(), keys);
+                }
+        }
+
+        Ok(device_keys)
+    }
+
+    /// Validate device key query parameters
+    pub async fn validate_device_key_query(&self, user_id: &str, device_ids: &[String]) -> Result<bool, RepositoryError> {
+        if device_ids.is_empty() {
+            return Ok(true); // Empty device list means query all devices
+        }
+
+        let query = "
+            SELECT COUNT() as count FROM device 
+            WHERE user_id = $user_id AND device_id IN $device_ids
+        ";
+        
+        let mut result = self.db.query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_ids", device_ids.to_vec()))
+            .await?;
+        let counts: Vec<serde_json::Value> = result.take(0)?;
+
+        if let Some(count_obj) = counts.first()
+            && let Some(count) = count_obj.get("count").and_then(|v| v.as_u64()) {
+                return Ok(count > 0);
+            }
+        
+        Ok(false)
+    }
+
+    /// Create device info for login flows (SSO, AS)
+    pub async fn create_device_info(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        display_name: Option<String>,
+        client_ip: &str,
+        user_agent: Option<String>,
+        application_service_id: Option<String>,
+    ) -> Result<(), RepositoryError> {
+        let device_info = serde_json::json!({
+            "device_id": device_id,
+            "user_id": user_id,
+            "display_name": display_name,
+            "created_at": chrono::Utc::now(),
+            "last_seen_ip": client_ip,
+            "last_seen_user_agent": user_agent.unwrap_or_else(|| "unknown".to_string()),
+            "application_service_id": application_service_id
+        });
+
+        let _: Option<serde_json::Value> = self.db
+            .create(("devices", format!("{}:{}", user_id, device_id)))
+            .content(device_info)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get user devices for admin whois
+    pub async fn get_user_devices_for_admin(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<DeviceQueryResult>, RepositoryError> {
+        let query = "
+            SELECT d.device_id, d.display_name, d.last_seen_ip, d.last_seen_ts, d.user_agent
+            FROM devices d
+            WHERE d.user_id = $user_id
+        ";
+        let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
+        let devices: Vec<DeviceQueryResult> = result.take(0)?;
+        Ok(devices)
+    }
+
+    /// Create device for device management endpoints
+    pub async fn create_device(
+        &self,
+        user_id: &str,
+        display_name: Option<&str>,
+        last_seen_ip: Option<&str>,
+        device_keys: Option<serde_json::Value>,
+    ) -> Result<Device, RepositoryError> {
+        use uuid::Uuid;
+        use chrono::Utc;
+        use matryx_entity::types::Device;
+
+        let device_id = Uuid::new_v4().simple().to_string().to_uppercase();
+        let now = Utc::now();
+
+        let device = Device {
+            device_id: device_id.clone(),
+            user_id: user_id.to_string(),
+            display_name: display_name.map(|s| s.to_string()),
+            last_seen_ip: last_seen_ip.map(|s| s.to_string()),
+            last_seen_ts: Some(now.timestamp_millis()),
+            created_at: now,
+            hidden: Some(false),
+            device_keys,
+            one_time_keys: None,
+            fallback_keys: None,
+            user_agent: None,
+            initial_device_display_name: display_name.map(|s| s.to_string()),
+        };
+
+        self.create(&device).await
     }
 }

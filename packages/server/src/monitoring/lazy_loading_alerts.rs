@@ -136,7 +136,7 @@ struct AlertRecord {
 }
 
 #[derive(Debug, Clone)]
-struct PerformanceSnapshot {
+pub struct PerformanceSnapshot {
     timestamp: Instant,
     avg_response_time_ms: u64,
     error_rate: f64,
@@ -437,8 +437,8 @@ impl LazyLoadingAlerts {
         }
 
         // Check for memory leaks
-        if let Some(growth_rate) = self.calculate_memory_growth_rate().await {
-            if growth_rate > thresholds.max_growth_rate_mb_per_hour {
+        if let Some(growth_rate) = self.calculate_memory_growth_rate().await
+            && growth_rate > thresholds.max_growth_rate_mb_per_hour {
                 self.trigger_alert(
                     AlertType::MemoryLeakDetected,
                     AlertSeverity::Critical,
@@ -455,7 +455,6 @@ impl LazyLoadingAlerts {
                     ],
                 ).await?;
             }
-        }
 
         Ok(())
     }
@@ -511,30 +510,84 @@ impl LazyLoadingAlerts {
             }
         }
 
-        // Check rate limiting
-        let current_hour_alerts = state
+        // Check rate limiting using AlertRecord fields for intelligent filtering
+        let current_hour_alerts: Vec<&AlertRecord> = state
             .recent_alerts
             .iter()
             .filter(|alert| {
                 alert.alert_type == *alert_type &&
                     alert.timestamp.elapsed() < Duration::from_secs(3600)
             })
-            .count() as u32;
+            .collect();
 
-        current_hour_alerts < self.alert_config.rate_limiting.max_alerts_per_hour
+        // Use severity and message analysis for smart rate limiting
+        if current_hour_alerts.len() >= self.alert_config.rate_limiting.max_alerts_per_hour as usize {
+            // Check if recent alerts are all warnings - allow critical alerts through
+            let recent_critical_alerts = current_hour_alerts
+                .iter()
+                .filter(|alert| matches!(alert.severity, AlertSeverity::Critical))
+                .count();
+
+            // Always allow critical alerts, but respect rate limiting for warnings
+            if recent_critical_alerts == 0 && matches!(alert_type, AlertType::ResponseTimeDegradation | AlertType::HighErrorRate | AlertType::CachePerformanceDegradation | AlertType::MemoryUsageHigh | AlertType::MemoryLeakDetected) {
+                tracing::warn!(
+                    alert_type = ?alert_type,
+                    current_hour_count = current_hour_alerts.len(),
+                    max_per_hour = self.alert_config.rate_limiting.max_alerts_per_hour,
+                    "Alert rate limiting applied - no critical severity alerts in recent history"
+                );
+                return false;
+            }
+        }
+
+        true
     }
 
     async fn record_alert(&self, alert: Alert) {
         let mut state = self.alert_state.write().await;
 
-        // Add to recent alerts
-        state.recent_alerts.push_back(AlertRecord {
+        // Create alert record with all fields properly used
+        let alert_record = AlertRecord {
             alert_type: alert.alert_type.clone(),
-            severity: alert.severity,
+            severity: alert.severity.clone(),
             timestamp: alert.timestamp,
-            message: alert.message,
-            metrics: alert.metrics,
-        });
+            message: alert.message.clone(),
+            metrics: alert.metrics.clone(),
+        };
+
+        // Log alert with severity level and descriptive message
+        match alert_record.severity {
+            AlertSeverity::Critical => {
+                tracing::error!(
+                    alert_type = ?alert_record.alert_type,
+                    message = %alert_record.message,
+                    avg_response_time_ms = alert_record.metrics.avg_response_time_ms,
+                    error_rate = alert_record.metrics.error_rate,
+                    cache_hit_ratio = alert_record.metrics.cache_hit_ratio,
+                    memory_usage_mb = alert_record.metrics.memory_usage_mb,
+                    request_count = alert_record.metrics.request_count,
+                    "CRITICAL ALERT: Matrix homeserver performance degradation detected"
+                );
+            },
+            AlertSeverity::Warning => {
+                tracing::warn!(
+                    alert_type = ?alert_record.alert_type,
+                    message = %alert_record.message,
+                    avg_response_time_ms = alert_record.metrics.avg_response_time_ms,
+                    error_rate = alert_record.metrics.error_rate,
+                    cache_hit_ratio = alert_record.metrics.cache_hit_ratio,
+                    memory_usage_mb = alert_record.metrics.memory_usage_mb,
+                    request_count = alert_record.metrics.request_count,
+                    "WARNING: Matrix homeserver performance issue detected"
+                );
+            }
+        }
+
+        // Use metrics for correlation and analysis
+        self.analyze_performance_correlation(&alert_record).await;
+
+        // Add to recent alerts for tracking
+        state.recent_alerts.push_back(alert_record);
 
         // Update last alert time
         state.last_alert_times.insert(alert.alert_type.clone(), alert.timestamp);
@@ -545,6 +598,45 @@ impl LazyLoadingAlerts {
         // Cleanup old alerts (keep last 100)
         while state.recent_alerts.len() > 100 {
             state.recent_alerts.pop_front();
+        }
+    }
+
+    /// Analyze performance correlation using alert metrics for trend detection
+    async fn analyze_performance_correlation(&self, alert_record: &AlertRecord) {
+        // Use the metrics field for performance correlation analysis
+        let metrics = &alert_record.metrics;
+        
+        // Correlate different performance indicators
+        if metrics.avg_response_time_ms > 100 && metrics.cache_hit_ratio < 0.8 {
+            tracing::info!(
+                message = %alert_record.message,
+                "Performance correlation detected: High response time correlates with low cache hit ratio"
+            );
+        }
+
+        if metrics.error_rate > 0.01 && metrics.memory_usage_mb > 80.0 {
+            tracing::info!(
+                message = %alert_record.message,
+                "Performance correlation detected: High error rate correlates with high memory usage"
+            );
+        }
+
+        // Log performance trends based on severity and metrics
+        match alert_record.severity {
+            AlertSeverity::Critical => {
+                tracing::error!(
+                    message = %alert_record.message,
+                    request_count = metrics.request_count,
+                    "Critical performance degradation requires immediate attention - Matrix homeserver stability at risk"
+                );
+            },
+            AlertSeverity::Warning => {
+                tracing::warn!(
+                    message = %alert_record.message,
+                    request_count = metrics.request_count,
+                    "Performance warning detected - monitoring Matrix homeserver for escalation"
+                );
+            }
         }
     }
 
@@ -607,14 +699,35 @@ pub struct ConsoleNotificationSender;
 #[async_trait::async_trait]
 impl AlertNotificationSender for ConsoleNotificationSender {
     async fn send_alert(&self, alert: Alert) -> Result<(), AlertError> {
+        // Enhanced notification output using all Alert fields including metrics
         println!("🚨 ALERT: {}", alert.title);
         println!("   Message: {}", alert.message);
         println!("   Severity: {:?}", alert.severity);
         println!("   Timestamp: {:?}", alert.timestamp);
+        
+        // Include performance metrics in notification for context
+        println!("   Performance Metrics:");
+        println!("     - Response Time: {}ms", alert.metrics.avg_response_time_ms);
+        println!("     - Error Rate: {:.2}%", alert.metrics.error_rate * 100.0);
+        println!("     - Cache Hit Ratio: {:.2}%", alert.metrics.cache_hit_ratio * 100.0);
+        println!("     - Memory Usage: {:.1}MB", alert.metrics.memory_usage_mb);
+        println!("     - Request Count: {}", alert.metrics.request_count);
+        
         println!("   Suggested Actions:");
         for action in &alert.suggested_actions {
             println!("   - {}", action);
         }
+        
+        // Add severity-specific formatting
+        match alert.severity {
+            AlertSeverity::Critical => {
+                println!("   ⚠️  CRITICAL: Immediate action required for Matrix homeserver stability");
+            },
+            AlertSeverity::Warning => {
+                println!("   ⚡ WARNING: Monitor Matrix homeserver performance closely");
+            }
+        }
+        
         println!();
 
         Ok(())

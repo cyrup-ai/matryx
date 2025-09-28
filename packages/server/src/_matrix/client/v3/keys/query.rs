@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -11,28 +11,21 @@ use tracing::{error, info};
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
-    federation::FederationRetryManager,
 };
+use matryx_surrealdb::repository::KeysRepository;
 
 #[derive(Deserialize)]
 pub struct KeysQueryRequest {
     pub device_keys: std::collections::HashMap<String, Vec<String>>,
     pub timeout: Option<u64>,
-    pub token: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub user_id: String,
-    pub device_id: String,
-    pub algorithms: Vec<String>,
-    pub keys: std::collections::HashMap<String, String>,
-    pub signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-}
+// Use DeviceKeys from entity package (Matrix specification types)
+use matryx_entity::types::DeviceKeys;
 
 #[derive(Serialize, Deserialize)]
 pub struct KeysQueryResponse {
-    pub device_keys: std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
+    pub device_keys: std::collections::HashMap<String, std::collections::HashMap<String, DeviceKeys>>,
     pub failures: std::collections::HashMap<String, Value>,
     pub master_keys: std::collections::HashMap<String, Value>,
     pub self_signing_keys: std::collections::HashMap<String, Value>,
@@ -55,7 +48,7 @@ pub enum FederationError {
 }
 
 pub struct UserKeys {
-    pub device_keys: std::collections::HashMap<String, Value>,
+    pub device_keys: std::collections::HashMap<String, DeviceKeys>,
     pub master_key: Option<Value>,
     pub self_signing_key: Option<Value>,
     pub user_signing_key: Option<Value>,
@@ -89,6 +82,12 @@ pub async fn post(
         user_signing_keys: std::collections::HashMap::new(),
     };
 
+    // Handle timeout parameter (Project Matrix spec: wait time for federation queries)
+    let federation_timeout_ms = request.timeout.unwrap_or(10000); // Default 10 seconds per spec
+    if federation_timeout_ms > 0 {
+        info!("Keys query federation timeout: {}ms", federation_timeout_ms);
+    }
+
     // Separate local and federated users
     let mut local_users = Vec::new();
     let mut federated_users = std::collections::HashMap::new();
@@ -114,8 +113,9 @@ pub async fn post(
     }
 
     // Process local users
+    let keys_repo = KeysRepository::new(state.db.clone());
     for (user_id, device_ids) in local_users {
-        match query_local_user_keys(&state.db, &user_id, &device_ids).await {
+        match query_local_user_keys(&keys_repo, &user_id, &device_ids).await {
             Ok(user_keys) => {
                 if !user_keys.device_keys.is_empty() {
                     response.device_keys.insert(user_id.clone(), user_keys.device_keys);
@@ -185,7 +185,7 @@ async fn query_federated_keys(
     let endpoint = format!("https://{}/_matrix/federation/v1/user/keys/query", server_name);
 
     let request_body =
-        serde_json::to_string(&federation_request).map_err(|e| FederationError::InvalidResponse)?;
+        serde_json::to_string(&federation_request).map_err(|_e| FederationError::InvalidResponse)?;
 
     info!("Querying keys from federated server: {} for {} users", server_name, user_requests.len());
 
@@ -236,142 +236,58 @@ async fn query_federated_keys(
 }
 
 async fn query_local_user_keys(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    keys_repo: &KeysRepository,
     user_id: &str,
     device_ids: &[String],
 ) -> Result<UserKeys, StatusCode> {
-    let mut user_device_keys = std::collections::HashMap::new();
-
     if device_ids.is_empty() {
         // Query all devices for this user
-        let query = "SELECT * FROM device_keys WHERE user_id = $user_id";
-        let user_id_owned = user_id.to_string();
-        let mut response = db
-            .query(query)
-            .bind(("user_id", user_id_owned))
+        keys_repo
+            .query_local_user_keys_all_devices(user_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let devices: Vec<Value> =
-            response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        for device in devices {
-            if let Some(device_data) = device.get("device_keys") {
-                if let Some(device_id) = device_data.get("device_id").and_then(|v| v.as_str()) {
-                    user_device_keys.insert(device_id.to_string(), device_data.clone());
-                }
-            }
-        }
+            .map(|db_keys| UserKeys {
+                device_keys: db_keys.device_keys,
+                master_key: db_keys.master_key,
+                self_signing_key: db_keys.self_signing_key,
+                user_signing_key: db_keys.user_signing_key,
+            })
+            .map_err(|e| {
+                error!("Failed to query all user keys: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     } else {
         // Query specific devices
-        for device_id in device_ids {
-            let query =
-                "SELECT * FROM device_keys WHERE user_id = $user_id AND device_id = $device_id";
-            let user_id_owned = user_id.to_string();
-            let device_id_owned = device_id.clone();
-            let mut response = db
-                .query(query)
-                .bind(("user_id", user_id_owned))
-                .bind(("device_id", device_id_owned))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            let device: Option<Value> =
-                response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if let Some(device_data) = device {
-                if let Some(keys) = device_data.get("device_keys") {
-                    user_device_keys.insert(device_id.clone(), keys.clone());
-                }
-            }
-        }
+        keys_repo
+            .query_local_user_keys_specific_devices(user_id, device_ids)
+            .await
+            .map(|db_keys| UserKeys {
+                device_keys: db_keys.device_keys,
+                master_key: db_keys.master_key,
+                self_signing_key: db_keys.self_signing_key,
+                user_signing_key: db_keys.user_signing_key,
+            })
+            .map_err(|e| {
+                error!("Failed to query specific user keys: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
     }
-
-    // Query cross-signing keys for this user
-    let (master_key, self_signing_key, user_signing_key) =
-        query_cross_signing_keys(db, user_id).await?;
-
-    Ok(UserKeys {
-        device_keys: user_device_keys,
-        master_key,
-        self_signing_key,
-        user_signing_key,
-    })
 }
 
-async fn query_cross_signing_keys(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    user_id: &str,
-) -> Result<(Option<Value>, Option<Value>, Option<Value>), StatusCode> {
-    let query = "SELECT * FROM cross_signing_keys WHERE user_id = $user_id";
-    let user_id_owned = user_id.to_string();
-    let mut response = db
-        .query(query)
-        .bind(("user_id", user_id_owned))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let cross_signing_keys: Vec<Value> =
-        response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut master_key = None;
-    let mut self_signing_key = None;
-    let mut user_signing_key = None;
-
-    for key in cross_signing_keys {
-        if let Some(key_type) = key.get("key_type").and_then(|v| v.as_str()) {
-            if let Some(key_data) = key.get("key_data") {
-                match key_type {
-                    "master" => master_key = Some(key_data.clone()),
-                    "self_signing" => self_signing_key = Some(key_data.clone()),
-                    "user_signing" => user_signing_key = Some(key_data.clone()),
-                    _ => {},
-                }
-            }
-        }
-    }
-
-    Ok((master_key, self_signing_key, user_signing_key))
-}
+// This function is no longer needed as it's handled by the repository
 
 async fn can_access_user_keys(
     requesting_user_id: &str,
     target_user_id: &str,
     state: &AppState,
 ) -> bool {
-    // Users can always access their own keys
-    if requesting_user_id == target_user_id {
-        return true;
-    }
-
-    // Check if users share any rooms by querying room membership
-    let query = r#"
-        SELECT room_id FROM room_memberships
-        WHERE user_id = $requesting_user_id AND membership = 'join'
-        INTERSECT
-        SELECT room_id FROM room_memberships
-        WHERE user_id = $target_user_id AND membership = 'join'
-        LIMIT 1
-    "#;
-
-    let requesting_user_owned = requesting_user_id.to_string();
-    let target_user_owned = target_user_id.to_string();
-
-    match state
-        .db
-        .query(query)
-        .bind(("requesting_user_id", requesting_user_owned))
-        .bind(("target_user_id", target_user_owned))
-        .await
-    {
-        Ok(mut response) => {
-            // If we get any results, users share at least one room
-            match response.take::<Vec<Value>>(0) {
-                Ok(rooms) => !rooms.is_empty(),
-                Err(_) => false,
-            }
-        },
-        Err(_) => false,
+    let keys_repo = KeysRepository::new(state.db.clone());
+    
+    match keys_repo.can_access_user_keys(requesting_user_id, target_user_id).await {
+        Ok(can_access) => can_access,
+        Err(e) => {
+            error!("Failed to check user key access: {}", e);
+            false
+        }
     }
 }
 

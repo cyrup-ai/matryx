@@ -5,21 +5,14 @@ use axum::{
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
 };
-use base64::{Engine, engine::general_purpose};
-use chrono::Utc;
-use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use serde_json::Value;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
-use matryx_entity::types::{Event, EventContent, Membership, MembershipState, Room};
 use matryx_surrealdb::repository::{
     EventRepository,
     MembershipRepository,
@@ -85,10 +78,26 @@ pub async fn post(
         },
     };
 
-    info!(
-        "Processing room join request for user: {} to room: {} from: {}",
-        user_id, room_id_or_alias, addr
-    );
+    // Handle optional join reason for audit logging
+    if let Some(reason) = &request.reason {
+        info!(
+            "Room join with reason - User: {}, Room: {}, Reason: '{}', From: {}",
+            user_id, room_id_or_alias, reason, addr
+        );
+    } else {
+        info!(
+            "Processing room join request for user: {} to room: {} from: {}",
+            user_id, room_id_or_alias, addr
+        );
+    }
+
+    // Handle third-party signed invitations if provided
+    if let Some(_third_party_signed) = &request.third_party_signed {
+        info!("Third-party signed invitation detected for user: {}", user_id);
+        // TODO: Implement proper third-party signed invitation validation
+        // This involves verifying cryptographic signatures from identity servers
+        // For now, we log the presence but proceed with standard join
+    }
 
     // Create repository instances
     let room_repo = RoomRepository::new(state.db.clone());
@@ -106,31 +115,31 @@ pub async fn post(
                 "Successfully joined user {} to room {} with event {}",
                 user_id, result.room_id, result.event_id
             );
-            return Ok(Json(JoinResponse { room_id: result.room_id }));
+            Ok(Json(JoinResponse { room_id: result.room_id }))
         },
         Err(e) => {
             match e {
                 RepositoryError::NotFound { .. } => {
                     warn!("Room join failed - room not found: {}", room_id_or_alias);
-                    return Err(StatusCode::NOT_FOUND);
+                    Err(StatusCode::NOT_FOUND)
                 },
                 RepositoryError::Unauthorized { .. } => {
                     warn!(
                         "Room join failed - user {} not authorized to join room {}",
                         user_id, room_id_or_alias
                     );
-                    return Err(StatusCode::FORBIDDEN);
+                    Err(StatusCode::FORBIDDEN)
                 },
                 RepositoryError::Validation { .. } => {
                     warn!(
                         "Room join failed - invalid room identifier format: {}",
                         room_id_or_alias
                     );
-                    return Err(StatusCode::BAD_REQUEST);
+                    Err(StatusCode::BAD_REQUEST)
                 },
                 _ => {
                     error!("Room join failed - internal error: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
                 },
             }
         },

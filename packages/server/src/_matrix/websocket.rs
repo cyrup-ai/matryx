@@ -7,12 +7,12 @@ use axum::{
     http::StatusCode,
     response::Response,
 };
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 use tracing::{debug, error, info, warn};
@@ -21,8 +21,8 @@ use uuid::Uuid;
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 use matryx_surrealdb::repository::InfrastructureService;
-use matryx_surrealdb::repository::sync::SyncResponse;
-use surrealdb::{Connection, engine::any::Any};
+
+use surrealdb::engine::any::Any;
 
 #[derive(Deserialize)]
 pub struct SyncWebSocketQuery {
@@ -187,10 +187,21 @@ async fn handle_incoming_messages(
                     if pong.message_type == "pong" {
                         debug!("Received pong from client at {}", pong.timestamp);
                     }
+                } else {
+                    // Forward non-control messages to the message handler
+                    if let Err(e) = tx.send(Message::Text(text)).await {
+                        error!("Failed to forward WebSocket message: {}", e);
+                        break;
+                    }
                 }
             },
-            Ok(Message::Pong(_)) => {
+            Ok(Message::Pong(data)) => {
                 debug!("Received WebSocket pong");
+                // Forward pong messages to maintain the protocol
+                if let Err(e) = tx.send(Message::Pong(data)).await {
+                    error!("Failed to forward WebSocket pong: {}", e);
+                    break;
+                }
             },
             Ok(Message::Close(_)) => {
                 info!("WebSocket close message received");
@@ -237,9 +248,24 @@ async fn handle_sync_with_service(
     tx: mpsc::Sender<Message>,
     query: SyncWebSocketQuery,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Send initial sync using InfrastructureService
+    // Apply sync filter if provided
+    let sync_filter = query.filter.as_deref();
+    debug!("WebSocket sync with filter: {:?}", sync_filter);
+
+    // Set user presence if specified (online, offline, unavailable)
+    if let Some(presence) = &query.set_presence {
+        if matches!(presence.as_str(), "online" | "offline" | "unavailable") {
+            info!("Setting user {} presence to: {}", user_id, presence);
+            // TODO: Implement presence setting via infrastructure service
+            debug!("Presence setting not yet implemented: {}", presence);
+        } else {
+            warn!("Invalid presence value: {}", presence);
+        }
+    }
+
+    // Send initial sync using InfrastructureService with filter
     match infrastructure_service
-        .handle_websocket_sync(&user_id, &device_id, None)
+        .handle_websocket_sync(&user_id, &device_id, sync_filter)
         .await
     {
         Ok(sync_response) => {
@@ -285,9 +311,9 @@ async fn handle_sync_with_service(
         {
             Ok(sync_response) => {
                 // Only send update if there are changes
-                let has_changes = sync_response.rooms.join.len() > 0 ||
-                    sync_response.rooms.invite.len() > 0 ||
-                    sync_response.rooms.leave.len() > 0;
+                let has_changes = !sync_response.rooms.join.is_empty() ||
+                    !sync_response.rooms.invite.is_empty() ||
+                    !sync_response.rooms.leave.is_empty();
 
                 if has_changes {
                     last_batch = Some(sync_response.next_batch.clone());

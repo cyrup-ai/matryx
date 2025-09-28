@@ -5,13 +5,13 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
 use crate::auth::{MatrixAuthError, extract_matrix_auth};
 use crate::state::AppState;
+use matryx_surrealdb::repository::third_party_service::ThirdPartyService;
 
 #[derive(Serialize, Deserialize)]
 pub struct Protocol {
@@ -58,68 +58,63 @@ pub async fn get(
 
     info!("Third-party protocols request from user {} at {}", user_id, addr);
 
-    // Query available protocols from database
-    let query = r#"
-        SELECT protocol_id, display_name, avatar_url, user_fields, location_fields, instances
-        FROM thirdparty_protocols
-    "#;
-
-    let protocols = match state.db.query(query).await {
-        Ok(mut result) => {
-            match result
-                .take::<Vec<(String, String, Option<String>, Vec<Value>, Vec<Value>, Vec<Value>)>>(
-                    0,
-                ) {
-                Ok(protocols) => protocols,
-                Err(e) => {
-                    error!("Failed to parse third-party protocols: {}", e);
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                },
-            }
-        },
+    // TASK17 SUBTASK 4: Use ThirdPartyService instead of direct queries
+    let third_party_service = ThirdPartyService::new(state.db.clone());
+    
+    let protocols_map = match third_party_service.query_third_party_protocols().await {
+        Ok(protocols) => protocols,
         Err(e) => {
             error!("Failed to query third-party protocols: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        },
+        }
     };
 
     // Convert to response format
     let mut response = HashMap::new();
 
-    for (protocol_id, display_name, avatar_url, user_fields, location_fields, instances) in
-        protocols
-    {
-        // Parse field types
-        let user_field_types: Vec<FieldType> = user_fields
+    for (protocol_id, protocol_config) in protocols_map {
+        // Convert repository types to server types
+        let user_fields: Vec<FieldType> = protocol_config.user_fields
             .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
+            .map(|f| FieldType {
+                regexp: f.regexp,
+                placeholder: f.placeholder,
+            })
             .collect();
 
-        let location_field_types: Vec<FieldType> = location_fields
+        let location_fields: Vec<FieldType> = protocol_config.location_fields
             .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
+            .map(|f| FieldType {
+                regexp: f.regexp,
+                placeholder: f.placeholder,
+            })
             .collect();
 
-        let protocol_instances: Vec<ProtocolInstance> = instances
+        let instances: Vec<ProtocolInstance> = protocol_config.instances
             .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
+            .map(|i| ProtocolInstance {
+                desc: i.desc,
+                icon: i.icon,
+                fields: i.fields,
+                network_id: i.network_id,
+            })
             .collect();
 
         // Build field_types map
         let mut field_types: HashMap<String, FieldType> = HashMap::new();
-        for field in &user_field_types {
+        for field in &user_fields {
             field_types.insert(format!("user.{}", field.placeholder), field.clone());
         }
-        for field in &location_field_types {
+        for field in &location_fields {
             field_types.insert(format!("location.{}", field.placeholder), field.clone());
         }
 
         let protocol = Protocol {
-            user_fields: user_field_types,
-            location_fields: location_field_types,
-            icon: avatar_url.unwrap_or_else(|| "mxc://".to_string()),
+            user_fields,
+            location_fields,
+            icon: protocol_config.avatar_url.unwrap_or_else(|| "mxc://".to_string()),
             field_types,
-            instances: protocol_instances,
+            instances,
         };
 
         response.insert(protocol_id, protocol);

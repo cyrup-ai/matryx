@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
+use matryx_surrealdb::repository::profile::ProfileRepository;
 
 /// GET /_matrix/client/v3/profile/{userId}
 pub async fn get(
@@ -31,18 +32,21 @@ pub async fn get(
     };
 
     // Get user profile from database
-    let profile: Result<Option<Value>, _> = state
-        .db
-        .query("SELECT user_id, display_name, avatar_url FROM user WHERE user_id = $user_id")
-        .bind(("user_id", user_id.clone()))
+    let profile_repo = ProfileRepository::new(state.db.clone());
+    let profile_data = profile_repo
+        .get_user_profile(&user_id)
         .await
-        .and_then(|mut response| response.take(0));
-
-    let profile_data = profile
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(profile_data))
+    // Convert profile to JSON response
+    let response = serde_json::json!({
+        "user_id": profile_data.user_id,
+        "display_name": profile_data.display_name,
+        "avatar_url": profile_data.avatar_url
+    });
+
+    Ok(Json(response))
 }
 
 pub mod avatar_url;

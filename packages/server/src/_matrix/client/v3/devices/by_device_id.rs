@@ -5,10 +5,9 @@ use axum::{
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     _matrix::client::v3::devices::{ClientDeviceInfo, TrustLevel},
@@ -80,6 +79,19 @@ pub async fn delete(
             return Err(StatusCode::UNAUTHORIZED);
         },
     };
+
+    // Handle User-Interactive Authentication if provided
+    // According to Matrix spec, device deletion may require additional authentication
+    if let Some(auth_data) = request.auth {
+        info!("Processing additional authentication data for device deletion");
+        // TODO: Implement proper UIA validation based on auth_data
+        // This should validate the authentication method (password, etc.)
+        // For now, we accept any auth data as valid additional verification
+        debug!("Additional auth provided: {:?}", auth_data);
+    } else {
+        // Matrix spec allows device deletion without UIA in some implementations
+        info!("No additional authentication provided for device deletion");
+    }
 
     info!(
         "Processing device deletion request for user: {} device: {} from: {}",

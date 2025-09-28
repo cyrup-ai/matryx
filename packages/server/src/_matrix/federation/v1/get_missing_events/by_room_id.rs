@@ -3,14 +3,14 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use serde_json::Value;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, MissingEventsRequest, MissingEventsResponse, PDU, Room};
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_entity::{Room, MissingEventsRequest, MissingEventsResponse, PDU};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -117,6 +117,37 @@ fn validate_event_id_list(
     Ok(())
 }
 
+/// Validate room version compatibility for get_missing_events
+fn validate_room_version_compatibility(room: &Room) -> Result<(), StatusCode> {
+    // Matrix room versions 1-11 support get_missing_events
+    let supported_versions = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
+    
+    if !supported_versions.contains(&room.room_version.as_str()) {
+        warn!("Unsupported room version {} for get_missing_events", room.room_version);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    debug!("Room version {} is compatible with get_missing_events", room.room_version);
+    Ok(())
+}
+
+/// Validate federation access based on room settings
+fn validate_federation_access(room: &Room, requesting_server: &str) -> Result<(), StatusCode> {
+    // Check if room federation is disabled
+    if let Some(false) = room.federate {
+        warn!("Federation disabled for room {}, denying access to {}", room.room_id, requesting_server);
+        return Err(StatusCode::FORBIDDEN);
+    }
+    
+    // For invite-only rooms, additional checks could be implemented here
+    if let Some(join_rule) = &room.join_rule
+        && join_rule == "invite" {
+        debug!("Room {} is invite-only, federation access granted to {}", room.room_id, requesting_server);
+    }
+    
+    Ok(())
+}
+
 /// POST /_matrix/federation/v1/get_missing_events/{roomId}
 ///
 /// Retrieves previous events that the sender is missing. This is done by doing a breadth-first
@@ -129,9 +160,8 @@ pub async fn post(
     Json(payload): Json<MissingEventsRequest>,
 ) -> Result<Json<MissingEventsResponse>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -194,15 +224,13 @@ pub async fn post(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    validate_event_id_list(&payload.latest_events, 50, "latest_events").map_err(|e| {
+    validate_event_id_list(&payload.latest_events, 50, "latest_events").inspect_err(|_e| {
         warn!("Invalid latest_events list");
-        e
     })?;
 
     // Validate earliest_events list (can be empty)
-    validate_event_id_list(&payload.earliest_events, 50, "earliest_events").map_err(|e| {
+    validate_event_id_list(&payload.earliest_events, 50, "earliest_events").inspect_err(|_e| {
         warn!("Invalid earliest_events list");
-        e
     })?;
 
     // Validate room exists and we know about it
@@ -219,13 +247,32 @@ pub async fn post(
             StatusCode::NOT_FOUND
         })?;
 
+    // Validate room version for get_missing_events compatibility
+    validate_room_version_compatibility(&room)?;
+
+    // Apply room-specific federation rules
+    validate_federation_access(&room, &x_matrix_auth.origin)?;
+
     // Check if requesting server has permission to access room
-    let has_permission = check_missing_events_permission(&state, &room, &x_matrix_auth.origin)
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let has_users = membership_repo.server_has_users_in_room(&room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
-            error!("Failed to check missing events permissions: {}", e);
+            error!("Failed to check server membership: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    let has_permission = if has_users {
+        true
+    } else {
+        // Check if room is world-readable
+        room_repo.is_room_world_readable(&room_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to check room world-readable status: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
 
     if !has_permission {
         warn!(
@@ -278,76 +325,7 @@ pub async fn post(
     Ok(Json(response))
 }
 
-/// Check if a server has permission to access missing events for a room
-async fn check_missing_events_permission(
-    state: &AppState,
-    room: &Room,
-    requesting_server: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if the requesting server has any users in the room (current or historical)
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        LIMIT 1
-    ";
 
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
-
-    if has_users {
-        return Ok(true);
-    }
-
-    // Check if room is world-readable
-    let world_readable = is_room_world_readable(state, &room.room_id).await?;
-    Ok(world_readable)
-}
-
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
 
 /// Retrieve missing events using breadth-first traversal
 async fn get_missing_events_traversal(
@@ -358,7 +336,7 @@ async fn get_missing_events_traversal(
     limit: usize,
     min_depth: i64,
 ) -> Result<Vec<PDU>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut visited = HashSet::new();
+    let mut visited: HashSet<String> = HashSet::new();
     let mut to_visit: Vec<String> = latest_events.to_vec();
     let mut result_events = Vec::new();
     let earliest_set: HashSet<String> = earliest_events.iter().cloned().collect();
@@ -369,27 +347,13 @@ async fn get_missing_events_traversal(
     }
 
     while !to_visit.is_empty() && result_events.len() < limit {
-        let current_batch: Vec<String> = to_visit.drain(..).collect();
+        let current_batch: Vec<String> = std::mem::take(&mut to_visit);
 
         // Fetch current batch of events
-        let query = "
-            SELECT *
-            FROM event
-            WHERE event_id IN $event_ids
-            AND room_id = $room_id
-            AND depth >= $min_depth
-            ORDER BY depth DESC, origin_server_ts DESC
-        ";
-
-        let mut response = state
-            .db
-            .query(query)
-            .bind(("event_ids", current_batch.clone()))
-            .bind(("room_id", room_id.to_string()))
-            .bind(("min_depth", min_depth))
+        let event_repo = EventRepository::new(state.db.clone());
+        let events = event_repo
+            .get_events_by_ids_with_min_depth(&current_batch, room_id, min_depth)
             .await?;
-
-        let events: Vec<Event> = response.take(0)?;
 
         // Process events and add their prev_events to next batch
         for event in events {

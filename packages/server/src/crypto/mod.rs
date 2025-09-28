@@ -1,22 +1,23 @@
 use aes::Aes256;
+use base64::Engine;
 use cbc::{
-    Encryptor,
+
     cipher::{BlockEncryptMut, KeyIvInit},
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
+
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
-use vodozemac::megolm::{GroupSession, InboundGroupSession};
-use vodozemac::olm::{Account, OlmMessage, PreKeyMessage, Session, SessionConfig};
+use vodozemac::megolm::GroupSession;
+use vodozemac::olm::{Account, Session, SessionConfig};
 use vodozemac::{Curve25519PublicKey, Curve25519SecretKey, Ed25519PublicKey};
 
 use matryx_surrealdb::repository::crypto::{DeviceKey, FallbackKey, OneTimeKey, Signature};
 use matryx_surrealdb::repository::key_backup::{BackupVersion, EncryptedRoomKey};
-use matryx_surrealdb::repository::{CryptoRepository, KeyBackupRepository, RepositoryError};
+use matryx_surrealdb::repository::{CryptoRepository, KeyBackupRepository};
 
 /// High-level crypto provider using vodozemac
 pub struct MatryxCryptoProvider {
@@ -177,7 +178,7 @@ impl MatryxCryptoProvider {
             .get(&format!("ed25519:{}", device_keys.device_id))
             .ok_or_else(|| CryptoError::MissingField("device signature".to_string()))?;
 
-        let signature_bytes = base64::decode(signature)
+        let signature_bytes = base64::engine::general_purpose::STANDARD.decode(signature)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid signature format: {}", e)))?;
 
         let vodozemac_signature = vodozemac::Ed25519Signature::from_slice(&signature_bytes)
@@ -256,14 +257,13 @@ impl MatryxCryptoProvider {
         }
 
         // Validate key structure
-        if let Some(key_obj) = key_data.as_object() {
-            if key_obj.contains_key("key") && key_obj.contains_key("signatures") {
+        if let Some(key_obj) = key_data.as_object()
+            && key_obj.contains_key("key") && key_obj.contains_key("signatures") {
                 // Try to parse the curve25519 key
                 if let Some(key_str) = key_obj.get("key").and_then(|v| v.as_str()) {
                     return Ok(Curve25519PublicKey::from_base64(key_str).is_ok());
                 }
             }
-        }
 
         Ok(false)
     }
@@ -318,7 +318,7 @@ impl MatryxCryptoProvider {
 
         // Generate random IV for AES-CBC
         let mut iv = [0u8; 16];
-        rand::Rng::fill(&mut OsRng, &mut iv);
+        getrandom::getrandom(&mut iv).expect("Failed to generate random bytes");
 
         // Encrypt with AES-256-CBC
         let cipher = cbc::Encryptor::<Aes256>::new(&aes_key.into(), &iv.into());
@@ -344,9 +344,9 @@ impl MatryxCryptoProvider {
         let mac_result = hmac.finalize().into_bytes();
 
         // Encode results as base64
-        let ciphertext_b64 = base64::encode(&mac_input); // IV + ciphertext
+        let ciphertext_b64 = base64::engine::general_purpose::STANDARD.encode(&mac_input); // IV + ciphertext
         let ephemeral_key_b64 = ephemeral_public.to_base64();
-        let mac_b64 = base64::encode(mac_result);
+        let mac_b64 = base64::engine::general_purpose::STANDARD.encode(mac_result);
 
         Ok(EncryptedKeyData {
             ciphertext: ciphertext_b64,
@@ -400,7 +400,7 @@ impl MatryxCryptoProvider {
             .next()
             .ok_or_else(|| CryptoError::MissingField("signature value".to_string()))?;
 
-        let signature_bytes = base64::decode(signature)
+        let signature_bytes = base64::engine::general_purpose::STANDARD.decode(signature)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid signature format: {}", e)))?;
 
         let vodozemac_signature = vodozemac::Ed25519Signature::from_slice(&signature_bytes)
@@ -425,7 +425,7 @@ impl MatryxCryptoProvider {
             .next()
             .ok_or_else(|| CryptoError::MissingField("signature value".to_string()))?;
 
-        let signature_bytes = base64::decode(signature)
+        let signature_bytes = base64::engine::general_purpose::STANDARD.decode(signature)
             .map_err(|e| CryptoError::InvalidKey(format!("Invalid signature format: {}", e)))?;
 
         let vodozemac_signature = vodozemac::Ed25519Signature::from_slice(&signature_bytes)

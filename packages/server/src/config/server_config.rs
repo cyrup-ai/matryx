@@ -1,3 +1,4 @@
+use crate::middleware::TransactionConfig;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::OnceLock;
@@ -41,15 +42,92 @@ impl Default for PushCacheConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Path to client certificate file (PEM format)
+    pub client_cert_path: Option<String>,
+    /// Path to client private key file (PEM format)
+    pub client_key_path: Option<String>,
+    /// Enable TLS certificate validation (default: true)
+    pub validate_certificates: bool,
+    /// Custom CA certificate bundle path
+    pub ca_bundle_path: Option<String>,
+    /// Domains to skip certificate validation for (testing/onion)
+    pub skip_validation_domains: Vec<String>,
+    /// Connection timeout in seconds
+    pub connect_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Client API rate limits (requests per minute)
+    pub client_requests_per_minute: u32,
+    /// Federation API rate limits (requests per minute) 
+    pub federation_requests_per_minute: u32,
+    /// Media endpoint specific limits (requests per minute)
+    pub media_requests_per_minute: u32,
+    /// Burst size for all rate limiters
+    pub burst_size: u32,
+    /// Enable rate limiting globally
+    pub enabled: bool,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            client_cert_path: None,
+            client_key_path: None,
+            validate_certificates: true,
+            ca_bundle_path: None,
+            skip_validation_domains: vec![],
+            connect_timeout_secs: 30,
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            client_requests_per_minute: 100,
+            federation_requests_per_minute: 200, // Higher for server-to-server
+            media_requests_per_minute: 50,       // Lower for media (bandwidth intensive)
+            burst_size: 10,
+            enabled: true,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    pub fn from_env() -> Self {
+        Self {
+            client_requests_per_minute: env::var("RATE_LIMIT_CLIENT_PER_MINUTE")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 10000),
+            federation_requests_per_minute: env::var("RATE_LIMIT_FEDERATION_PER_MINUTE")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 10000),
+            media_requests_per_minute: env::var("RATE_LIMIT_MEDIA_PER_MINUTE")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(50).clamp(1, 10000),
+            burst_size: env::var("RATE_LIMIT_BURST")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 1000),
+            enabled: env::var("RATE_LIMIT_ENABLED")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(true),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub homeserver_name: String,
     pub federation_port: u16,
     pub media_base_url: String,
     pub admin_email: String,
     pub environment: String,
+    pub server_implementation_name: String,
+    pub server_implementation_version: String,
     pub email_config: EmailConfig,
     pub sms_config: SmsConfig,
     pub push_cache_config: PushCacheConfig,
+    pub transaction_config: TransactionConfig,
+    pub tls_config: TlsConfig,
+    pub rate_limiting: RateLimitConfig,
 }
 
 impl ServerConfig {
@@ -87,6 +165,26 @@ impl ServerConfig {
                     .unwrap_or(false),
             };
 
+            let tls_config = TlsConfig {
+                client_cert_path: env::var("TLS_CLIENT_CERT_PATH").ok(),
+                client_key_path: env::var("TLS_CLIENT_KEY_PATH").ok(),
+                validate_certificates: env::var("TLS_VALIDATE_CERTIFICATES")
+                    .unwrap_or_else(|_| "true".to_string())
+                    .parse()
+                    .unwrap_or(true),
+                ca_bundle_path: env::var("TLS_CA_BUNDLE_PATH").ok(),
+                skip_validation_domains: env::var("TLS_SKIP_VALIDATION_DOMAINS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().to_string())
+                    .collect(),
+                connect_timeout_secs: env::var("TLS_CONNECT_TIMEOUT")
+                    .unwrap_or_else(|_| "30".to_string())
+                    .parse()
+                    .unwrap_or(30),
+            };
+
             let config = ServerConfig {
                 homeserver_name: homeserver_name.clone(),
 
@@ -104,6 +202,12 @@ impl ServerConfig {
                 environment: env::var("DEPLOYMENT_ENV")
                     .unwrap_or_else(|_| "development".to_string()),
 
+                server_implementation_name: env::var("SERVER_IMPLEMENTATION_NAME")
+                    .unwrap_or_else(|_| "matryx".to_string()),
+
+                server_implementation_version: env::var("SERVER_IMPLEMENTATION_VERSION")
+                    .unwrap_or_else(|_| "0.1.0".to_string()),
+
                 email_config,
                 sms_config,
                 push_cache_config: PushCacheConfig {
@@ -120,6 +224,9 @@ impl ServerConfig {
                         .parse()
                         .unwrap_or(true),
                 },
+                transaction_config: TransactionConfig::from_env(),
+                tls_config,
+                rate_limiting: RateLimitConfig::from_env(),
             };
 
             // Enhanced validation
@@ -136,6 +243,17 @@ impl ServerConfig {
                 }
             }
 
+            // Validate server implementation details
+            if config.server_implementation_name.is_empty() {
+                error!("Server implementation name cannot be empty");
+                panic!("Invalid configuration: empty server implementation name");
+            }
+
+            if config.server_implementation_version.is_empty() {
+                error!("Server implementation version cannot be empty");
+                panic!("Invalid configuration: empty server implementation version");
+            }
+
             info!(
                 "Server configuration initialized: server={}, env={}",
                 config.homeserver_name, config.environment
@@ -144,10 +262,8 @@ impl ServerConfig {
         }))
     }
 
-    pub fn get() -> &'static ServerConfig {
-        SERVER_CONFIG
-            .get()
-            .expect("ServerConfig not initialized - call ServerConfig::init() first")
+    pub fn get() -> Result<&'static ServerConfig, ConfigError> {
+        SERVER_CONFIG.get().ok_or_else(|| ConfigError::MissingRequired("ServerConfig not initialized".to_string()))
     }
 }
 

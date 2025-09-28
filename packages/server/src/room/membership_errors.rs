@@ -67,6 +67,12 @@ pub enum MembershipError {
         retry_after: Option<u64>,
     },
 
+    /// DNS resolution failed for federation server
+    DnsResolutionError {
+        server_name: String,
+        error: String,
+    },
+
     /// Network timeout during federation request
     FederationTimeout {
         server_name: String,
@@ -124,6 +130,7 @@ impl MembershipError {
             MembershipError::InconsistentRoomState { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             MembershipError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             MembershipError::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            MembershipError::DnsResolutionError { .. } => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -138,6 +145,7 @@ impl MembershipError {
             MembershipError::UserNotFound { .. } => "M_NOT_FOUND",
             MembershipError::MembershipAlreadyExists { .. } => "M_BAD_STATE",
             MembershipError::FederationError { .. } => "M_UNKNOWN",
+            MembershipError::DnsResolutionError { .. } => "M_UNKNOWN",
             MembershipError::FederationTimeout { .. } => "M_UNKNOWN",
             MembershipError::InvalidEvent { .. } => "M_BAD_JSON",
             MembershipError::InvalidMatrixId { .. } => "M_INVALID_PARAM",
@@ -162,11 +170,10 @@ impl MembershipError {
             MembershipError::RateLimited { retry_after_ms } => {
                 response["retry_after_ms"] = (*retry_after_ms).into();
             },
-            MembershipError::FederationError { retry_after, .. } => {
-                if let Some(retry) = retry_after {
-                    response["retry_after_ms"] = (*retry).into();
-                }
+            MembershipError::FederationError { retry_after: Some(retry), .. } => {
+                response["retry_after_ms"] = (*retry).into();
             },
+            MembershipError::FederationError { retry_after: None, .. } => {},
             _ => {},
         }
 
@@ -238,6 +245,9 @@ impl fmt::Display for MembershipError {
             },
             MembershipError::FederationError { server_name, error_message, .. } => {
                 write!(f, "Federation error from {}: {}", server_name, error_message)
+            },
+            MembershipError::DnsResolutionError { server_name, error } => {
+                write!(f, "DNS resolution failed for {}: {}", server_name, error)
             },
             MembershipError::FederationTimeout { server_name, timeout_ms, operation } => {
                 write!(
@@ -351,7 +361,6 @@ impl MembershipError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     mod error_construction_tests {
         use super::*;

@@ -3,7 +3,7 @@ use matryx_surrealdb::repository::PerformanceRepository;
 use std::collections::HashMap;
 use std::sync::Arc;
 use surrealdb::engine::any::Any;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::federation::device_management::{DeviceError, DeviceListCache};
 
@@ -39,13 +39,12 @@ impl DeviceCacheManager {
     /// Get device list from cache or fetch if needed
     pub async fn get_device_list(&mut self, user_id: &str) -> Result<DeviceListCache, DeviceError> {
         // Check cache validity
-        if let Some(expiry) = self.cache_expiry.get(user_id) {
-            if Utc::now() > *expiry {
+        if let Some(expiry) = self.cache_expiry.get(user_id)
+            && Utc::now() > *expiry {
                 self.cache.remove(user_id);
                 self.cache_expiry.remove(user_id);
                 info!("Expired cache entry for user: {}", user_id);
             }
-        }
 
         let is_cache_hit = self.cache.contains_key(user_id);
 

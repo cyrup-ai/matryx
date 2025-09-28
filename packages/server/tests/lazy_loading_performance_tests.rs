@@ -4,7 +4,6 @@ use matryx_server::metrics::lazy_loading_metrics::LazyLoadingMetrics;
 use matryx_surrealdb::repository::membership::MembershipRepository;
 use std::time::Duration;
 use surrealdb::{Surreal, engine::any::Any};
-use tokio_test;
 
 async fn setup_test_database() -> Surreal<Any> {
     let db = surrealdb::engine::any::connect("surrealkv://test_data/lazy_loading_test.db").await.unwrap();
@@ -61,7 +60,7 @@ async fn create_power_level_event(
 }
 
 async fn create_message_event(
-    db: &Surreal<Any>,
+    _db: &Surreal<Any>,
     room_id: &str,
     sender: &str,
     content: &str,
@@ -87,7 +86,7 @@ async fn test_lazy_loading_performance_optimization() {
     use matryx_surrealdb::repository::PerformanceRepository;
     use std::sync::Arc;
     let performance_repo = Arc::new(PerformanceRepository::new(test_db.clone()));
-    let metrics = LazyLoadingMetrics::new(performance_repo);
+    let _metrics = LazyLoadingMetrics::new(performance_repo);
 
     // Create large room with 1000 members
     let room_id = "!large_room:example.com";
@@ -227,7 +226,7 @@ async fn test_cache_invalidation_on_membership_changes() {
     lazy_cache.invalidate_room_cache(room_id).await;
 
     // Verify cache was cleared
-    let cache_stats_after = lazy_cache.get_cache_stats().await;
+    let _cache_stats_after = lazy_cache.get_cache_stats().await;
     // Note: entry count may not change immediately due to moka's lazy cleanup,
     // but the actual cached data should be invalidated
 }

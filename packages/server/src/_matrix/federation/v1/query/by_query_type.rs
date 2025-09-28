@@ -3,15 +3,16 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use matryx_surrealdb::FederationRepository;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Room, User};
-use matryx_surrealdb::repository::{RoomRepository, UserRepository};
+
+use matryx_surrealdb::repository::UserRepository;
 
 /// Query parameters for federation queries
 #[derive(Debug, Deserialize)]
@@ -90,9 +91,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -148,41 +148,21 @@ async fn handle_directory_query(
     }
 
     // Query database for room alias
-    let query = "
-        SELECT room_id, servers
-        FROM room_alias
-        WHERE alias = $alias
-        LIMIT 1
-    ";
-
-    let mut response =
-        state
-            .db
-            .query(query)
-            .bind(("alias", room_alias.clone()))
-            .await
-            .map_err(|e| {
-                error!("Failed to query room alias {}: {}", room_alias, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-
-    #[derive(serde::Deserialize)]
-    struct AliasResult {
-        room_id: String,
-        servers: Option<Vec<String>>,
-    }
-
-    let alias_result: Option<AliasResult> = response.take(0).map_err(|e| {
-        error!("Failed to parse alias result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let federation_repo = FederationRepository::new(state.db.clone());
+    let alias_result = federation_repo
+        .get_room_alias_info(room_alias)
+        .await
+        .map_err(|e| {
+            error!("Failed to query room alias {}: {}", room_alias, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     match alias_result {
-        Some(alias) => {
-            info!("Directory query successful for alias: {} -> {}", room_alias, alias.room_id);
+        Some((room_id, servers)) => {
+            info!("Directory query successful for alias: {} -> {}", room_alias, room_id);
             Ok(Json(json!({
-                "room_id": alias.room_id,
-                "servers": alias.servers.unwrap_or_else(|| vec![state.homeserver_name.clone()])
+                "room_id": room_id,
+                "servers": servers.unwrap_or_else(|| vec![state.homeserver_name.clone()])
             })))
         },
         None => {

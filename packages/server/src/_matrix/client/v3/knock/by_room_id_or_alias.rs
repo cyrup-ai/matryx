@@ -6,19 +6,19 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
+
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::HashMap;
+
+
 use tracing::{error, info, warn};
-use uuid::Uuid;
+
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
-    utils::matrix_events::{calculate_content_hashes, sign_event},
+
 };
-use matryx_entity::types::{Event, EventContent, Membership, MembershipState, Room};
+use matryx_entity::types::{Membership, MembershipState};
 use matryx_surrealdb::repository::{
     event::EventRepository,
     membership::MembershipRepository,
@@ -165,8 +165,12 @@ pub async fn post(
             warn!("Room knock failed - room {} is invite-only", actual_room_id);
             return Err(StatusCode::FORBIDDEN);
         },
-        Some("restricted") | Some("private") | _ => {
-            warn!("Room knock failed - room {} does not allow knocking", actual_room_id);
+        Some("restricted") | Some("private") => {
+            warn!("Room knock failed - room {} does not allow knocking (restricted/private)", actual_room_id);
+            return Err(StatusCode::FORBIDDEN);
+        },
+        _ => {
+            warn!("Room knock failed - room {} does not allow knocking (unknown join rule)", actual_room_id);
             return Err(StatusCode::FORBIDDEN);
         },
     }
@@ -177,12 +181,12 @@ pub async fn post(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let event_depth = event_repo
+    let _event_depth = event_repo
         .calculate_event_depth(&prev_events)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let auth_events = event_repo
+    let _auth_events = event_repo
         .get_auth_events_for_knock(&actual_room_id, &user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

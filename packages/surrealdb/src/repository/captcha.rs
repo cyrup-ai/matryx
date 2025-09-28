@@ -254,9 +254,9 @@ impl<C: Connection> CaptchaRepository<C> {
     ) -> Result<CaptchaChallenge, RepositoryError> {
         use rand::Rng;
 
-        let mut rng = rand::thread_rng();
-        let a = rng.gen_range(1..=20);
-        let b = rng.gen_range(1..=20);
+        let mut rng = rand::rng();
+        let a = rng.random_range(1..=20);
+        let b = rng.random_range(1..=20);
         let answer = (a + b).to_string();
         let question = format!("What is {} + {}?", a, b);
 

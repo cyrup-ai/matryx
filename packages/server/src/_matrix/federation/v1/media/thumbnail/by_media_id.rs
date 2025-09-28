@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     body::Body,
@@ -12,6 +12,9 @@ use image::{ImageFormat, imageops::FilterType};
 
 use crate::state::AppState;
 use crate::auth::verify_x_matrix_auth;
+use crate::error::MatrixError;
+use crate::utils::request_helpers::extract_request_uri;
+use crate::utils::response_helpers::{build_multipart_media_response, MultipartMediaResponse, MediaContent};
 use matryx_surrealdb::repository::{
     media::MediaRepository,
     media_service::MediaService,
@@ -19,6 +22,7 @@ use matryx_surrealdb::repository::{
     membership::MembershipRepository,
 };
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Query parameters for thumbnail download
 #[derive(Debug, Deserialize)]
@@ -40,12 +44,21 @@ pub async fn get(
     Path(media_id): Path<String>,
     Query(query): Query<ThumbnailQuery>,
     headers: HeaderMap,
-) -> Result<Response, StatusCode> {
-    // Verify X-Matrix authentication
-    let auth_result = verify_x_matrix_auth(&headers, &state.homeserver_name, state.event_signer.get_default_key_id()).await;
+    request: Request,
+) -> Result<Response, MatrixError> {
+    // Verify X-Matrix authentication using actual request URI (including all query parameters)
+    let uri = extract_request_uri(&request);
+    let auth_result = verify_x_matrix_auth(
+        &headers,
+        &state.homeserver_name,
+        "GET",
+        uri,
+        None, // No body for GET requests
+        state.event_signer.get_signing_engine(),
+    ).await;
     let _x_matrix_auth = auth_result.map_err(|e| {
         warn!("X-Matrix authentication failed for thumbnail download: {}", e);
-        StatusCode::UNAUTHORIZED
+        MatrixError::from(e)
     })?;
 
     debug!(
@@ -56,67 +69,76 @@ pub async fn get(
     // Validate media_id format
     if media_id.is_empty() || media_id.len() > 255 {
         warn!("Invalid media_id format: {}", media_id);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(MatrixError::Unknown);
     }
 
     // Validate thumbnail dimensions
-    if query.width == 0 || query.height == 0 || query.width > 2048 || query.height > 2048 {
+    if query.width == 0 || query.height == 0 {
         warn!("Invalid thumbnail dimensions: {}x{}", query.width, query.height);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(MatrixError::Unknown);
+    }
+
+    if query.width > 2048 || query.height > 2048 {
+        warn!("Oversized thumbnail dimensions: {}x{}", query.width, query.height);
+        return Err(MatrixError::TooLargeFor {
+            action: "thumbnail".to_string()
+        });
     }
 
     let method = query.method.as_deref().unwrap_or("scale");
     if !matches!(method, "crop" | "scale") {
         warn!("Invalid thumbnail method: {}", method);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(MatrixError::Unknown);
     }
+
+    // Add timeout validation and application
+    let timeout_ms = query.timeout_ms.unwrap_or(20000).min(120000); // Max 2 minutes
+    let timeout_duration = Duration::from_millis(timeout_ms);
 
     // Create MediaService instance
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    
+
     let media_service = MediaService::new(media_repo, room_repo, membership_repo);
 
-    // Generate thumbnail using MediaService
-    let thumbnail_result = media_service
-        .generate_thumbnail(
+    // Apply timeout to MediaService call
+    let thumbnail_result = tokio::time::timeout(
+        timeout_duration,
+        media_service.generate_thumbnail(
             &media_id,
             &state.homeserver_name,
             query.width,
             query.height,
             method,
         )
-        .await
-        .map_err(|e| {
-            debug!("Failed to generate thumbnail for {}: {}", media_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    )
+    .await
+    .map_err(|_| MatrixError::NotYetUploaded)? // Timeout = content not ready
+    .map_err(|e| {
+        debug!("Failed to generate thumbnail for {}: {}", media_id, e);
+        MatrixError::from(e)
+    })?;
 
     debug!(
         "Serving federation thumbnail: media={}, size={}x{}, type={}",
         media_id, thumbnail_result.width, thumbnail_result.height, thumbnail_result.content_type
     );
 
-    // Create response body from thumbnail content
-    let body = Body::from(thumbnail_result.thumbnail);
+    // ✅ COMPLIANT: Multipart/mixed response
+    let multipart_response = MultipartMediaResponse {
+        metadata: serde_json::json!({}), // Empty object per spec
+        content: MediaContent::Bytes {
+            data: thumbnail_result.thumbnail,
+            content_type: thumbnail_result.content_type,
+            filename: None,
+        },
+    };
 
-    // Build response with appropriate headers
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", thumbnail_result.content_type)
-        .header("Content-Length", thumbnail_result.thumbnail.len().to_string())
-        .header("Cache-Control", "public, max-age=31536000, immutable")
-        .header("Content-Security-Policy", 
-            "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
-        .header("Cross-Origin-Resource-Policy", "cross-origin")
-        .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        .body(body)
+    let response = build_multipart_media_response(multipart_response)
         .map_err(|e| {
-            error!("Failed to build thumbnail response: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            error!("Failed to build multipart thumbnail response: {}", e);
+            MatrixError::Unknown
         })?;
 
     Ok(response)
@@ -247,19 +269,18 @@ async fn generate_thumbnail(
     
     let thumbnail_id = format!("{}_{}_{}x{}_{}", media_id, method, width, height, animated);
     
-    state.db
-        .query(insert_query)
-        .bind(("thumbnail_id", thumbnail_id))
-        .bind(("media_id", media_id))
-        .bind(("width", width as i64))
-        .bind(("height", height as i64))
-        .bind(("method", method))
-        .bind(("animated", animated))
-        .bind(("file_path", thumbnail_path.clone()))
-        .bind(("content_type", output_content_type))
-        .bind(("content_length", file_size as i64))
+    let media_repo = MediaRepository::new(state.db.clone());
+    media_repo
+        .store_media_thumbnail(
+            media_id,
+            "localhost", // In real implementation, would get from server context
+            width,
+            height,
+            method,
+            &thumbnail_data,
+        )
         .await
-        .map_err(|e| format!("Failed to store thumbnail record: {}", e))?;
+        .map_err(|e| format!("Failed to store thumbnail: {}", e))?;
 
     debug!("Generated thumbnail: {} ({}x{}, {}, {} bytes)", 
            thumbnail_path, width, height, method, file_size);

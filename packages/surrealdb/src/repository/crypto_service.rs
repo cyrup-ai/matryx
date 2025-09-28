@@ -14,13 +14,13 @@ pub use crate::repository::cross_signing::{CrossSigningKey, CrossSigningKeys, Si
 pub use crate::repository::crypto::{DeviceKey, FallbackKey, OneTimeKey};
 pub use crate::repository::key_backup::{BackupStatistics, BackupVersion, EncryptedRoomKey};
 
+// Import canonical DeviceKeys from entity package
+use matryx_entity::types::DeviceKeys;
+
+// Extended device keys struct for crypto service operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub user_id: String,
-    pub device_id: String,
-    pub algorithms: Vec<String>,
-    pub keys: HashMap<String, String>,
-    pub signatures: HashMap<String, HashMap<String, String>>,
+pub struct CryptoDeviceKeys {
+    pub device_keys: DeviceKeys,
     pub one_time_keys: HashMap<String, OneTimeKey>,
     pub fallback_keys: HashMap<String, FallbackKey>,
 }
@@ -130,16 +130,17 @@ impl CryptoService {
         &self,
         user_id: &str,
         device_id: &str,
-        keys: &DeviceKeys,
+        keys: &CryptoDeviceKeys,
     ) -> Result<(), RepositoryError> {
         // Store the main device key
         let device_key = DeviceKey {
-            user_id: keys.user_id.clone(),
-            device_id: keys.device_id.clone(),
-            algorithms: keys.algorithms.clone(),
-            keys: keys.keys.clone(),
-            signatures: keys.signatures.clone(),
-            unsigned: None,
+            user_id: keys.device_keys.user_id.clone(),
+            device_id: keys.device_keys.device_id.clone(),
+            algorithms: keys.device_keys.algorithms.clone(),
+            keys: keys.device_keys.keys.clone(),
+            signatures: keys.device_keys.signatures.clone(),
+            unsigned: keys.device_keys.unsigned.as_ref()
+                .and_then(|u| serde_json::to_value(u).ok()),
         };
 
         self.crypto_repo.store_device_key(user_id, device_id, &device_key).await?;

@@ -1,8 +1,8 @@
 use crate::{AppState, auth::AuthenticatedUser};
 use axum::{Extension, Json, extract::Path, http::StatusCode};
-use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
+use matryx_surrealdb::repository::ReceiptRepository;
 
 /// POST /_matrix/client/v3/rooms/{roomId}/receipt/{receiptType}/{eventId}
 ///
@@ -15,38 +15,22 @@ pub async fn post(
 ) -> Result<Json<Value>, StatusCode> {
     // Extract threading information from payload (Matrix 1.4 requirement)
     let thread_id = payload.get("thread_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    
+    // Initialize receipt repository
+    let receipt_repo = ReceiptRepository::new(state.db.clone());
 
     match receipt_type.as_str() {
         "m.read" => {
             // Public read receipt
-            let query = "
-                INSERT INTO receipts SET
-                    room_id = $room_id,
-                    user_id = $user_id,
-                    event_id = $event_id,
-                    receipt_type = 'm.read',
-                    thread_id = $thread_id,
-                    timestamp = $timestamp,
-                    is_private = false,
-                    server_name = $server_name,
-                    received_at = $received_at
-                ON DUPLICATE KEY UPDATE
-                    event_id = $event_id,
-                    timestamp = $timestamp,
-                    thread_id = $thread_id,
-                    received_at = $received_at
-            ";
-
-            if let Err(e) = state
-                .db
-                .query(query)
-                .bind(("room_id", room_id.clone()))
-                .bind(("user_id", user.user_id.clone()))
-                .bind(("event_id", event_id.clone()))
-                .bind(("thread_id", thread_id.clone()))
-                .bind(("timestamp", Utc::now().timestamp_millis()))
-                .bind(("server_name", state.homeserver_name.clone()))
-                .bind(("received_at", Utc::now()))
+            if let Err(e) = receipt_repo
+                .store_receipt(
+                    &room_id,
+                    &user.user_id,
+                    &event_id,
+                    "m.read",
+                    thread_id.as_deref(),
+                    &state.homeserver_name,
+                )
                 .await
             {
                 error!("Failed to store m.read receipt: {}", e);
@@ -61,34 +45,15 @@ pub async fn post(
 
         "m.read.private" => {
             // Private read receipt - Matrix 1.4 specification
-            let query = "
-                INSERT INTO receipts SET
-                    room_id = $room_id,
-                    user_id = $user_id,
-                    event_id = $event_id,
-                    receipt_type = 'm.read.private',
-                    thread_id = $thread_id,
-                    timestamp = $timestamp,
-                    is_private = true,
-                    server_name = $server_name,
-                    received_at = $received_at
-                ON DUPLICATE KEY UPDATE
-                    event_id = $event_id,
-                    timestamp = $timestamp,
-                    thread_id = $thread_id,
-                    received_at = $received_at
-            ";
-
-            if let Err(e) = state
-                .db
-                .query(query)
-                .bind(("room_id", room_id.clone()))
-                .bind(("user_id", user.user_id.clone()))
-                .bind(("event_id", event_id.clone()))
-                .bind(("thread_id", thread_id.clone()))
-                .bind(("timestamp", Utc::now().timestamp_millis()))
-                .bind(("server_name", state.homeserver_name.clone()))
-                .bind(("received_at", Utc::now()))
+            if let Err(e) = receipt_repo
+                .store_receipt(
+                    &room_id,
+                    &user.user_id,
+                    &event_id,
+                    "m.read.private",
+                    thread_id.as_deref(),
+                    &state.homeserver_name,
+                )
                 .await
             {
                 error!("Failed to store m.read.private receipt: {}", e);

@@ -4,14 +4,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, Membership, MembershipState, PowerLevels, Room};
+use matryx_entity::types::{MembershipState, Room};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Query parameters for make_join request
@@ -93,9 +93,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -219,6 +218,32 @@ pub async fn get(
 
     let now = Utc::now().timestamp_millis();
 
+    // Get auth_events required for Matrix federation compliance
+    let auth_events = event_repo
+        .get_auth_events_for_join(&room_id, &user_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to fetch auth_events for join in room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Get prev_events for proper event DAG construction per Matrix specification
+    let prev_events = event_repo
+        .get_room_events(&room_id, Some(10))
+        .await
+        .map_err(|e| {
+            error!("Failed to fetch prev_events for room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    debug!(
+        "Matrix join event preparation: auth_events={}, prev_events={} for user {} in room {}",
+        auth_events.len(),
+        prev_events.len(),
+        user_id,
+        room_id
+    );
+
     let event_template = json!({
         "type": "m.room.member",
         "content": event_content,
@@ -226,7 +251,9 @@ pub async fn get(
         "room_id": room_id,
         "sender": user_id,
         "origin": state.homeserver_name,
-        "origin_server_ts": now
+        "origin_server_ts": now,
+        "auth_events": auth_events,
+        "prev_events": prev_events
     });
 
     let response = json!({
@@ -258,8 +285,18 @@ async fn check_join_authorization(
     user_id: &str,
     origin_server: &str,
 ) -> Result<JoinAuthResult, Box<dyn std::error::Error + Send + Sync>> {
+    // Validate that the origin server matches the user's server domain
+    let user_server = user_id.split(':').nth(1)
+        .ok_or("Invalid user ID format")?;
+    
+    if user_server != origin_server {
+        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+    }
+
     // Get room's join rules from current state
-    let join_rules = get_room_join_rules(state, &room.room_id).await?;
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let join_rules = room_repo.get_room_join_rules_string(&room.room_id).await
+        .map_err(|e| format!("Failed to get room join rules: {}", e))?;
 
     match join_rules.as_str() {
         "public" => {
@@ -319,31 +356,7 @@ async fn check_join_authorization(
     }
 }
 
-/// Get the current join rules for a room
-async fn get_room_join_rules(
-    state: &AppState,
-    room_id: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.join_rule 
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.join_rules' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct JoinRuleContent {
-        join_rule: String,
-    }
-
-    let content: Option<JoinRuleContent> = response.take(0)?;
-    Ok(content.map(|c| c.join_rule).unwrap_or_else(|| "invite".to_string()))
-}
 
 /// Check restricted room join conditions
 async fn check_restricted_room_conditions(
@@ -352,8 +365,18 @@ async fn check_restricted_room_conditions(
     user_id: &str,
     origin_server: &str,
 ) -> Result<JoinAuthResult, Box<dyn std::error::Error + Send + Sync>> {
+    // Validate that the origin server matches the user's server domain
+    let user_server = user_id.split(':').nth(1)
+        .ok_or("Invalid user ID format")?;
+    
+    if user_server != origin_server {
+        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+    }
+
     // Get room's join rule content for allow conditions
-    let join_rule_content = get_room_join_rule_content(state, &room.room_id).await?;
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let join_rule_content = room_repo.get_room_join_rule_content(&room.room_id).await
+        .map_err(|e| format!("Failed to get room join rule content: {}", e))?;
 
     let allow_conditions = join_rule_content
         .get("allow")
@@ -403,33 +426,7 @@ async fn check_restricted_room_conditions(
     })
 }
 
-/// Get the full join rule content for a room
-async fn get_room_join_rule_content(
-    state: &AppState,
-    room_id: &str,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.join_rules' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct EventContent {
-        content: Value,
-    }
-
-    let event_data: Option<EventContent> = response.take(0)?;
-    Ok(event_data
-        .map(|e| e.content)
-        .unwrap_or_else(|| json!({"join_rule": "invite"})))
-}
 
 /// Check if user satisfies room membership condition
 async fn check_room_membership_condition(
@@ -438,12 +435,28 @@ async fn check_room_membership_condition(
     condition_room_id: &str,
     origin_server: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Validate that the origin server matches the user's server domain
+    let user_server = user_id.split(':').nth(1)
+        .ok_or("Invalid user ID format")?;
+    
+    if user_server != origin_server {
+        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+    }
+
     // Check if our server knows about the condition room
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
     let condition_room = room_repo
         .get_by_id(condition_room_id)
         .await?
         .ok_or("Condition room not known to this server")?;
+
+    // Validate condition room properties for restricted join authorization
+    if condition_room.room_version.is_empty() {
+        return Err("Invalid condition room: missing room version".into());
+    }
+    
+    debug!("Validating membership in condition room {} (version: {})", 
+           condition_room_id, condition_room.room_version);
 
     // Check if the user is a member of the condition room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
@@ -452,44 +465,13 @@ async fn check_room_membership_condition(
     match membership {
         Some(m) if m.membership == MembershipState::Join => {
             // Find a user from our server who can authorize the join
-            find_authorizing_user(state, condition_room_id, &state.homeserver_name).await
+            let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+            membership_repo.find_authorizing_user(condition_room_id, &state.homeserver_name).await
+                .map_err(|e| format!("Failed to find authorizing user: {}", e))?
+                .ok_or("No authorizing user found from our server".into())
         },
         _ => Err("User is not a member of the condition room".into()),
     }
 }
 
-/// Find a user from our server who can authorize restricted room joins
-async fn find_authorizing_user(
-    state: &AppState,
-    room_id: &str,
-    our_server: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT user_id
-        FROM membership
-        WHERE room_id = $room_id
-        AND membership = 'join'
-        AND user_id CONTAINS $server_suffix
-        ORDER BY updated_at DESC
-        LIMIT 1
-    ";
 
-    let server_suffix = format!(":{}", our_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct AuthUser {
-        user_id: String,
-    }
-
-    let auth_user: Option<AuthUser> = response.take(0)?;
-    auth_user
-        .map(|u| u.user_id)
-        .ok_or("No authorizing user found from our server".into())
-}

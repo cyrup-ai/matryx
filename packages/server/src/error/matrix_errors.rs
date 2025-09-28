@@ -6,6 +6,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use thiserror::Error;
+use matryx_surrealdb::repository::media_service::MediaError;
 
 /// Complete Matrix error code system following Matrix specification
 #[derive(Error, Debug)]
@@ -74,8 +75,17 @@ pub enum MatrixError {
     #[error("Session expired")]
     SessionExpired,
 
+    // Content Repository specific
+    /// Content not yet uploaded (504 response)
+    #[error("Content has not yet been uploaded")]
+    NotYetUploaded,
+
+    /// Too large with specific context
+    #[error("Content is too large to {action}")]
+    TooLargeFor { action: String },
+
     // Generic
-    #[error("Unknown server error")]
+    #[error("Cannot process request")]
     Unknown,
 }
 
@@ -164,8 +174,20 @@ impl MatrixError {
             MatrixError::SessionExpired => {
                 (StatusCode::UNAUTHORIZED, "M_SESSION_EXPIRED", self.to_string(), None)
             },
+            MatrixError::NotYetUploaded => {
+                (StatusCode::GATEWAY_TIMEOUT, "M_NOT_YET_UPLOADED", self.to_string(), None)
+            },
+            MatrixError::TooLargeFor { action } => {
+                // Context-aware status codes: 502 for download, 413 for thumbnail
+                let status = if action.contains("serve") {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                };
+                (status, "M_TOO_LARGE", self.to_string(), None)
+            },
             MatrixError::Unknown => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "M_UNKNOWN", self.to_string(), None)
+                (StatusCode::BAD_REQUEST, "M_UNKNOWN", self.to_string(), None)
             },
         }
     }
@@ -179,15 +201,26 @@ impl IntoResponse for MatrixError {
             "error": message
         });
 
-        if let Some(extra_fields) = extra {
-            if let serde_json::Value::Object(ref mut map) = response {
+        if let Some(extra_fields) = extra
+            && let serde_json::Value::Object(ref mut map) = response {
                 for (key, value) in extra_fields {
                     map.insert(key, value);
                 }
             }
+
+        let mut http_response = (status, Json(response)).into_response();
+
+        // Add Retry-After header for rate limiting (Matrix v1.10+ requirement)
+        if let MatrixError::LimitExceeded { retry_after_ms } = self {
+            if let Some(retry_ms) = retry_after_ms {
+                let retry_seconds = (retry_ms / 1000).max(1); // Convert to seconds, minimum 1
+                if let Ok(header_value) = retry_seconds.to_string().parse() {
+                    http_response.headers_mut().insert("Retry-After", header_value);
+                }
+            }
         }
 
-        (status, Json(response)).into_response()
+        http_response
     }
 }
 
@@ -215,6 +248,24 @@ impl From<crate::auth::errors::MatrixAuthError> for MatrixError {
             crate::auth::errors::MatrixAuthError::JwtError(_) => {
                 MatrixError::UnknownToken { soft_logout: false }
             },
+        }
+    }
+}
+
+// Conversion from MediaService errors
+impl From<MediaError> for MatrixError {
+    fn from(media_error: MediaError) -> Self {
+        match media_error {
+            MediaError::NotFound => MatrixError::NotFound,
+            MediaError::NotYetUploaded => MatrixError::NotYetUploaded,
+            MediaError::TooLarge => MatrixError::TooLargeFor {
+                action: "serve".to_string()
+            },
+            MediaError::UnsupportedFormat => MatrixError::Unknown,
+            MediaError::AccessDenied(_) => MatrixError::Forbidden,
+            MediaError::InvalidOperation(_) => MatrixError::Unknown,
+            MediaError::Validation(_) => MatrixError::Unknown,
+            MediaError::Database(_) => MatrixError::Unknown,
         }
     }
 }

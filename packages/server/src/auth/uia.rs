@@ -1,9 +1,9 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
-use surrealdb::{Connection, engine::any::Any};
-use tracing::{error, info, warn};
+
+use surrealdb::engine::any::Any;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::MatrixAuthError;
@@ -423,9 +423,8 @@ impl UiaService {
         // Use existing UserRepository
         use matryx_surrealdb::repository::UserRepository;
 
-        // Get the database connection - use into() to convert to Surreal<Any>
-        let any_db = self.uia_repo.get_db().clone().into();
-        let user_repo = UserRepository::new(any_db);
+        // Get the database connection - UiaRepository<Any> already has Surreal<Any>
+        let user_repo = UserRepository::new(self.uia_repo.get_db().clone());
 
         match user_repo.get_by_id(user_id).await {
             Ok(Some(user)) => {
@@ -475,7 +474,7 @@ impl UiaService {
             ThirdPartyValidationSessionRepositoryTrait,
         };
 
-        let any_db = self.uia_repo.get_db().clone().into();
+        let any_db = self.uia_repo.get_db().clone();
         let threepid_repo = ThirdPartyValidationSessionRepository::new(any_db);
 
         // Extract session ID and client secret from threepid_creds

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Membership, MembershipState, Room};
+use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
@@ -83,9 +83,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(

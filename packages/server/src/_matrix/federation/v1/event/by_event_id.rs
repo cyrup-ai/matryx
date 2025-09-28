@@ -8,67 +8,12 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, PDU, Transaction};
-use matryx_surrealdb::repository::EventRepository;
+use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::auth::x_matrix_parser::parse_x_matrix_header;
+use matryx_entity::types::{PDU, Transaction};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
-/// Matrix X-Matrix authentication header parsed structure
-#[derive(Debug, Clone)]
-struct XMatrixAuth {
-    origin: String,
-    key_id: String,
-    signature: String,
-}
 
-/// Parse X-Matrix authentication header
-fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
-    let auth_header = headers
-        .get("authorization")
-        .ok_or(StatusCode::UNAUTHORIZED)?
-        .to_str()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    if !auth_header.starts_with("X-Matrix ") {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let auth_params = &auth_header[9..]; // Skip "X-Matrix "
-
-    let mut origin = None;
-    let mut key = None;
-    let mut signature = None;
-
-    for param in auth_params.split(',') {
-        let param = param.trim();
-
-        if let Some((key_name, value)) = param.split_once('=') {
-            match key_name.trim() {
-                "origin" => {
-                    origin = Some(value.trim().to_string());
-                },
-                "key" => {
-                    let key_value = value.trim().trim_matches('"');
-                    if let Some(key_id) = key_value.strip_prefix("ed25519:") {
-                        key = Some(key_id.to_string());
-                    } else {
-                        return Err(StatusCode::BAD_REQUEST);
-                    }
-                },
-                "sig" => {
-                    signature = Some(value.trim().trim_matches('"').to_string());
-                },
-                _ => {
-                    // Unknown parameter, ignore for forward compatibility
-                },
-            }
-        }
-    }
-
-    let origin = origin.ok_or(StatusCode::BAD_REQUEST)?;
-    let key_id = key.ok_or(StatusCode::BAD_REQUEST)?;
-    let signature = signature.ok_or(StatusCode::BAD_REQUEST)?;
-
-    Ok(XMatrixAuth { origin, key_id, signature })
-}
 
 /// Validate Matrix event ID format
 fn validate_event_id(event_id: &str) -> Result<(), StatusCode> {
@@ -87,11 +32,18 @@ pub async fn get(
     Path(event_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Transaction>, StatusCode> {
-    // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
-        warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
-    })?;
+    // Parse X-Matrix authentication header using RFC 9110 compliant parser
+    let auth_header = headers
+        .get("authorization")
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .to_str()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let x_matrix_auth = parse_x_matrix_header(auth_header)
+        .map_err(|e| {
+            warn!("Failed to parse X-Matrix authentication header: {}", e);
+            StatusCode::BAD_REQUEST
+        })?;
 
     debug!("Event retrieval request - origin: {}, event: {}", x_matrix_auth.origin, event_id);
 
@@ -132,37 +84,85 @@ pub async fn get(
             StatusCode::NOT_FOUND
         })?;
 
+    // Validate event according to Matrix specification before serving to federation
+    let pdu_validator = PduValidator::from_app_state(&state).map_err(|e| {
+        error!("Failed to create PDU validator: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let event_json = serde_json::to_value(&event).map_err(|e| {
+        error!("Failed to serialize event for validation: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let validated_event = match pdu_validator
+        .validate_pdu(&event_json, &x_matrix_auth.origin)
+        .await
+    {
+        Ok(ValidationResult::Valid(validated_event)) => {
+            debug!("Event {} passed Matrix validation", event_id);
+            validated_event
+        },
+        Ok(ValidationResult::Rejected { event_id, reason }) => {
+            warn!("Event {} failed validation and was rejected: {}", event_id, reason);
+            return Err(StatusCode::FORBIDDEN);
+        },
+        Ok(ValidationResult::SoftFailed { event, reason }) => {
+            warn!("Event {} soft-failed validation: {}", event_id, reason);
+            // For federation requests, we still serve soft-failed events
+            // but log the issue for monitoring
+            event
+        },
+        Err(e) => {
+            error!("Event validation error for {}: {}", event_id, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
     // Check if requesting server has permission to access this event
-    let has_permission = check_event_access_permission(&state, &event, &x_matrix_auth.origin)
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let has_users = membership_repo.server_has_users_in_room(&validated_event.room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
-            error!("Failed to check event access permissions: {}", e);
+            error!("Failed to check server membership: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    let has_permission = if has_users {
+        true
+    } else {
+        // Check if room is world-readable
+        let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+        room_repo.is_room_world_readable(&validated_event.room_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to check room world-readable status: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
 
     if !has_permission {
         warn!(
             "Server {} not authorized to access event {} in room {}",
-            x_matrix_auth.origin, event_id, event.room_id
+            x_matrix_auth.origin, event_id, validated_event.room_id
         );
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Convert Event to PDU format
+    // Convert validated Event to PDU format for federation response
     let pdu = PDU {
-        event_id: event.event_id.clone(),
-        room_id: event.room_id.clone(),
-        sender: event.sender.clone(),
-        origin_server_ts: event.origin_server_ts,
-        event_type: event.event_type.clone(),
-        content: event.content.clone(),
-        state_key: event.state_key.clone(),
-        prev_events: event.prev_events.clone().unwrap_or_default(),
-        auth_events: event.auth_events.clone().unwrap_or_default(),
-        depth: event.depth.unwrap_or(0),
-        signatures: event.signatures.clone().unwrap_or_default(),
-        hashes: event.hashes.clone().unwrap_or_default(),
-        unsigned: event.unsigned.clone().and_then(|v| serde_json::from_value(v).ok()),
+        event_id: validated_event.event_id.clone(),
+        room_id: validated_event.room_id.clone(),
+        sender: validated_event.sender.clone(),
+        origin_server_ts: validated_event.origin_server_ts,
+        event_type: validated_event.event_type.clone(),
+        content: validated_event.content.clone(),
+        state_key: validated_event.state_key.clone(),
+        prev_events: validated_event.prev_events.clone().unwrap_or_default(),
+        auth_events: validated_event.auth_events.clone().unwrap_or_default(),
+        depth: validated_event.depth.unwrap_or(0),
+        signatures: validated_event.signatures.clone().unwrap_or_default(),
+        hashes: validated_event.hashes.clone().unwrap_or_default(),
+        unsigned: validated_event.unsigned.clone().and_then(|v| serde_json::from_value(v).ok()),
     };
 
     // Create transaction response
@@ -178,73 +178,4 @@ pub async fn get(
     Ok(Json(transaction))
 }
 
-/// Check if a server has permission to access a specific event
-async fn check_event_access_permission(
-    state: &AppState,
-    event: &Event,
-    requesting_server: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if the requesting server has any users in the room (current or historical)
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        LIMIT 1
-    ";
 
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", event.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
-
-    if has_users {
-        return Ok(true);
-    }
-
-    // Check if room is world-readable
-    let world_readable = is_room_world_readable(state, &event.room_id).await?;
-    Ok(world_readable)
-}
-
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}

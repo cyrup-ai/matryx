@@ -38,6 +38,27 @@ pub struct FederationValidationResult {
     pub error_code: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DirectToDeviceEduParams<'a> {
+    pub message_id: &'a str,
+    pub origin: &'a str,
+    pub sender: &'a str,
+    pub message_type: &'a str,
+    pub content: serde_json::Value,
+    pub target_user_id: &'a str,
+    pub target_device_id: Option<&'a str>,
+}
+
+pub struct ProcessDeviceListEduParams {
+    pub user_id: String,
+    pub device_id: String,
+    pub stream_id: i64,
+    pub deleted: bool,
+    pub prev_id: Option<Vec<i64>>,
+    pub device_display_name: Option<String>,
+    pub keys: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationSettings {
     pub federate: bool,
@@ -430,10 +451,9 @@ impl FederationRepository {
             // Check deny list
             if let Some(deny_list) = content.get("deny").and_then(|v| v.as_array()) {
                 for pattern in deny_list {
-                    if let Some(pattern_str) = pattern.as_str() {
-                        if self.matches_server_pattern(server_name, pattern_str) {
-                            return Ok(false);
-                        }
+                    if let Some(pattern_str) = pattern.as_str()
+                        && self.matches_server_pattern(server_name, pattern_str) {
+                        return Ok(false);
                     }
                 }
             }
@@ -441,10 +461,9 @@ impl FederationRepository {
             // Check allow list
             if let Some(allow_list) = content.get("allow").and_then(|v| v.as_array()) {
                 for pattern in allow_list {
-                    if let Some(pattern_str) = pattern.as_str() {
-                        if self.matches_server_pattern(server_name, pattern_str) {
-                            return Ok(true);
-                        }
+                    if let Some(pattern_str) = pattern.as_str()
+                        && self.matches_server_pattern(server_name, pattern_str) {
+                        return Ok(true);
                     }
                 }
                 return Ok(false); // Allow list exists but server not in it
@@ -1062,5 +1081,374 @@ impl FederationRepository {
         })?;
 
         Ok(recent_events)
+    }
+
+    /// Process typing EDU - create/update typing event
+    pub async fn process_typing_edu(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        server_name: &str,
+        typing: bool,
+    ) -> Result<(), RepositoryError> {
+        if typing {
+            // User started typing - create/update typing event with timeout
+            let expires_at = Utc::now() + chrono::Duration::seconds(30); // 30 second timeout
+
+            let query = "
+                BEGIN;
+                DELETE typing_events WHERE room_id = $room_id AND user_id = $user_id;
+                CREATE typing_events SET
+                    room_id = $room_id,
+                    user_id = $user_id,
+                    server_name = $server_name,
+                    started_at = $started_at,
+                    expires_at = $expires_at;
+                COMMIT;
+            ";
+
+            self.db
+                .query(query)
+                .bind(("room_id", room_id.to_string()))
+                .bind(("user_id", user_id.to_string()))
+                .bind(("server_name", server_name.to_string()))
+                .bind(("started_at", Utc::now()))
+                .bind(("expires_at", expires_at))
+                .await?;
+        } else {
+            // User stopped typing - remove typing event
+            let query = "
+                DELETE typing_events 
+                WHERE room_id = $room_id AND user_id = $user_id
+            ";
+
+            self.db
+                .query(query)
+                .bind(("room_id", room_id.to_string()))
+                .bind(("user_id", user_id.to_string()))
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Process receipt EDU - store read receipt
+    pub async fn process_receipt_edu(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        event_id: &str,
+        receipt_type: &str,
+        timestamp: i64,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            CREATE receipts SET
+                room_id = $room_id,
+                user_id = $user_id,
+                event_id = $event_id,
+                receipt_type = $receipt_type,
+                timestamp = $timestamp,
+                created_at = time::now()
+        ";
+
+        self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("event_id", event_id.to_string()))
+            .bind(("receipt_type", receipt_type.to_string()))
+            .bind(("timestamp", timestamp))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Process presence EDU - update user presence
+    pub async fn process_presence_edu(
+        &self,
+        user_id: &str,
+        presence: &str,
+        status_msg: Option<&str>,
+        last_active_ago: Option<i64>,
+        currently_active: bool,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPSERT presence_events:⟨$user_id⟩ CONTENT {
+                user_id: $user_id,
+                presence: $presence,
+                status_msg: $status_msg,
+                last_active_ago: $last_active_ago,
+                currently_active: $currently_active,
+                updated_at: time::now()
+            }
+        ";
+
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("presence", presence.to_string()))
+            .bind(("status_msg", status_msg.map(|s| s.to_string())))
+            .bind(("last_active_ago", last_active_ago))
+            .bind(("currently_active", currently_active))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Process device list EDU - update device list
+    pub async fn process_device_list_edu(
+        &self,
+        params: ProcessDeviceListEduParams,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            CREATE device_list_updates SET
+                user_id = $user_id,
+                device_id = $device_id,
+                stream_id = $stream_id,
+                deleted = $deleted,
+                prev_id = $prev_id,
+                device_display_name = $device_display_name,
+                keys = $keys,
+                updated_at = time::now()
+        ";
+
+        self.db
+            .query(query)
+            .bind(("user_id", params.user_id))
+            .bind(("device_id", params.device_id))
+            .bind(("stream_id", params.stream_id))
+            .bind(("deleted", params.deleted))
+            .bind(("prev_id", params.prev_id))
+            .bind(("device_display_name", params.device_display_name))
+            .bind(("keys", params.keys))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Process signing key update EDU - update user signing keys
+    pub async fn process_signing_key_update_edu(
+        &self,
+        user_id: &str,
+        key_type: &str,
+        keys: serde_json::Value,
+        signatures: Option<serde_json::Value>,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPSERT user_signing_keys:⟨$user_id⟩ CONTENT {
+                user_id: $user_id,
+                key_type: $key_type,
+                keys: $keys,
+                signatures: $signatures,
+                updated_at: time::now()
+            }
+        ";
+
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("key_type", key_type.to_string()))
+            .bind(("keys", keys))
+            .bind(("signatures", signatures))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Process direct-to-device EDU - store direct message
+    pub async fn process_direct_to_device_edu(
+        &self,
+        params: DirectToDeviceEduParams<'_>,
+    ) -> Result<(), RepositoryError> {
+        // Check for duplicates first
+        let duplicate_check = "
+            SELECT count() FROM direct_to_device_messages 
+            WHERE message_id = $message_id AND origin = $origin
+            GROUP ALL
+        ";
+
+        let mut duplicate_result = self.db
+            .query(duplicate_check)
+            .bind(("message_id", params.message_id.to_string()))
+            .bind(("origin", params.origin.to_string()))
+            .await?;
+
+        let count: Option<i64> = duplicate_result.take(0)?;
+        if count.unwrap_or(0) > 0 {
+            return Ok(()); // Duplicate message, ignore
+        }
+
+        // Store the message
+        let query = "
+            CREATE direct_to_device_messages SET
+                message_id = $message_id,
+                origin = $origin,
+                sender = $sender,
+                message_type = $message_type,
+                content = $content,
+                target_user_id = $target_user_id,
+                target_device_id = $target_device_id,
+                created_at = time::now()
+        ";
+
+        self.db
+            .query(query)
+            .bind(("message_id", params.message_id.to_string()))
+            .bind(("origin", params.origin.to_string()))
+            .bind(("sender", params.sender.to_string()))
+            .bind(("message_type", params.message_type.to_string()))
+            .bind(("content", params.content))
+            .bind(("target_user_id", params.target_user_id.to_string()))
+            .bind(("target_device_id", params.target_device_id.map(|s| s.to_string())))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get third-party invite event by room and token
+    pub async fn get_third_party_invite_event(
+        &self,
+        room_id: &str,
+        token: &str,
+    ) -> Result<Option<serde_json::Value>, RepositoryError> {
+        let query = "
+            SELECT content FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.third_party_invite' 
+            AND content.token = $token
+            ORDER BY origin_server_ts DESC 
+            LIMIT 1
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("token", token.to_string()))
+            .await?;
+
+        let event_content: Option<serde_json::Value> = response.take(0)?;
+        Ok(event_content)
+    }
+
+    /// Get trusted identity servers from configuration
+    pub async fn get_trusted_identity_servers(&self) -> Result<Option<Vec<String>>, RepositoryError> {
+        let query = "SELECT value FROM server_config WHERE key = 'trusted_identity_servers'";
+
+        let mut response = self.db.query(query).await?;
+        let config_value: Option<serde_json::Value> = response.take(0)?;
+
+        if let Some(value) = config_value
+            && let Some(servers) = value.as_array() {
+                let trusted: Vec<String> = servers
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                return Ok(Some(trusted));
+            }
+
+        Ok(None)
+    }
+
+    /// Check if server is blocked for third-party invites
+    pub async fn is_server_blocked_for_third_party_invites(
+        &self,
+        server_name: &str,
+    ) -> Result<bool, RepositoryError> {
+        let query = "SELECT blocked FROM server_blocklist WHERE server_name = $server_name AND third_party_invites = true";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+
+        let blocked: Option<bool> = response.take(0)?;
+        Ok(blocked.unwrap_or(false))
+    }
+
+    /// Check server federation configuration
+    pub async fn check_server_federation_config(
+        &self,
+        server_name: &str,
+    ) -> Result<bool, RepositoryError> {
+        let query = "SELECT federation_enabled FROM server_federation_config WHERE server_name = $server_name";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+
+        let federation_enabled: Option<bool> = response.take(0)?;
+        Ok(federation_enabled.unwrap_or(true)) // Default to enabled if not configured
+    }
+
+    /// Check if server is rate limited for third-party invites
+    pub async fn is_server_rate_limited_for_third_party_invites(
+        &self,
+        server_name: &str,
+    ) -> Result<bool, RepositoryError> {
+        let now = chrono::Utc::now();
+        let hour_ago = now - chrono::Duration::hours(1);
+
+        // Check third-party invite rate in the last hour
+        let query = "
+            SELECT COUNT(*) as invite_count
+            FROM third_party_invite_log
+            WHERE server_name = $server_name
+            AND timestamp >= $hour_ago
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .bind(("hour_ago", hour_ago))
+            .await?;
+
+        let count: Option<i64> = response.take(0)?;
+        const MAX_THIRD_PARTY_INVITES_PER_HOUR: i64 = 100;
+
+        let is_rate_limited = count.unwrap_or(0) >= MAX_THIRD_PARTY_INVITES_PER_HOUR;
+
+        // Log this third-party invite attempt
+        if !is_rate_limited {
+            let log_query = "
+                INSERT INTO third_party_invite_log (server_name, timestamp)
+                VALUES ($server_name, $now)
+            ";
+
+            let _ = self.db
+                .query(log_query)
+                .bind(("server_name", server_name.to_string()))
+                .bind(("now", now))
+                .await; // Ignore errors for logging
+        }
+
+        Ok(is_rate_limited)
+    }
+
+    /// Get room alias information for federation directory query
+    pub async fn get_room_alias_info(
+        &self,
+        alias: &str,
+    ) -> Result<Option<(String, Option<Vec<String>>)>, RepositoryError> {
+        let query = "
+            SELECT room_id, servers
+            FROM room_alias
+            WHERE alias = $alias
+            LIMIT 1
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("alias", alias.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct AliasResult {
+            room_id: String,
+            servers: Option<Vec<String>>,
+        }
+
+        let alias_result: Option<AliasResult> = response.take(0)?;
+        Ok(alias_result.map(|result| (result.room_id, result.servers)))
     }
 }

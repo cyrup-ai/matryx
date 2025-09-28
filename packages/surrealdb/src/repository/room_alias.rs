@@ -224,11 +224,10 @@ impl RoomAliasRepository {
         let mut result = self.db.query(query).bind(("alias", alias.to_string())).await?;
         let creators: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(creator_record) = creators.first() {
-            if let Some(creator) = creator_record.get("creator").and_then(|v| v.as_str()) {
+        if let Some(creator_record) = creators.first()
+            && let Some(creator) = creator_record.get("creator").and_then(|v| v.as_str()) {
                 return Ok(Some(creator.to_string()));
             }
-        }
 
         Ok(None)
     }
@@ -251,13 +250,11 @@ impl RoomAliasRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(canonical_alias) = content.get("alias").and_then(|v| v.as_str()) {
-                    return Ok(Some(canonical_alias.to_string()));
-                }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(canonical_alias) = content.get("alias").and_then(|v| v.as_str()) {
+                return Ok(Some(canonical_alias.to_string()));
             }
-        }
 
         Ok(None)
     }
@@ -279,14 +276,13 @@ impl RoomAliasRepository {
             }
 
             // Verify alias points to this room
-            if let Some(alias_info) = self.resolve_alias(alias_str).await? {
-                if alias_info.room_id != room_id {
+            if let Some(alias_info) = self.resolve_alias(alias_str).await?
+                && alias_info.room_id != room_id {
                     return Err(RepositoryError::Validation {
                         field: "alias".to_string(),
                         message: "Alias does not point to this room".to_string(),
                     });
                 }
-            }
         }
 
         // Create canonical alias event
@@ -342,17 +338,15 @@ impl RoomAliasRepository {
         let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(alt_aliases) = content.get("alt_aliases").and_then(|v| v.as_array()) {
-                    let aliases: Vec<String> = alt_aliases
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    return Ok(aliases);
-                }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(alt_aliases) = content.get("alt_aliases").and_then(|v| v.as_array()) {
+                let aliases: Vec<String> = alt_aliases
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                return Ok(aliases);
             }
-        }
 
         Ok(Vec::new())
     }
@@ -373,14 +367,13 @@ impl RoomAliasRepository {
                 });
             }
 
-            if let Some(alias_info) = self.resolve_alias(alias).await? {
-                if alias_info.room_id != room_id {
+            if let Some(alias_info) = self.resolve_alias(alias).await?
+                && alias_info.room_id != room_id {
                     return Err(RepositoryError::Validation {
                         field: "alias".to_string(),
                         message: format!("Alias {} does not point to this room", alias),
                     });
                 }
-            }
         }
 
         // Get current canonical alias to preserve it
@@ -419,5 +412,63 @@ impl RoomAliasRepository {
             .await?;
 
         Ok(())
+    }
+
+    /// Cache alias resolution result
+    pub async fn cache_alias_resolution(
+        &self,
+        alias: &str,
+        room_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), RepositoryError> {
+        let cache_key = format!("alias_resolution:{}", alias);
+        let cache_value = serde_json::json!({
+            "room_id": room_id,
+            "cached_at": chrono::Utc::now().timestamp(),
+            "ttl": ttl_seconds
+        });
+
+        let query = "
+            INSERT INTO alias_cache (cache_key, cache_value, expires_at) 
+            VALUES ($key, $value, time::now() + duration::from_secs($ttl))
+            ON DUPLICATE KEY UPDATE 
+            cache_value = $value, expires_at = time::now() + duration::from_secs($ttl)
+        ";
+
+        self.db
+            .query(query)
+            .bind(("key", cache_key))
+            .bind(("value", cache_value))
+            .bind(("ttl", ttl_seconds as i64))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Check cache for existing alias resolution
+    pub async fn get_cached_alias_resolution(&self, alias: &str) -> Result<Option<String>, RepositoryError> {
+        let cache_key = format!("alias_resolution:{}", alias);
+        let query = "
+            SELECT cache_value FROM alias_cache 
+            WHERE cache_key = $key AND expires_at > time::now()
+            LIMIT 1
+        ";
+
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("key", cache_key))
+            .await?;
+
+        let cache_records: Vec<serde_json::Value> = result.take(0)?;
+
+        if let Some(cache_record) = cache_records.first()
+            && let Some(cache_value) = cache_record.get("cache_value")
+            && let Some(room_id) = cache_value.get("room_id").and_then(|v| v.as_str())
+        {
+            return Ok(Some(room_id.to_string()));
+        }
+
+        Ok(None)
     }
 }

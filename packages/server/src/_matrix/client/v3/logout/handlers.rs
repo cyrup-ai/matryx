@@ -1,13 +1,13 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use futures::TryFutureExt;
+
 use serde_json::Value;
 use tracing::{error, info, warn};
 
 use crate::AppState;
 use crate::auth::{MatrixAuth, extract_matrix_auth};
-use matryx_entity::types::{Device, Session};
+
 use matryx_surrealdb::repository::{DeviceRepository, SessionRepository};
 
 #[derive(Debug)]
@@ -138,34 +138,14 @@ async fn logout_internal(
     Ok(Json(serde_json::json!({})))
 }
 
-/// Extract access token from Authorization header
-fn extract_access_token(headers: &HeaderMap) -> Result<String, LogoutError> {
-    let auth_header = headers
-        .get("authorization")
-        .ok_or_else(|| {
-            warn!("Missing Authorization header");
-            LogoutError::InvalidToken
-        })?
-        .to_str()
-        .map_err(|_| {
-            warn!("Invalid Authorization header format");
-            LogoutError::InvalidToken
-        })?;
 
-    if let Some(token) = auth_header.strip_prefix("Bearer ") {
-        Ok(token.to_string())
-    } else {
-        warn!("Authorization header missing Bearer prefix");
-        Err(LogoutError::InvalidToken)
-    }
-}
 
 /// Invalidate user session in database
 async fn invalidate_user_session(
     session_repo: &SessionRepository,
     user_id: &str,
     device_id: &str,
-    access_token: &str,
+    _access_token: &str,
 ) -> Result<(), LogoutError> {
     // Find and delete the session
     let session_id = format!("{}:{}", user_id, device_id);
@@ -225,19 +205,9 @@ async fn cleanup_livequery_subscriptions(
     user_id: &str,
     device_id: &str,
 ) -> Result<(), LogoutError> {
-    // Query to find and clean up any active LiveQuery subscriptions for this session
-    let cleanup_query = "
-        DELETE FROM livequery_subscriptions 
-        WHERE user_id = $user_id AND device_id = $device_id
-    ";
-
-    match state
-        .db
-        .query(cleanup_query)
-        .bind(("user_id", user_id.to_string()))
-        .bind(("device_id", device_id.to_string()))
-        .await
-    {
+    let session_repo = SessionRepository::new(state.db.clone());
+    
+    match session_repo.cleanup_livequery_subscriptions(user_id, device_id).await {
         Ok(_) => {
             info!("LiveQuery subscriptions cleaned up for user: {} device: {}", user_id, device_id);
             Ok(())
@@ -296,19 +266,9 @@ async fn revoke_device_refresh_tokens(
     user_id: &str,
     device_id: &str,
 ) -> Result<(), LogoutError> {
-    let revoke_query = "
-        UPDATE refresh_tokens 
-        SET revoked = true, revoked_at = datetime::now()
-        WHERE user_id = $user_id AND device_id = $device_id AND revoked = false
-    ";
-
-    match state
-        .db
-        .query(revoke_query)
-        .bind(("user_id", user_id.to_string()))
-        .bind(("device_id", device_id.to_string()))
-        .await
-    {
+    let session_repo = SessionRepository::new(state.db.clone());
+    
+    match session_repo.revoke_device_refresh_tokens(user_id, device_id).await {
         Ok(_) => {
             info!("Refresh tokens revoked for user: {} device: {}", user_id, device_id);
             Ok(())
@@ -324,42 +284,4 @@ async fn revoke_device_refresh_tokens(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::HeaderValue;
 
-    #[test]
-    fn test_extract_access_token_valid() {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", HeaderValue::from_static("Bearer syt_test_token_123"));
-
-        let result = extract_access_token(&headers).expect("Should extract valid token");
-        assert_eq!(result, "syt_test_token_123");
-    }
-
-    #[test]
-    fn test_extract_access_token_missing_header() {
-        let headers = HeaderMap::new();
-        let result = extract_access_token(&headers);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_access_token_invalid_format() {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", HeaderValue::from_static("Invalid token_format"));
-
-        let result = extract_access_token(&headers);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_access_token_missing_bearer() {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", HeaderValue::from_static("syt_test_token_123"));
-
-        let result = extract_access_token(&headers);
-        assert!(result.is_err());
-    }
-}

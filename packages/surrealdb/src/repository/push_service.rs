@@ -15,7 +15,7 @@ use surrealdb::Surreal;
 use chrono::{DateTime, Utc};
 
 // Re-export types from sub-repositories
-pub use crate::repository::push::{Event, PushAction, PushRule, PushRuleEvaluation, RoomContext};
+pub use crate::repository::push::{PushEvent, PushAction, PushRule, PushRuleEvaluation, RoomContext};
 pub use crate::repository::push_gateway::{PushStatistics, Pusher};
 pub use crate::repository::push_notification::{
     NotificationContent,
@@ -79,7 +79,7 @@ impl PushService {
 
     pub async fn process_event_for_push(
         &self,
-        event: &Event,
+        event: &matryx_entity::types::Event,
         room_id: &str,
     ) -> Result<Vec<PushNotification>, RepositoryError> {
         let mut notifications = Vec::new();
@@ -119,7 +119,7 @@ impl PushService {
     pub async fn evaluate_push_for_user(
         &self,
         user_id: &str,
-        event: &Event,
+        event: &matryx_entity::types::Event,
         room_context: &RoomContext,
     ) -> Result<Option<PushNotification>, RepositoryError> {
         // Check user push settings
@@ -130,14 +130,22 @@ impl PushService {
         }
 
         // Check room-specific overrides
-        if let Some(room_settings) = settings.room_overrides.get(&room_context.room_id) {
-            if room_settings.muted {
-                return Ok(None);
-            }
+        if let Some(room_settings) = settings.room_overrides.get(&room_context.room_id)
+            && room_settings.muted {
+            return Ok(None);
         }
 
+        // Convert full Event to PushEvent for rule evaluation
+        let push_event = PushEvent {
+            event_id: event.event_id.clone(),
+            event_type: event.event_type.clone(),
+            sender: event.sender.clone(),
+            content: serde_json::to_value(&event.content).unwrap_or_default(),
+            state_key: event.state_key.clone(),
+        };
+
         // Evaluate push rules
-        let evaluation = self.push_repo.evaluate_push_rules(user_id, event, room_context).await?;
+        let evaluation = self.push_repo.evaluate_push_rules(user_id, &push_event, room_context).await?;
 
         if !evaluation.should_notify {
             return Ok(None);

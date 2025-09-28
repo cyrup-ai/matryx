@@ -4,14 +4,15 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::federation::client::FederationClient;
+use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::state::AppState;
-use matryx_entity::types::{Event, Membership, MembershipState, StrippedStateEvent};
+use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
     EventRepository,
     FederationRepository,
@@ -91,9 +92,8 @@ pub async fn put(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -266,15 +266,25 @@ pub async fn put(
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
     let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
     let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
-    let pdu_validator = PduValidator::new(
-        state.session_service.clone(),
-        event_repo.clone(),
-        room_repo.clone(),
-        federation_repo.clone(),
-        key_server_repo.clone(),
-        state.db.clone(),
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let federation_client = Arc::new(FederationClient::new(
+        state.http_client.clone(),
+        state.event_signer.clone(),
         state.homeserver_name.clone(),
-    );
+    ));
+    let params = PduValidatorParams {
+        session_service: state.session_service.clone(),
+        event_repo: event_repo.clone(),
+        room_repo: room_repo.clone(),
+        membership_repo: membership_repo.clone(),
+        federation_repo: federation_repo.clone(),
+        key_server_repo: key_server_repo.clone(),
+        federation_client: federation_client.clone(),
+        dns_resolver: state.dns_resolver.clone(),
+        db: state.db.clone(),
+        homeserver_name: state.homeserver_name.clone(),
+    };
+    let pdu_validator = PduValidator::new(params).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Validate the invite event PDU
     let validated_event = match pdu_validator.validate_pdu(event, &x_matrix_auth.origin).await {
@@ -380,7 +390,9 @@ async fn check_invite_authorization(
     match sender_membership {
         Some(membership) if membership.membership == MembershipState::Join => {
             // Check power levels for invite permission
-            check_invite_power_level(state, &room.room_id, sender).await
+            let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+            room_repo.check_invite_power_level(&room.room_id, sender).await
+                .map_err(|e| format!("Failed to check invite power level: {}", e).into())
         },
         _ => {
             // Sender is not in the room
@@ -389,45 +401,7 @@ async fn check_invite_authorization(
     }
 }
 
-/// Check if user has sufficient power level to invite users
-async fn check_invite_power_level(
-    state: &AppState,
-    room_id: &str,
-    user_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.invite, content.users
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.power_levels' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct PowerLevelsContent {
-        invite: Option<i64>,
-        users: Option<std::collections::HashMap<String, i64>>,
-    }
-
-    let power_levels: Option<PowerLevelsContent> = response.take(0)?;
-
-    match power_levels {
-        Some(pl) => {
-            let required_level = pl.invite.unwrap_or(0); // Default invite level is 0
-            let user_level = pl.users.and_then(|users| users.get(user_id).copied()).unwrap_or(0); // Default user level is 0
-
-            Ok(user_level >= required_level)
-        },
-        None => {
-            // No power levels event, default behavior allows invites
-            Ok(true)
-        },
-    }
-}
 
 /// Add our server's signature to an invite event
 async fn sign_invite_event(

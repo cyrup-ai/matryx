@@ -27,6 +27,7 @@ pub async fn resolve_filter(
 }
 
 /// Apply room filter to memberships
+#[allow(dead_code)] // Matrix sync filtering - will be integrated with sync endpoint
 pub fn apply_room_filter(memberships: Vec<Membership>, filter: &MatrixFilter) -> Vec<Membership> {
     if let Some(room_filter) = &filter.room {
         let mut filtered = memberships;
@@ -61,46 +62,46 @@ pub async fn apply_event_filter(
     let mut filtered = events;
 
     // Apply event type filtering with wildcard support per Matrix spec
-    if let Some(types) = &filter.types {
-        if !types.is_empty() {
-            filtered.retain(|event| {
-                types
-                    .iter()
-                    .any(|type_pattern| match_event_type(&event.event_type, type_pattern))
-            });
-        }
+    if let Some(types) = &filter.types
+        && !types.is_empty()
+    {
+        filtered.retain(|event| {
+            types
+                .iter()
+                .any(|type_pattern| match_event_type(&event.event_type, type_pattern))
+        });
     }
 
     // Apply not_types filtering (takes precedence per Matrix spec)
-    if let Some(not_types) = &filter.not_types {
-        if !not_types.is_empty() {
-            filtered.retain(|event| {
-                !not_types
-                    .iter()
-                    .any(|type_pattern| match_event_type(&event.event_type, type_pattern))
-            });
-        }
+    if let Some(not_types) = &filter.not_types
+        && !not_types.is_empty()
+    {
+        filtered.retain(|event| {
+            !not_types
+                .iter()
+                .any(|type_pattern| match_event_type(&event.event_type, type_pattern))
+        });
     }
 
     // Apply sender filtering
-    if let Some(senders) = &filter.senders {
-        if !senders.is_empty() {
-            filtered.retain(|event| senders.contains(&event.sender));
-        }
+    if let Some(senders) = &filter.senders
+        && !senders.is_empty()
+    {
+        filtered.retain(|event| senders.contains(&event.sender));
     }
 
     // Apply not_senders filtering
-    if let Some(not_senders) = &filter.not_senders {
-        if !not_senders.is_empty() {
-            filtered.retain(|event| !not_senders.contains(&event.sender));
-        }
+    if let Some(not_senders) = &filter.not_senders
+        && !not_senders.is_empty()
+    {
+        filtered.retain(|event| !not_senders.contains(&event.sender));
     }
 
     // Apply limit filtering
-    if let Some(limit) = filter.limit {
-        if limit > 0 {
-            filtered.truncate(limit as usize);
-        }
+    if let Some(limit) = filter.limit
+        && limit > 0
+    {
+        filtered.truncate(limit as usize);
     }
 
     Ok(filtered)
@@ -111,8 +112,7 @@ pub async fn apply_event_filter(
 fn match_event_type(event_type: &str, pattern: &str) -> bool {
     if pattern == "*" {
         true
-    } else if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    } else if let Some(prefix) = pattern.strip_suffix('*') {
         event_type.starts_with(prefix)
     } else {
         event_type == pattern

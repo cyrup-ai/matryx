@@ -1,14 +1,15 @@
-use std::collections::HashMap;
 
-use async_stream;
+
+
 use chrono::Utc;
-use futures::stream::{Stream, StreamExt, TryStreamExt};
-use serde_json::json;
+use futures::stream::{Stream, StreamExt};
+
 
 use crate::cache::lazy_loading_cache::LazyLoadingCache;
 use crate::room::LiveMembershipService;
 use crate::state::AppState;
-use matryx_entity::types::MembershipState;
+use matryx_surrealdb::repository::MembershipRepository;
+
 
 use super::super::types::*;
 
@@ -23,11 +24,12 @@ pub async fn create_enhanced_membership_stream(
     let user_id_owned = user_id.clone();
     let db_clone = state.db.clone();
 
-    // Create a membership stream using direct DB query to avoid lifetime issues
+    // Create a membership stream using repository to avoid lifetime issues
     let membership_stream = async move {
-        // Create SurrealDB LiveQuery for memberships
-        let mut stream = db_clone
-            .query("LIVE SELECT * FROM membership")
+        // Create SurrealDB LiveQuery for memberships for the specific user
+        let membership_repo = MembershipRepository::new(db_clone);
+        let mut stream = membership_repo
+            .create_user_membership_simple_live_query(&user_id_owned)
             .await
             .map_err(|e| format!("Failed to create live query: {:?}", e))?;
 

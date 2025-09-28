@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -91,9 +91,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -157,7 +156,7 @@ pub async fn get(
     }
 
     // Check if room allows knocking
-    let join_rules_valid = check_room_allows_knocking(&state, &room_id).await.map_err(|e| {
+    let join_rules_valid = room_repo.check_room_allows_knocking(&room_id).await.map_err(|e| {
         error!("Failed to check room join rules: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -211,13 +210,12 @@ pub async fn get(
     }
 
     // Check server ACLs
-    let server_allowed =
-        check_server_acls(&state, &room_id, &x_matrix_auth.origin)
-            .await
-            .map_err(|e| {
-                error!("Failed to check server ACLs: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+    let server_allowed = room_repo.check_server_acls(&room_id, &x_matrix_auth.origin)
+        .await
+        .map_err(|e| {
+            error!("Failed to check server ACLs: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     if !server_allowed {
         warn!("Server {} is denied by room ACLs", x_matrix_auth.origin);
@@ -253,111 +251,4 @@ pub async fn get(
     Ok(Json(response))
 }
 
-/// Check if room allows knocking by examining join rules
-async fn check_room_allows_knocking(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.join_rule
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.join_rules' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct JoinRulesContent {
-        join_rule: Option<String>,
-    }
-
-    let join_rules: Option<JoinRulesContent> = response.take(0)?;
-
-    match join_rules {
-        Some(rules) => {
-            let join_rule = rules.join_rule.unwrap_or_else(|| "invite".to_string());
-            Ok(join_rule == "knock")
-        },
-        None => {
-            // No join rules event found, default is "invite" which doesn't allow knocking
-            Ok(false)
-        },
-    }
-}
-
-/// Check if server is allowed by room ACLs
-async fn check_server_acls(
-    state: &AppState,
-    room_id: &str,
-    server_name: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.allow, content.deny
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.server_acl' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct ServerAclContent {
-        allow: Option<Vec<String>>,
-        deny: Option<Vec<String>>,
-    }
-
-    let server_acl: Option<ServerAclContent> = response.take(0)?;
-
-    match server_acl {
-        Some(acl) => {
-            // Check deny list first
-            if let Some(deny_list) = acl.deny {
-                for pattern in deny_list {
-                    if server_matches_pattern(server_name, &pattern) {
-                        return Ok(false);
-                    }
-                }
-            }
-
-            // Check allow list
-            if let Some(allow_list) = acl.allow {
-                for pattern in allow_list {
-                    if server_matches_pattern(server_name, &pattern) {
-                        return Ok(true);
-                    }
-                }
-                // If allow list exists but server doesn't match, deny
-                Ok(false)
-            } else {
-                // No allow list, server is allowed (unless denied above)
-                Ok(true)
-            }
-        },
-        None => {
-            // No server ACL event, all servers allowed
-            Ok(true)
-        },
-    }
-}
-
-/// Check if server name matches ACL pattern (supports wildcards)
-fn server_matches_pattern(server_name: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-
-    if pattern.starts_with("*.") {
-        let domain_suffix = &pattern[2..];
-        return server_name == domain_suffix ||
-            server_name.ends_with(&format!(".{}", domain_suffix));
-    }
-
-    server_name == pattern
-}

@@ -124,21 +124,19 @@ impl UserRepository {
             .await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content") {
                 // Check if user has specific power level
-                if let Some(users) = content.get("users").and_then(|v| v.as_object()) {
-                    if let Some(power_level) = users.get(user_id).and_then(|v| v.as_i64()) {
+                if let Some(users) = content.get("users").and_then(|v| v.as_object())
+                    && let Some(power_level) = users.get(user_id).and_then(|v| v.as_i64()) {
                         return Ok(power_level as i32);
                     }
-                }
 
                 // Return default power level
                 if let Some(default_level) = content.get("users_default").and_then(|v| v.as_i64()) {
                     return Ok(default_level as i32);
                 }
             }
-        }
 
         // Default Matrix power level for regular users
         Ok(0)
@@ -169,8 +167,8 @@ impl UserRepository {
             .await?;
         let memberships: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(membership) = memberships.first() {
-            if let Some(state) = membership.get("membership").and_then(|v| v.as_str()) {
+        if let Some(membership) = memberships.first()
+            && let Some(state) = membership.get("membership").and_then(|v| v.as_str()) {
                 match state {
                     "join" => return Ok(false),  // Already joined
                     "ban" => return Ok(false),   // Banned from room
@@ -179,7 +177,6 @@ impl UserRepository {
                     _ => {},                     // Continue with other checks
                 }
             }
-        }
 
         // Check room join rules
         let join_rules_query = "
@@ -197,22 +194,20 @@ impl UserRepository {
             .await?;
         let events: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(event) = events.first() {
-            if let Some(content) = event.get("content") {
-                if let Some(join_rule) = content.get("join_rule").and_then(|v| v.as_str()) {
-                    match join_rule {
-                        "public" => return Ok(true),
-                        "invite" => return Ok(false), // Need invitation (already checked above)
-                        "knock" => return Ok(false),  // Need to knock first
-                        "restricted" => {
-                            // Check if user is member of allowed rooms (simplified)
-                            return Ok(false);
-                        },
-                        _ => return Ok(false),
-                    }
+        if let Some(event) = events.first()
+            && let Some(content) = event.get("content")
+            && let Some(join_rule) = content.get("join_rule").and_then(|v| v.as_str()) {
+                match join_rule {
+                    "public" => return Ok(true),
+                    "invite" => return Ok(false), // Need invitation (already checked above)
+                    "knock" => return Ok(false),  // Need to knock first
+                    "restricted" => {
+                        // Check if user is member of allowed rooms (simplified)
+                        return Ok(false);
+                    },
+                    _ => return Ok(false),
                 }
             }
-        }
 
         // Default to invite-only if no join rules found
         Ok(false)
@@ -237,14 +232,13 @@ impl UserRepository {
         display_name: Option<String>,
     ) -> Result<(), RepositoryError> {
         // Validate display name length (Matrix spec: max 256 characters)
-        if let Some(ref name) = display_name {
-            if name.len() > 256 {
+        if let Some(ref name) = display_name
+            && name.len() > 256 {
                 return Err(RepositoryError::Validation {
                     field: "display_name".to_string(),
                     message: "Display name must not exceed 256 characters".to_string(),
                 });
             }
-        }
 
         let query = "UPDATE user SET display_name = $display_name WHERE user_id = $user_id";
         let mut result = self
@@ -433,4 +427,103 @@ impl UserRepository {
         let avatar_url: Option<String> = response.take(0)?;
         Ok(avatar_url)
     }
+
+    /// Check if user is admin (for admin endpoints)
+    pub async fn is_admin(&self, user_id: &str) -> Result<bool, RepositoryError> {
+        let query = "SELECT is_admin FROM users WHERE user_id = $user_id";
+        let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
+        
+        let admin_flags: Vec<bool> = result.take(0)?;
+        Ok(admin_flags.into_iter().next().unwrap_or(false))
+    }
+
+    /// Check if user exists (for admin endpoints)
+    pub async fn user_exists_admin(&self, user_id: &str) -> Result<bool, RepositoryError> {
+        let query = "SELECT user_id FROM users WHERE user_id = $user_id";
+        let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
+        
+        let users: Vec<String> = result.take(0)?;
+        Ok(!users.is_empty())
+    }
+
+    /// Search for users in the user directory
+    pub async fn search_users(
+        &self,
+        searcher_user_id: &str,
+        search_term: &str,
+        limit: u32,
+    ) -> Result<Vec<UserSearchResult>, RepositoryError> {
+        let search_query = r#"
+            SELECT DISTINCT
+                u.user_id,
+                up.display_name,
+                up.avatar_url
+            FROM users u
+            LEFT JOIN user_profiles up ON u.user_id = up.user_id
+            JOIN room_members rm1 ON u.user_id = rm1.user_id
+            JOIN room_members rm2 ON rm1.room_id = rm2.room_id
+            WHERE rm2.user_id = $searcher_user_id
+            AND rm1.membership = 'join'
+            AND rm2.membership = 'join'
+            AND (
+                u.user_id CONTAINS $search_term
+                OR up.display_name CONTAINS $search_term
+                OR u.user_id ILIKE $search_pattern
+                OR up.display_name ILIKE $search_pattern
+            )
+            AND u.user_id != $searcher_user_id
+            ORDER BY
+                CASE
+                    WHEN u.user_id = $search_term THEN 1
+                    WHEN up.display_name = $search_term THEN 2
+                    WHEN u.user_id STARTS WITH $search_term THEN 3
+                    WHEN up.display_name STARTS WITH $search_term THEN 4
+                    ELSE 5
+                END,
+                up.display_name,
+                u.user_id
+            LIMIT $limit
+        "#;
+
+        let search_pattern = format!("%{}%", search_term);
+
+        let mut result = self
+            .db
+            .query(search_query)
+            .bind(("searcher_user_id", searcher_user_id.to_string()))
+            .bind(("search_term", search_term.to_string()))
+            .bind(("search_pattern", search_pattern))
+            .bind(("limit", limit as i64))
+            .await?;
+
+        let user_rows: Vec<std::collections::HashMap<String, serde_json::Value>> = result.take(0)?;
+
+        let mut users = Vec::new();
+        for user_row in user_rows {
+            if let Some(user_id) = user_row.get("user_id").and_then(|v| v.as_str()) {
+                let user_result = UserSearchResult {
+                    user_id: user_id.to_string(),
+                    display_name: user_row
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    avatar_url: user_row
+                        .get("avatar_url")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                };
+
+                users.push(user_result);
+            }
+        }
+
+        Ok(users)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserSearchResult {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }

@@ -7,7 +7,6 @@ use axum_test::TestServer;
 use matryx_entity::filter::{EventFilter, MatrixFilter, RoomEventFilter, RoomFilter};
 use matryx_surrealdb::test_utils::TestDatabase;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 
 mod common;
 
@@ -26,7 +25,7 @@ async fn test_complete_sync_filtering_integration() {
     create_test_room_with_events(&test_db, room_id, vec![
         ("m.room.message", json!({"body": "Hello world"})),
         ("m.room.member", json!({"membership": "join"})),
-        ("m.typing", json!({"user_ids": ["@user:example.com"]})),
+        ("m.typing", json!({"user_ids": [user_id]})),
         ("m.room.message", json!({"body": "Check out https://matrix.org"})),
         ("m.room.message", json!({"body": "Another message"})),
     ])
@@ -65,8 +64,8 @@ async fn test_complete_sync_filtering_integration() {
     let sync_response: Value = response.json();
 
     // Verify filtering was applied correctly
-    if let Some(joined_rooms) = sync_response["rooms"]["join"].as_object() {
-        if let Some(room_response) = joined_rooms.get(room_id) {
+    if let Some(joined_rooms) = sync_response["rooms"]["join"].as_object()
+        && let Some(room_response) = joined_rooms.get(room_id) {
             let timeline_events = &room_response["timeline"]["events"];
 
             // Verify event type filtering - only m.room.message events
@@ -77,11 +76,10 @@ async fn test_complete_sync_filtering_integration() {
 
                 // Verify contains_url filtering - only events with URLs
                 for event in events {
-                    if let Some(content) = event.get("content") {
-                        if let Some(body) = content.get("body").and_then(|b| b.as_str()) {
+                    if let Some(content) = event.get("content")
+                        && let Some(body) = content.get("body").and_then(|b| b.as_str()) {
                             assert!(body.contains("http"), "Contains URL filtering failed");
                         }
-                    }
                 }
 
                 // Verify event_fields filtering
@@ -108,7 +106,6 @@ async fn test_complete_sync_filtering_integration() {
                 assert!(member_events <= 2, "Lazy loading should reduce membership events");
             }
         }
-    }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
 }
@@ -166,11 +163,10 @@ async fn test_wildcard_event_type_filtering() {
         assert_eq!(response.status_code(), 200);
         let sync_response: Value = response.json();
 
-        if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object() {
-            if let Some(events) = room_response["timeline"]["events"].as_array() {
+        if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
+            && let Some(events) = room_response["timeline"]["events"].as_array() {
                 assert_eq!(events.len(), expected_count, "Wildcard pattern '{}' failed", pattern);
             }
-        }
     }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
@@ -220,15 +216,14 @@ async fn test_filter_precedence_rules() {
     assert_eq!(response.status_code(), 200);
     let sync_response: Value = response.json();
 
-    if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object() {
-        if let Some(events) = room_response["timeline"]["events"].as_array() {
+    if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
+        && let Some(events) = room_response["timeline"]["events"].as_array() {
             // Should have message and name events, but not member events
             assert_eq!(events.len(), 2, "Precedence rule failed");
             for event in events {
                 assert_ne!(event["type"], "m.room.member", "not_types precedence failed");
             }
         }
-    }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
 }
@@ -284,14 +279,13 @@ async fn test_database_level_filtering_performance() {
     let sync_response: Value = response.json();
 
     // Verify filtering worked correctly
-    if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object() {
-        if let Some(events) = room_response["timeline"]["events"].as_array() {
+    if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
+        && let Some(events) = room_response["timeline"]["events"].as_array() {
             assert!(events.len() <= 10, "Event limit not respected");
             for event in events {
                 assert_eq!(event["type"], "m.room.message", "Event type filtering failed");
             }
         }
-    }
 
     // Performance assertion - should complete within reasonable time
     assert!(duration.as_millis() < 1000, "Filtering took too long: {:?}", duration);

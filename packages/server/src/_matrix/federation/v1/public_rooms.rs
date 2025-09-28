@@ -5,13 +5,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::Arc;
+
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::Room;
-use matryx_surrealdb::repository::RoomRepository;
+
+use matryx_surrealdb::repository::{PublicRoomsRepository, RoomRepository};
 
 /// Query parameters for GET /publicRooms
 #[derive(Debug, Deserialize)]
@@ -143,9 +142,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -178,17 +176,19 @@ pub async fn get(
             StatusCode::UNAUTHORIZED
         })?;
 
+    // Use helper function to get public rooms with proper filtering
+    let filter: Option<PublicRoomsFilter> = None; // No search filter for federation GET
     let public_rooms_response = get_public_rooms(
         &state,
         query.limit,
         query.since,
-        &None, // No filter for GET request
+        &filter,
         query.include_all_networks.unwrap_or(false),
         query.third_party_instance_id,
     )
     .await
     .map_err(|e| {
-        error!("Failed to get public rooms: {}", e);
+        error!("Failed to get federation public rooms: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -198,7 +198,26 @@ pub async fn get(
         x_matrix_auth.origin
     );
 
-    Ok(Json(serde_json::to_value(public_rooms_response).unwrap_or(json!({}))))
+    // Convert to federation response format
+    let federation_response = PublicRoomsResponse {
+        chunk: public_rooms_response.chunk.into_iter().map(|entry| PublishedRoom {
+            room_id: entry.room_id,
+            name: entry.name,
+            topic: entry.topic,
+            avatar_url: entry.avatar_url,
+            canonical_alias: entry.canonical_alias,
+            num_joined_members: entry.num_joined_members,
+            room_type: entry.room_type,
+            join_rule: entry.join_rule,
+            guest_can_join: entry.guest_can_join,
+            world_readable: entry.world_readable,
+        }).collect(),
+        next_batch: public_rooms_response.next_batch,
+        prev_batch: public_rooms_response.prev_batch,
+        total_room_count_estimate: public_rooms_response.total_room_count_estimate,
+    };
+
+    Ok(Json(serde_json::to_value(federation_response).unwrap_or(json!({}))))
 }
 
 /// POST /_matrix/federation/v1/publicRooms
@@ -210,9 +229,8 @@ pub async fn post(
     Json(payload): Json<PublicRoomsRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -238,6 +256,7 @@ pub async fn post(
             StatusCode::UNAUTHORIZED
         })?;
 
+    // Use helper function to get public rooms with proper filtering
     let public_rooms_response = get_public_rooms(
         &state,
         payload.limit,
@@ -248,7 +267,7 @@ pub async fn post(
     )
     .await
     .map_err(|e| {
-        error!("Failed to get public rooms: {}", e);
+        error!("Failed to get federation public rooms: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -258,21 +277,28 @@ pub async fn post(
         x_matrix_auth.origin
     );
 
-    Ok(Json(serde_json::to_value(public_rooms_response).unwrap_or(json!({}))))
+    // Convert to federation response format
+    let federation_response = PublicRoomsResponse {
+        chunk: public_rooms_response.chunk.into_iter().map(|entry| PublishedRoom {
+            room_id: entry.room_id,
+            name: entry.name,
+            topic: entry.topic,
+            avatar_url: entry.avatar_url,
+            canonical_alias: entry.canonical_alias,
+            num_joined_members: entry.num_joined_members,
+            room_type: entry.room_type,
+            join_rule: entry.join_rule,
+            guest_can_join: entry.guest_can_join,
+            world_readable: entry.world_readable,
+        }).collect(),
+        next_batch: public_rooms_response.next_batch,
+        prev_batch: public_rooms_response.prev_batch,
+        total_room_count_estimate: public_rooms_response.total_room_count_estimate,
+    };
+
+    Ok(Json(serde_json::to_value(federation_response).unwrap_or(json!({}))))
 }
-/// Room data with member count from database query
-#[derive(serde::Deserialize, Clone)]
-struct RoomWithMemberCount {
-    room_id: String,
-    name: Option<String>,
-    topic: Option<String>,
-    avatar_url: Option<String>,
-    canonical_alias: Option<String>,
-    room_version: String,
-    room_type: Option<String>,
-    created_at: Option<String>,
-    member_count: Option<u32>,
-}
+
 
 /// Response structure for public rooms directory
 #[derive(Debug, Serialize)]
@@ -287,7 +313,7 @@ struct PublicRoomsResponse {
     total_room_count_estimate: Option<u32>,
 }
 
-/// Get public rooms from the database with pagination and filtering
+/// Get public rooms from the database with pagination and filtering using repository
 async fn get_public_rooms(
     state: &AppState,
     limit: Option<u32>,
@@ -296,216 +322,109 @@ async fn get_public_rooms(
     _include_all_networks: bool,
     _third_party_instance_id: Option<String>,
 ) -> Result<PublicRoomsResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let limit = limit.unwrap_or(100).min(500); // Cap at 500 rooms per request
-    let offset = parse_pagination_token(&since).unwrap_or(0);
-
-    // Build query for published rooms
-    let mut query_conditions = vec![
-        "room.visibility = 'public'".to_string(),
-        "room.room_id IS NOT NULL".to_string(),
-    ];
-
-    // Add search filter if provided
-    if let Some(search_filter) = filter {
+    let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
+    
+    let repo_response = if let Some(search_filter) = filter {
         if let Some(search_term) = &search_filter.generic_search_term {
             if !search_term.trim().is_empty() {
-                query_conditions.push(format!(
-                    "(room.name CONTAINS '{}' OR room.topic CONTAINS '{}' OR room.canonical_alias CONTAINS '{}')",
-                    search_term.replace('\'', "''"),
-                    search_term.replace('\'', "''"),
-                    search_term.replace('\'', "''")
-                ));
+                // Use search functionality
+                public_rooms_repo.search_public_rooms(search_term, limit).await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+            } else {
+                // No search term, get regular public rooms
+                public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+            }
+        } else {
+            // No search term, get regular public rooms
+            public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        }
+    } else {
+        // No filter, get regular public rooms
+        public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+    };
+
+    // Convert repository response to server response format with visibility validation
+    let mut published_rooms: Vec<PublishedRoom> = Vec::new();
+    
+    for entry in repo_response.chunk {
+        // Validate room visibility settings using helper function
+        match get_room_visibility_settings(state, &entry.room_id).await {
+            Ok((join_rule, guest_can_join, world_readable)) => {
+                published_rooms.push(PublishedRoom {
+                    room_id: entry.room_id,
+                    name: entry.name,
+                    topic: entry.topic,
+                    avatar_url: entry.avatar_url,
+                    canonical_alias: entry.canonical_alias,
+                    num_joined_members: entry.num_joined_members,
+                    room_type: entry.room_type,
+                    join_rule: Some(join_rule),
+                    guest_can_join,
+                    world_readable,
+                });
+            },
+            Err(e) => {
+                warn!("Failed to get visibility settings for room {}: {}", entry.room_id, e);
+                // Fallback to repository data
+                published_rooms.push(PublishedRoom {
+                    room_id: entry.room_id,
+                    name: entry.name,
+                    topic: entry.topic,
+                    avatar_url: entry.avatar_url,
+                    canonical_alias: entry.canonical_alias,
+                    num_joined_members: entry.num_joined_members,
+                    room_type: entry.room_type,
+                    join_rule: Some(entry.join_rule),
+                    guest_can_join: entry.guest_can_join,
+                    world_readable: entry.world_readable,
+                });
             }
         }
     }
 
-    let where_clause = if query_conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", query_conditions.join(" AND "))
+    // Get accurate total room count estimate using helper function
+    let total_count_estimate = match get_total_public_rooms_count(state, filter.clone()).await {
+        Ok(count) => Some(count),
+        Err(e) => {
+            warn!("Failed to get total public rooms count: {}", e);
+            // Fallback to repository estimate
+            repo_response.total_room_count_estimate.map(|c| c as u32)
+        }
     };
-
-    // Query for published rooms with member counts
-    let query = format!(
-        "
-        SELECT 
-            room.*,
-            (SELECT COUNT() FROM membership WHERE room_id = room.room_id AND membership = 'join') as member_count
-        FROM room
-        {}
-        ORDER BY member_count DESC, room.created_at DESC
-        LIMIT {} START {}
-        ",
-        where_clause, limit + 1, offset // Get one extra to check if there's a next page
-    );
-
-    let mut response = state.db.query(&query).await?;
-    let rooms_data: Vec<RoomWithMemberCount> = response.take(0)?;
-
-    // Check if there are more results
-    let has_more = rooms_data.len() > limit as usize;
-    let rooms_to_return = if has_more {
-        &rooms_data[..limit as usize]
-    } else {
-        &rooms_data
-    };
-
-    // Convert to published room format
-    let mut published_rooms = Vec::new();
-    for room_data in rooms_to_return {
-        let published_room = convert_to_published_room(state, room_data).await?;
-        published_rooms.push(published_room);
-    }
-
-    // Generate pagination tokens
-    let next_batch = if has_more {
-        Some(generate_pagination_token(offset + limit))
-    } else {
-        None
-    };
-
-    let prev_batch = if offset > 0 {
-        Some(generate_pagination_token(offset.saturating_sub(limit)))
-    } else {
-        None
-    };
-
-    // Get total count estimate
-    let total_count = get_total_public_rooms_count(state, filter.as_ref().cloned()).await?;
 
     Ok(PublicRoomsResponse {
         chunk: published_rooms,
-        next_batch,
-        prev_batch,
-        total_room_count_estimate: Some(total_count),
+        next_batch: repo_response.next_batch,
+        prev_batch: repo_response.prev_batch,
+        total_room_count_estimate: total_count_estimate,
     })
 }
 
-/// Convert room data to published room format
-async fn convert_to_published_room(
-    state: &AppState,
-    room_data: &RoomWithMemberCount,
-) -> Result<PublishedRoom, Box<dyn std::error::Error + Send + Sync>> {
-    // Get room state information
-    let (join_rule, guest_can_join, world_readable) =
-        get_room_visibility_settings(state, &room_data.room_id).await?;
 
-    Ok(PublishedRoom {
-        room_id: room_data.room_id.clone(),
-        name: room_data.name.clone(),
-        topic: room_data.topic.clone(),
-        avatar_url: room_data.avatar_url.clone(),
-        canonical_alias: room_data.canonical_alias.clone(),
-        num_joined_members: room_data.member_count.unwrap_or(0),
-        room_type: room_data.room_type.clone(),
-        join_rule: Some(join_rule),
-        guest_can_join,
-        world_readable,
-    })
-}
 
-/// Get room visibility settings from state events
-async fn get_room_visibility_settings(
+/// Get room visibility settings from state events using repository
+pub async fn get_room_visibility_settings(
     state: &AppState,
     room_id: &str,
 ) -> Result<(String, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
-    // Query for join rules, guest access, and history visibility
-    let query = "
-        SELECT type, content
-        FROM event
-        WHERE room_id = $room_id
-        AND type IN ['m.room.join_rules', 'm.room.guest_access', 'm.room.history_visibility']
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct StateEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        content: Value,
-    }
-
-    let state_events: Vec<StateEvent> = response.take(0)?;
-
-    let mut join_rule = "invite".to_string(); // Default
-    let mut guest_can_join = false; // Default
-    let mut world_readable = false; // Default
-
-    for event in state_events {
-        match event.event_type.as_str() {
-            "m.room.join_rules" => {
-                if let Some(rule) = event.content.get("join_rule").and_then(|v| v.as_str()) {
-                    join_rule = rule.to_string();
-                }
-            },
-            "m.room.guest_access" => {
-                if let Some(access) = event.content.get("guest_access").and_then(|v| v.as_str()) {
-                    guest_can_join = access == "can_join";
-                }
-            },
-            "m.room.history_visibility" => {
-                if let Some(visibility) =
-                    event.content.get("history_visibility").and_then(|v| v.as_str())
-                {
-                    world_readable = visibility == "world_readable";
-                }
-            },
-            _ => {},
-        }
-    }
-
-    Ok((join_rule, guest_can_join, world_readable))
+    let room_repo = std::sync::Arc::new(RoomRepository::new(state.db.clone()));
+    let settings = room_repo.get_room_visibility_settings(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(settings)
 }
 
-/// Get total count of public rooms for pagination estimate
-async fn get_total_public_rooms_count(
+/// Get total count of public rooms for pagination estimate using repository
+pub async fn get_total_public_rooms_count(
     state: &AppState,
-    filter: Option<PublicRoomsFilter>,
+    _filter: Option<PublicRoomsFilter>,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
-    let mut query_conditions = vec!["visibility = 'public'".to_string()];
-
-    // Add search filter if provided
-    if let Some(search_filter) = filter {
-        if let Some(search_term) = &search_filter.generic_search_term {
-            if !search_term.trim().is_empty() {
-                query_conditions.push(format!(
-                    "(name CONTAINS '{}' OR topic CONTAINS '{}' OR canonical_alias CONTAINS '{}')",
-                    search_term.replace('\'', "''"),
-                    search_term.replace('\'', "''"),
-                    search_term.replace('\'', "''")
-                ));
-            }
-        }
-    }
-
-    let where_clause = if query_conditions.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", query_conditions.join(" AND "))
-    };
-
-    let query = format!("SELECT COUNT() as count FROM room {}", where_clause);
-
-    let mut response = state.db.query(&query).await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: u32,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    Ok(count_result.map(|c| c.count).unwrap_or(0))
+    let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
+    let count = public_rooms_repo.get_public_rooms_count().await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(count as u32)
 }
 
-/// Parse pagination token to get offset
-fn parse_pagination_token(token: &Option<String>) -> Option<u32> {
-    token.as_ref()?.parse().ok()
-}
 
-/// Generate pagination token from offset
-fn generate_pagination_token(offset: u32) -> String {
-    offset.to_string()
-}

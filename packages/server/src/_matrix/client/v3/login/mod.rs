@@ -1,14 +1,17 @@
 use axum::http::HeaderMap;
 use axum::{Json, extract::ConnectInfo, extract::State, http::StatusCode};
-use chrono::Utc;
+use crate::utils::session_helpers::create_secure_session_cookie;
+use tower_cookies::Cookies;
 use regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::state::AppState;
+// Cookie helper function is in main.rs
+use matryx_surrealdb::repository::{AuthRepository, SsoUserInfo, ApplicationService, DeviceRepository};
+use std::sync::Arc;
 
 pub mod get_token;
 pub mod password;
@@ -85,20 +88,30 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<LoginFlowsRespons
 pub async fn post(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    cookies: Cookies,
     headers: HeaderMap,
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    match request.login_type.as_str() {
-        "m.login.password" => handle_password_login(state, addr, headers, request).await,
+    let result = match request.login_type.as_str() {
+        "m.login.password" => handle_password_login(state, addr, headers, cookies.clone(), request).await,
         "m.login.token" => handle_token_login(state, addr, headers, request).await,
-        _ => Err(StatusCode::BAD_REQUEST),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    // Set secure session cookie for OAuth2 integration upon successful login
+    if let Ok(login_response) = &result {
+        let session_cookie = create_secure_session_cookie("matrix_session", &login_response.access_token);
+        cookies.add(session_cookie);
     }
+
+    result
 }
 
 async fn handle_password_login(
     state: AppState,
     addr: SocketAddr,
     headers: HeaderMap,
+    cookies: Cookies,
     request: LoginRequest,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     // Handle refresh token login if present
@@ -129,6 +142,7 @@ async fn handle_password_login(
         axum::extract::State(state),
         ConnectInfo(addr),
         headers,
+        cookies.clone(), // Pass cookies to password module
         Json(password_request),
     )
     .await
@@ -240,7 +254,7 @@ async fn handle_sso_token_login(
     });
 
     // Create user session using SSO token validation
-    let matrix_access_token = state
+    let _matrix_access_token = state
         .session_service
         .create_user_session(&user_id, &final_device_id, &sso_token, None)
         .await
@@ -278,15 +292,12 @@ async fn handle_sso_token_login(
     }))
 }
 
-/// Get configured SSO identity providers from server state
+/// Get configured SSO identity providers from server state using repository
 async fn get_configured_sso_providers(state: &AppState) -> Vec<Value> {
-    // Query configured SSO providers from database
-    let query = "SELECT * FROM sso_providers WHERE is_active = true ORDER BY name";
-
-    match state.db.query(query).await {
-        Ok(mut response) => {
-            let providers: Vec<SsoProvider> = response.take(0).unwrap_or_default();
-
+    let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
+    
+    match auth_repo.get_sso_providers().await {
+        Ok(providers) => {
             providers
                 .into_iter()
                 .map(|provider| {
@@ -306,13 +317,7 @@ async fn get_configured_sso_providers(state: &AppState) -> Vec<Value> {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct SsoProvider {
-    id: String,
-    name: String,
-    icon_url: Option<String>,
-    brand: Option<String>,
-}
+
 
 /// Handle SSO-based login using pre-validated tokens
 async fn handle_sso_login(
@@ -322,7 +327,6 @@ async fn handle_sso_login(
     request: &LoginRequest,
 ) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
     use axum::Json;
-    use chrono::Utc;
     use uuid::Uuid;
 
     // SSO login requires a token parameter
@@ -360,25 +364,19 @@ async fn handle_sso_login(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Store device information
-    let device_info = serde_json::json!({
-        "device_id": device_id,
-        "user_id": user_info.user_id,
-        "display_name": request.initial_device_display_name.clone().unwrap_or_else(|| "SSO Login".to_string()),
-        "created_at": Utc::now(),
-        "last_seen_ip": client_ip,
-        "last_seen_user_agent": user_agent.as_deref().unwrap_or("unknown")
-    });
-
-    let _: Option<serde_json::Value> = state
-        .db
-        .create(("devices", format!("{}:{}", user_info.user_id, device_id)))
-        .content(device_info)
-        .await
-        .map_err(|e| {
-            error!("Failed to store device info for SSO login: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Store device information using repository
+    let device_repo = DeviceRepository::new(state.db.clone());
+    device_repo.create_device_info(
+        &user_info.user_id,
+        &device_id,
+        request.initial_device_display_name.clone().or_else(|| Some("SSO Login".to_string())),
+        &client_ip,
+        user_agent,
+        None,
+    ).await.map_err(|e| {
+        error!("Failed to store device info for SSO login: {}", e);
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     info!("SSO login successful for user: {}", user_info.user_id);
 
@@ -400,7 +398,6 @@ async fn handle_application_service_login(
     request: &LoginRequest,
 ) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
     use axum::Json;
-    use chrono::Utc;
     use uuid::Uuid;
 
     // Application service login requires a token (AS token)
@@ -450,27 +447,20 @@ async fn handle_application_service_login(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Store device information
-    let device_info = serde_json::json!({
-        "device_id": device_id,
-        "user_id": target_user,
-        "display_name": request.initial_device_display_name.clone()
-            .unwrap_or_else(|| format!("Application Service: {}", app_service.id)),
-        "created_at": Utc::now(),
-        "last_seen_ip": client_ip,
-        "last_seen_user_agent": user_agent.as_deref().unwrap_or("unknown"),
-        "application_service_id": app_service.id.clone(),
-    });
-
-    let _: Option<serde_json::Value> = state
-        .db
-        .create(("devices", format!("{}:{}", target_user, device_id)))
-        .content(device_info)
-        .await
-        .map_err(|e| {
-            error!("Failed to store device info for AS login: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Store device information using repository
+    let device_repo = DeviceRepository::new(state.db.clone());
+    device_repo.create_device_info(
+        target_user,
+        &device_id,
+        request.initial_device_display_name.clone()
+            .or_else(|| Some(format!("Application Service: {}", app_service.id))),
+        &client_ip,
+        user_agent,
+        Some(app_service.id.clone()),
+    ).await.map_err(|e| {
+        error!("Failed to store device info for AS login: {}", e);
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     info!("Application service login successful: {} as user {}", app_service.id, target_user);
 
@@ -484,82 +474,32 @@ async fn handle_application_service_login(
     }))
 }
 
-#[derive(serde::Deserialize)]
-struct SsoUserInfo {
-    user_id: String,
-    display_name: Option<String>,
-    email: Option<String>,
-}
 
-#[derive(serde::Deserialize)]
-struct ApplicationService {
-    id: String,
-    as_token: String,
-    hs_token: String,
-    sender_localpart: String,
-    namespaces: ApplicationServiceNamespaces,
-}
 
-#[derive(serde::Deserialize)]
-struct ApplicationServiceNamespaces {
-    users: Vec<ApplicationServiceNamespace>,
-    aliases: Vec<ApplicationServiceNamespace>,
-    rooms: Vec<ApplicationServiceNamespace>,
-}
-
-#[derive(serde::Deserialize)]
-struct ApplicationServiceNamespace {
-    exclusive: bool,
-    regex: String,
-}
-
-/// Validate SSO token and extract user information
+/// Validate SSO token and extract user information using repository
 async fn validate_sso_token(
     state: &AppState,
     token: &str,
 ) -> Result<SsoUserInfo, Box<dyn std::error::Error + Send + Sync>> {
-    // Query SSO token from database
-    let query = "SELECT * FROM sso_tokens WHERE token = $token AND expires_at > time::now()";
-    let token_owned = token.to_string();
-    let mut response = state.db.query(query).bind(("token", token_owned.clone())).await?;
+    let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
+    
+    let user_info = auth_repo.validate_sso_token(token).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        .ok_or("Invalid or expired SSO token")?;
 
-    #[derive(serde::Deserialize)]
-    struct SsoTokenRecord {
-        user_id: String,
-        display_name: Option<String>,
-        email: Option<String>,
-    }
-
-    let tokens: Vec<SsoTokenRecord> = response.take(0)?;
-    let token_record = tokens.into_iter().next().ok_or("Invalid or expired SSO token")?;
-
-    // Delete used token (one-time use)
-    let _: Option<serde_json::Value> = state
-        .db
-        .query("DELETE FROM sso_tokens WHERE token = $token")
-        .bind(("token", token_owned))
-        .await?
-        .take(0)?;
-
-    Ok(SsoUserInfo {
-        user_id: token_record.user_id,
-        display_name: token_record.display_name,
-        email: token_record.email,
-    })
+    Ok(user_info)
 }
 
-/// Validate application service token and return service info
+/// Validate application service token and return service info using repository
 async fn validate_application_service_token(
     state: &AppState,
     token: &str,
 ) -> Result<ApplicationService, Box<dyn std::error::Error + Send + Sync>> {
-    // Query application service by token
-    let query = "SELECT * FROM application_services WHERE as_token = $token";
-    let token_owned = token.to_string();
-    let mut response = state.db.query(query).bind(("token", token_owned)).await?;
-
-    let services: Vec<ApplicationService> = response.take(0)?;
-    let service = services.into_iter().next().ok_or("Invalid application service token")?;
+    let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
+    
+    let service = auth_repo.validate_application_service_token(token).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        .ok_or("Invalid application service token")?;
 
     Ok(service)
 }
@@ -579,15 +519,14 @@ fn can_app_service_login_as(app_service: &ApplicationService, user_id: &str) -> 
 
     // Check if any user namespace regex matches
     for namespace in &app_service.namespaces.users {
-        if let Ok(regex) = regex::Regex::new(&namespace.regex) {
-            if regex.is_match(localpart) {
+        if let Ok(regex) = regex::Regex::new(&namespace.regex)
+            && regex.is_match(localpart) {
                 return true;
             }
-        }
     }
 
     false
 }
 
 // Re-export password module types for convenience
-pub use password::LoginError as PasswordLoginError;
+

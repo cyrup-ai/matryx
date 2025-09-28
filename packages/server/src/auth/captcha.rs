@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+
 use surrealdb::Connection;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::auth::MatrixAuthError;
@@ -310,11 +310,21 @@ impl<C: Connection> CaptchaService<C> {
             MatrixAuthError::DatabaseError(format!("Failed to parse reCAPTCHA response: {}", e))
         })?;
 
-        // For reCAPTCHA v3, check the score
-        let success = recaptcha_response.success &&
+        // For reCAPTCHA v3, check the score and action
+        let mut success = recaptcha_response.success &&
             recaptcha_response
                 .score
-                .map_or(true, |score| score >= self.config.min_score);
+                .is_none_or(|score| score >= self.config.min_score);
+
+        // Validate action field for reCAPTCHA v3 (should match expected action like "login" or "register")
+        if let Some(action) = &recaptcha_response.action {
+            if !matches!(action.as_str(), "login" | "register" | "submit" | "matrix_auth") {
+                warn!("reCAPTCHA action validation failed: unexpected action '{}'", action);
+                success = false;
+            } else {
+                debug!("reCAPTCHA action validated: {}", action);
+            }
+        }
 
         let challenge_ts = recaptcha_response
             .challenge_ts
@@ -363,8 +373,19 @@ impl<C: Connection> CaptchaService<C> {
             .and_then(|ts| DateTime::parse_from_rfc3339(&ts).ok())
             .map(|dt| dt.with_timezone(&Utc));
 
+        // Check hCaptcha credit field - indicates whether solution was free or paid
+        let success = hcaptcha_response.success;
+        if let Some(credit) = hcaptcha_response.credit {
+            if credit {
+                debug!("hCaptcha solved with credit (paid solution)");
+            } else {
+                debug!("hCaptcha solved without credit (free solution)");
+            }
+            // Note: Both credited and non-credited solutions are valid for hCaptcha
+        }
+
         Ok(CaptchaVerificationResponse {
-            success: hcaptcha_response.success,
+            success,
             challenge_ts,
             hostname: hcaptcha_response.hostname,
             error_codes: hcaptcha_response.error_codes,
@@ -384,13 +405,27 @@ impl<C: Connection> CaptchaService<C> {
             .await
             .map_err(|e| {
                 MatrixAuthError::DatabaseError(format!(
-                    "Failed to check suspicious activity: {}",
-                    e
+                    "Failed to check suspicious activity for operation '{}': {}",
+                    operation, e
                 ))
             })?;
 
-        // Require CAPTCHA if more than 3 failed attempts in the last hour
-        Ok(attempt_count > 3)
+        // Operation-specific thresholds for suspicious activity detection
+        let threshold = match operation {
+            "login" => 5,        // Allow more login attempts
+            "register" => 3,     // Stricter on registration
+            "password_reset" => 2, // Very strict on password resets
+            "room_join" => 10,   // More lenient on room operations
+            _ => 3,              // Default threshold
+        };
+
+        info!(
+            "Checking suspicious activity for operation '{}': {} attempts in last hour (threshold: {})",
+            operation, attempt_count, threshold
+        );
+
+        // Require CAPTCHA if attempts exceed operation-specific threshold
+        Ok(attempt_count > threshold)
     }
 
     /// Record rate limit violation for suspicious activity tracking

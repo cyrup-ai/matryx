@@ -10,24 +10,20 @@ use axum::{
     Router,
     body::Body,
     extract::ConnectInfo,
-    http::{HeaderMap, Method, Request, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Response},
+    http::{Method, Request, StatusCode},
+    response::IntoResponse,
     routing::get,
 };
 use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc};
-use surrealdb::{Surreal, engine::any::Any};
 use tower::ServiceExt;
 
 // Import local crate modules using the library crate
 use matryx_server::{
-    auth::MatrixAuth,
     error::MatrixError,
     middleware::{
         cors::create_cors_layer,
         rate_limit::{RateLimitService, rate_limit_middleware},
-        transaction_id::{TransactionService, transaction_id_middleware},
     },
 };
 

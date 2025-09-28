@@ -1,16 +1,12 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use surrealdb::Connection;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::auth::{MatrixAccessToken, MatrixAuthError, MatrixSessionService};
-use matryx_surrealdb::repository::auth::{
-    AuthRepository,
-    ExtendedRefreshToken,
-    TokenStats as RepositoryTokenStats,
-};
+use crate::auth::{MatrixAuthError, MatrixSessionService};
+use matryx_surrealdb::repository::auth::AuthRepository;
 
 /// Re-export the extended refresh token from repository
 pub use matryx_surrealdb::repository::auth::ExtendedRefreshToken as RefreshToken;

@@ -6,7 +6,7 @@ use axum::{
 use matryx_surrealdb::repository::ProfileManagementService;
 use serde::Serialize;
 
-use crate::{AppState, auth::MatrixSessionService};
+use crate::AppState;
 
 #[derive(Serialize)]
 pub struct WhoAmIResponse {

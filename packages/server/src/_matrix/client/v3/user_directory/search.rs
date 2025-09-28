@@ -4,10 +4,10 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 
-use crate::{AppState, auth::MatrixSessionService};
+
+use crate::AppState;
+use matryx_surrealdb::repository::user::{UserRepository, UserSearchResult};
 
 #[derive(Deserialize)]
 pub struct UserSearchRequest {
@@ -15,12 +15,7 @@ pub struct UserSearchRequest {
     pub limit: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct UserSearchResult {
-    pub user_id: String,
-    pub display_name: Option<String>,
-    pub avatar_url: Option<String>,
-}
+
 
 #[derive(Serialize)]
 pub struct UserSearchResponse {
@@ -76,71 +71,9 @@ async fn search_user_directory(
     limit: u32,
 ) -> Result<Vec<UserSearchResult>, StatusCode> {
     // Privacy-aware search: only return users in shared rooms
-    let search_query = r#"
-        SELECT DISTINCT
-            u.user_id,
-            up.display_name,
-            up.avatar_url
-        FROM users u
-        LEFT JOIN user_profiles up ON u.user_id = up.user_id
-        JOIN room_members rm1 ON u.user_id = rm1.user_id
-        JOIN room_members rm2 ON rm1.room_id = rm2.room_id
-        WHERE rm2.user_id = $searcher_user_id
-        AND rm1.membership = 'join'
-        AND rm2.membership = 'join'
-        AND (
-            u.user_id CONTAINS $search_term
-            OR up.display_name CONTAINS $search_term
-            OR u.user_id ILIKE $search_pattern
-            OR up.display_name ILIKE $search_pattern
-        )
-        AND u.user_id != $searcher_user_id
-        ORDER BY
-            CASE
-                WHEN u.user_id = $search_term THEN 1
-                WHEN up.display_name = $search_term THEN 2
-                WHEN u.user_id STARTS WITH $search_term THEN 3
-                WHEN up.display_name STARTS WITH $search_term THEN 4
-                ELSE 5
-            END,
-            up.display_name,
-            u.user_id
-        LIMIT $limit
-    "#;
-
-    let search_pattern = format!("%{}%", search_term);
-
-    let mut result = state
-        .db
-        .query(search_query)
-        .bind(("searcher_user_id", searcher_user_id.to_string()))
-        .bind(("search_term", search_term.to_string()))
-        .bind(("search_pattern", search_pattern))
-        .bind(("limit", limit as i64))
+    let user_repo = UserRepository::new(state.db.clone());
+    user_repo
+        .search_users(searcher_user_id, search_term, limit)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut users = Vec::new();
-    let user_rows: Vec<HashMap<String, Value>> =
-        result.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    for user_row in user_rows {
-        if let Some(user_id) = user_row.get("user_id").and_then(|v| v.as_str()) {
-            let user_result = UserSearchResult {
-                user_id: user_id.to_string(),
-                display_name: user_row
-                    .get("display_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                avatar_url: user_row
-                    .get("avatar_url")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            };
-
-            users.push(user_result);
-        }
-    }
-
-    Ok(users)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

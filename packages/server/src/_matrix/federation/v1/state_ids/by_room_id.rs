@@ -5,12 +5,12 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, Room};
+
 use matryx_surrealdb::repository::{EventRepository, RoomRepository};
 
 /// Query parameters for state_ids request
@@ -90,9 +90,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -132,11 +131,15 @@ pub async fn get(
             StatusCode::NOT_FOUND
         })?;
 
+    // Log room validation for audit trail
+    debug!("Validating state request for room {} from server {}", room_id, x_matrix_auth.origin);
+    debug!("Room found: {} (version: {})", room.room_id, &room.room_version);
+
     // Check if requesting server has permission to view room state
-    let has_permission = check_state_permission(&state, &room, &x_matrix_auth.origin)
+    let has_permission = room_repo.check_server_state_permission(&room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
-            error!("Failed to check state permissions: {}", e);
+            error!("Failed to check state permissions for room {}: {}", room_id, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -165,7 +168,7 @@ pub async fn get(
     }
 
     // Get room state IDs at the specified event
-    let state_event_ids = get_room_state_ids_at_event(&state, &room_id, &query.event_id)
+    let state_event_ids = event_repo.get_room_state_ids_at_event(&room_id, &query.event_id)
         .await
         .map_err(|e| {
             error!("Failed to get room state IDs: {}", e);
@@ -173,8 +176,9 @@ pub async fn get(
         })?;
 
     // Get auth chain IDs for the state events
-    let auth_chain_ids =
-        get_auth_chain_ids_for_state(&state, &state_event_ids).await.map_err(|e| {
+    let auth_chain_ids = event_repo.get_auth_chain_ids_for_state(&state_event_ids)
+        .await
+        .map_err(|e| {
             error!("Failed to get auth chain IDs: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -195,214 +199,4 @@ pub async fn get(
     Ok(Json(response))
 }
 
-/// Check if a server has permission to view room state
-async fn check_state_permission(
-    state: &AppState,
-    room: &Room,
-    requesting_server: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if the requesting server has any users in the room
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        AND membership IN ['join', 'invite', 'leave']
-        LIMIT 1
-    ";
 
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
-
-    if has_users {
-        return Ok(true);
-    }
-
-    // Check if room is world-readable
-    let world_readable = is_room_world_readable(state, &room.room_id).await?;
-    Ok(world_readable)
-}
-
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
-
-/// Get room state event IDs at a specific event
-async fn get_room_state_ids_at_event(
-    state: &AppState,
-    room_id: &str,
-    event_id: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    // Get the target event's depth for state resolution
-    let depth_query = "
-        SELECT depth
-        FROM event
-        WHERE event_id = $event_id
-    ";
-
-    let mut response = state
-        .db
-        .query(depth_query)
-        .bind(("event_id", event_id.to_string()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct EventDepth {
-        depth: i64,
-    }
-
-    let event_depth: Option<EventDepth> = response.take(0)?;
-    let target_depth = event_depth.map(|e| e.depth).ok_or("Event depth not found")?;
-
-    // Get state event IDs at or before the target event depth
-    let state_query = "
-        SELECT event_id
-        FROM event
-        WHERE room_id = $room_id
-        AND state_key IS NOT NULL
-        AND depth <= $target_depth
-        AND (
-            SELECT COUNT()
-            FROM event e2
-            WHERE e2.room_id = $room_id
-            AND e2.type = event.type
-            AND e2.state_key = event.state_key
-            AND e2.depth <= $target_depth
-            AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
-        ) = 0
-        ORDER BY type, state_key
-    ";
-
-    let mut response = state
-        .db
-        .query(state_query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("target_depth", target_depth))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct EventId {
-        event_id: String,
-    }
-
-    let events: Vec<EventId> = response.take(0)?;
-    let state_event_ids: Vec<String> = events.into_iter().map(|e| e.event_id).collect();
-
-    Ok(state_event_ids)
-}
-
-/// Get auth chain IDs for a set of state event IDs
-async fn get_auth_chain_ids_for_state(
-    state: &AppState,
-    state_event_ids: &[String],
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    if state_event_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut auth_event_ids = HashSet::new();
-    let mut to_process = HashSet::new();
-
-    // Clone the state_event_ids to avoid lifetime issues
-    let state_event_ids_owned: Vec<String> = state_event_ids.to_vec();
-
-    // Get initial auth events from state events
-    let query = "
-        SELECT auth_events
-        FROM event
-        WHERE event_id IN $state_event_ids
-    ";
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("state_event_ids", state_event_ids_owned))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct AuthEvents {
-        auth_events: Option<Vec<String>>,
-    }
-
-    let events: Vec<AuthEvents> = response.take(0)?;
-
-    // Collect initial auth event IDs
-    for event in events {
-        if let Some(auth_events) = event.auth_events {
-            for auth_event_id in auth_events {
-                if auth_event_ids.insert(auth_event_id.clone()) {
-                    to_process.insert(auth_event_id);
-                }
-            }
-        }
-    }
-
-    // Recursively fetch auth events
-    while !to_process.is_empty() {
-        let current_batch: Vec<String> = to_process.drain().collect();
-
-        let query = "
-            SELECT auth_events
-            FROM event
-            WHERE event_id IN $auth_event_ids
-        ";
-
-        let mut response = state.db.query(query).bind(("auth_event_ids", current_batch)).await?;
-
-        let events: Vec<AuthEvents> = response.take(0)?;
-
-        // Process auth events of the fetched events
-        for event in events {
-            if let Some(auth_events) = event.auth_events {
-                for auth_event_id in auth_events {
-                    if auth_event_ids.insert(auth_event_id.clone()) {
-                        to_process.insert(auth_event_id);
-                    }
-                }
-            }
-        }
-    }
-
-    let auth_chain_ids: Vec<String> = auth_event_ids.into_iter().collect();
-    Ok(auth_chain_ids)
-}

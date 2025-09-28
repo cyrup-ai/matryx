@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -13,6 +13,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::key_backup::KeyBackupRepository;
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionKeyBackup {
@@ -44,42 +45,24 @@ pub async fn delete(
     };
 
     // Get current backup version
-    let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
-    let mut version_response = state
-        .db
-        .query(version_query)
-        .bind(("user_id", user_id.clone()))
+    let backup_repo = KeyBackupRepository::new(state.db.clone());
+    let backup_version = backup_repo
+        .get_latest_backup_version_string(&user_id)
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let version: Option<String> =
-        version_response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let backup_version = version.ok_or(StatusCode::NOT_FOUND)?;
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Delete specific session key backup
-    let backup_id = format!("{}:{}:{}", user_id, room_id, session_id);
-    let delete_query = "DELETE FROM room_key_backups WHERE id = $backup_id AND version = $version";
-    let mut delete_result = state
-        .db
-        .query(delete_query)
-        .bind(("backup_id", backup_id))
-        .bind(("version", backup_version))
+    backup_repo
+        .delete_room_key(&user_id, &backup_version, &room_id, &session_id)
         .await
         .map_err(|e| {
             error!("Failed to delete session key backup: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-    let deleted: Option<Value> =
-        delete_result.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if deleted.is_none() {
-        return Err(StatusCode::NOT_FOUND);
-    }
 
     info!("Session key backup deleted: user={} room={} session={}", user_id, room_id, session_id);
 
@@ -111,47 +94,31 @@ pub async fn get(
     };
 
     // Get current backup version
-    let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
-    let mut version_response = state
-        .db
-        .query(version_query)
-        .bind(("user_id", user_id.clone()))
+    let backup_repo = KeyBackupRepository::new(state.db.clone());
+    let backup_version = backup_repo
+        .get_latest_backup_version_string(&user_id)
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let version: Option<String> =
-        version_response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let backup_version = version.ok_or(StatusCode::NOT_FOUND)?;
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Get specific session key backup
-    let backup_id = format!("{}:{}:{}", user_id, room_id, session_id);
-    let query = "SELECT * FROM room_key_backups WHERE id = $backup_id AND version = $version";
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("backup_id", backup_id))
-        .bind(("version", backup_version))
-        .await
-        .map_err(|e| {
+    match backup_repo.get_room_key(&user_id, &backup_version, &room_id, &session_id).await {
+        Ok(Some(room_key)) => {
+            Ok(Json(json!({
+                "first_message_index": room_key.first_message_index,
+                "forwarded_count": room_key.forwarded_count,
+                "is_verified": room_key.is_verified,
+                "session_data": room_key.session_data
+            })))
+        },
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
             error!("Failed to get session key backup: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let backup: Option<Value> = response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(backup_data) = backup {
-        Ok(Json(json!({
-            "first_message_index": backup_data.get("first_message_index").unwrap_or(&json!(0)),
-            "forwarded_count": backup_data.get("forwarded_count").unwrap_or(&json!(0)),
-            "is_verified": backup_data.get("is_verified").unwrap_or(&json!(false)),
-            "session_data": backup_data.get("session_data").unwrap_or(&json!({}))
-        })))
-    } else {
-        Err(StatusCode::NOT_FOUND)
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -178,64 +145,33 @@ pub async fn put(
     };
 
     // Get current backup version
-    let version_query = "SELECT version FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
-    let mut version_response = state
-        .db
-        .query(version_query)
-        .bind(("user_id", user_id.clone()))
+    let backup_repo = KeyBackupRepository::new(state.db.clone());
+    let backup_version = backup_repo
+        .get_latest_backup_version_string(&user_id)
         .await
         .map_err(|e| {
             error!("Failed to get backup version: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let version: Option<String> =
-        version_response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let backup_version = version.ok_or(StatusCode::PRECONDITION_FAILED)?;
+        })?
+        .ok_or(StatusCode::PRECONDITION_FAILED)?;
 
     // Store session key backup
-    let backup_id = format!("{}:{}:{}", user_id, room_id, session_id);
-    let _: Option<Value> = state
-        .db
-        .create(("room_key_backups", backup_id))
-        .content(json!({
-            "user_id": user_id,
-            "room_id": room_id,
-            "session_id": session_id,
-            "version": backup_version,
-            "first_message_index": request.first_message_index,
-            "forwarded_count": request.forwarded_count,
-            "is_verified": request.is_verified,
-            "session_data": request.session_data,
-            "created_at": Utc::now()
-        }))
+    let encrypted_data = json!({
+        "first_message_index": request.first_message_index,
+        "forwarded_count": request.forwarded_count,
+        "is_verified": request.is_verified,
+        "session_data": request.session_data
+    });
+
+    backup_repo
+        .store_room_key_raw(&user_id, &backup_version, &room_id, &session_id, &encrypted_data)
         .await
         .map_err(|e| {
             error!("Failed to store session key backup: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Update backup version count and etag
     let etag = format!("{}", Utc::now().timestamp());
-    let update_query = "
-        UPDATE backup_versions 
-        SET count = count + 1, etag = $etag, updated_at = $updated_at
-        WHERE user_id = $user_id AND version = $version
-    ";
-
-    let _update_result = state
-        .db
-        .query(update_query)
-        .bind(("user_id", user_id.clone()))
-        .bind(("version", backup_version.clone()))
-        .bind(("etag", etag.clone()))
-        .bind(("updated_at", Utc::now()))
-        .await
-        .map_err(|e| {
-            error!("Failed to update backup version: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
 
     info!("Session key backup stored: user={} room={} session={}", user_id, room_id, session_id);
 

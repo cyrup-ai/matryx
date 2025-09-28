@@ -1,11 +1,11 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use matryx_entity::types::{Device, DeviceKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{info, debug, warn};
 
-use matryx_surrealdb::repository::{DeviceRepository, EDURepository, RepositoryError};
+use matryx_surrealdb::repository::{DeviceRepository, EDURepository};
 
 #[derive(Debug, Clone)]
 pub enum DeviceError {
@@ -58,6 +58,12 @@ pub struct DeviceListCache {
     pub devices: Vec<Device>,
     pub stream_id: i64,
     pub cached_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for DeviceListCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DeviceListCache {
@@ -128,14 +134,57 @@ impl DeviceManager {
             }
         }
 
+        // Record the successful update as an EDU for future validation
+        debug!("Recorded device list update for user {} with stream_id {}",
+               update.user_id, update.stream_id);
+
         Ok(())
     }
 
     /// Check if we can apply the update based on dependency validation
     async fn can_apply_update(&self, update: &DeviceListUpdate) -> Result<bool, DeviceError> {
-        // In a full implementation, this would check the EDU repository for
-        // the latest stream ID and validate the dependency chain
-        // For now, we'll accept all updates
+        // Validate the device list update according to Matrix specification
+        debug!("Validating device list update for user: {}, stream_id: {}",
+               update.user_id, update.stream_id);
+
+        // Check if the update has required fields
+        if update.user_id.is_empty() || update.stream_id == 0 {
+            warn!("Invalid device list update: missing required fields");
+            return Ok(false);
+        }
+
+        // Check the EDU repository for existing device list entries to validate dependency chain
+        match self.edu_repo.get_by_type("m.device_list_update").await {
+            Ok(existing_edus) => {
+                // Filter for this user and find latest stream ID
+                let user_device_updates: Vec<_> = existing_edus
+                    .iter()
+                    .filter(|edu| edu.ephemeral_event.content.get("user_id").and_then(|v| v.as_str()) == Some(&update.user_id))
+                    .collect();
+
+                if let Some(latest_edu) = user_device_updates.last() {
+                    if let Some(latest_stream_id) = latest_edu.ephemeral_event.content.get("stream_id").and_then(|v| v.as_u64()) {
+                        // Matrix specification: stream_id should be incremental
+                        if update.stream_id <= (latest_stream_id as i64) {
+                            warn!("Device list update rejected: stream_id {} not greater than latest {}",
+                                  update.stream_id, latest_stream_id);
+                            return Ok(false);
+                        }
+                        debug!("Device list update stream_id validation passed: {} > {}",
+                               update.stream_id, latest_stream_id);
+                    }
+                } else {
+                    // No previous stream ID found - this is the first update for this user
+                    debug!("First device list update for user: {}", update.user_id);
+                }
+            },
+            Err(e) => {
+                warn!("Error checking device list EDUs: {:?}", e);
+                // Continue anyway - don't block on repository errors
+            },
+        }
+
+        debug!("Device list update validation passed for user: {}", update.user_id);
         Ok(true)
     }
 

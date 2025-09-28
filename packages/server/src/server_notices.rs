@@ -1,7 +1,5 @@
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use tracing::{error, info, warn};
-use uuid::Uuid;
+use serde_json::json;
+use tracing::info;
 
 use crate::state::AppState;
 use matryx_entity::{ServerNoticeContent, UsageLimitReachedNotice};

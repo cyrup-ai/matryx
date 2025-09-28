@@ -416,4 +416,128 @@ impl<C: Connection> AuthRepository<C> {
             }
         })
     }
+
+    /// Get configured SSO identity providers
+    pub async fn get_sso_providers(&self) -> Result<Vec<SsoProvider>, RepositoryError> {
+        let query = "SELECT * FROM sso_providers WHERE is_active = true ORDER BY name";
+
+        let mut response = self.db.query(query).await?;
+        let providers: Vec<SsoProvider> = response.take(0)?;
+
+        Ok(providers)
+    }
+
+    /// Validate SSO token and get user info
+    pub async fn validate_sso_token(&self, token: &str) -> Result<Option<SsoUserInfo>, RepositoryError> {
+        let query = "SELECT * FROM sso_tokens WHERE token = $token AND expires_at > time::now()";
+        
+        let mut response = self.db.query(query)
+            .bind(("token", token.to_string()))
+            .await?;
+
+        let tokens: Vec<SsoTokenRecord> = response.take(0)?;
+        let token_record = tokens.into_iter().next();
+
+        if let Some(record) = token_record {
+            // Delete used token (one-time use)
+            let _: Option<serde_json::Value> = self.db
+                .query("DELETE FROM sso_tokens WHERE token = $token")
+                .bind(("token", token.to_string()))
+                .await?
+                .take(0)?;
+
+            Ok(Some(SsoUserInfo {
+                user_id: record.user_id,
+                display_name: record.display_name,
+                email: record.email,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Validate application service token and get service info
+    pub async fn validate_application_service_token(&self, token: &str) -> Result<Option<ApplicationService>, RepositoryError> {
+        let query = "SELECT * FROM application_services WHERE as_token = $token";
+        
+        let mut response = self.db.query(query)
+            .bind(("token", token.to_string()))
+            .await?;
+
+        let services: Vec<ApplicationService> = response.take(0)?;
+        let service = services.into_iter().next();
+
+        Ok(service)
+    }
+
+    /// Validate OpenID access token and get user info
+    pub async fn validate_openid_token(&self, access_token: &str) -> Result<Option<(String, i64)>, RepositoryError> {
+        let query = "
+            SELECT user_id, expires_at FROM openid_tokens 
+            WHERE access_token = $access_token
+            AND expires_at > $current_time
+            LIMIT 1
+        ";
+
+        let current_time = chrono::Utc::now().timestamp_millis();
+
+        let mut response = self.db
+            .query(query)
+            .bind(("access_token", access_token.to_string()))
+            .bind(("current_time", current_time))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct TokenResult {
+            user_id: String,
+            expires_at: i64,
+        }
+
+        let token_result: Option<TokenResult> = response.take(0)?;
+        Ok(token_result.map(|t| (t.user_id, t.expires_at)))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoProvider {
+    pub id: String,
+    pub name: String,
+    pub icon_url: Option<String>,
+    pub brand: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoUserInfo {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoTokenRecord {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationService {
+    pub id: String,
+    pub as_token: String,
+    pub hs_token: String,
+    pub sender_localpart: String,
+    pub namespaces: ApplicationServiceNamespaces,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationServiceNamespaces {
+    pub users: Vec<ApplicationServiceNamespace>,
+    pub aliases: Vec<ApplicationServiceNamespace>,
+    pub rooms: Vec<ApplicationServiceNamespace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationServiceNamespace {
+    pub exclusive: bool,
+    pub regex: String,
 }

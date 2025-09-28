@@ -9,4 +9,4 @@ members = [
 exclude = ["tmp", "docs", "forks"]
 
 [workspace.lints.rust]
-warnings = "allow"
+warnings = "warn"

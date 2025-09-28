@@ -8,11 +8,11 @@ description = "Pure Matrix protocol entity types and data structures"
 
 [dependencies]
 # Serialization
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 
 # Time utilities
-chrono = { version = "0.4.41", features = ["serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
 
 # Cryptography
 bcrypt = "0.17.1"
@@ -21,7 +21,7 @@ bcrypt = "0.17.1"
 thiserror = "2.0.16"
 
 # URL utilities
-url = { version = "2.0", features = ["serde"] }
+url = { version = "2.5", features = ["serde"] }
 
 [lib]
 name = "matryx_entity"

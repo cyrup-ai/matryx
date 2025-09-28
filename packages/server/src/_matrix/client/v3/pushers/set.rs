@@ -4,13 +4,13 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, MatrixSessionService};
 use crate::state::AppState;
+use matryx_surrealdb::repository::push::{PushRepository, PusherConfig};
 
 #[derive(Deserialize)]
 pub struct SetPusherRequest {
@@ -81,61 +81,53 @@ pub async fn post(
     // Check if this is a pusher deletion (null data)
     let is_deletion = request.data.url.is_none() && request.kind == "http";
 
+    let push_repo = PushRepository::new(state.db.clone());
+
     if is_deletion {
         // Delete existing pusher
-        let delete_query =
-            "DELETE FROM pushers WHERE user_id = $user_id AND pusher_id = $pusher_id";
-
-        if let Err(e) = state
-            .db
-            .query(delete_query)
-            .bind(("user_id", user_id.clone()))
-            .bind(("pusher_id", request.pusher_id.clone()))
-            .await
-        {
+        if let Err(e) = push_repo.delete_pusher(&user_id, &request.pusher_id).await {
             error!("Failed to delete pusher: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
 
         info!("Deleted pusher {} for user {}", request.pusher_id, user_id);
     } else {
+        // Handle append logic according to Matrix spec
+        // append=false (default): replace all pushers for this app_id with this pusher
+        // append=true: add this pusher alongside existing ones
+        let append_mode = request.append.unwrap_or(false);
+        
+        if !append_mode {
+            // Replace mode: delete existing pushers for this app_id first
+            if let Err(e) = push_repo.delete_pushers_by_app_id(&user_id, &request.app_id).await {
+                error!("Failed to delete existing pushers for app_id {}: {}", request.app_id, e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            info!("Cleared existing pushers for app_id {} (replace mode)", request.app_id);
+        }
+
         // Create or update pusher
-        let pusher_id = format!("pusher_{}", uuid::Uuid::new_v4());
-
-        let upsert_query = r#"
-            UPSERT pushers SET
-                id = $id,
-                user_id = $user_id,
-                pusher_id = $pusher_id,
-                kind = $kind,
-                app_id = $app_id,
-                app_display_name = $app_display_name,
-                device_display_name = $device_display_name,
-                profile_tag = $profile_tag,
-                lang = $lang,
-                data = $data,
-                created_at = time::now()
-            WHERE user_id = $user_id AND pusher_id = $pusher_id
-        "#;
-
         let data_json = json!({
             "url": request.data.url,
             "format": request.data.format.unwrap_or_else(|| "event_id_only".to_string())
         });
 
-        if let Err(e) = state
-            .db
-            .query(upsert_query)
-            .bind(("id", pusher_id.clone()))
-            .bind(("user_id", user_id.clone()))
-            .bind(("pusher_id", request.pusher_id.clone()))
-            .bind(("kind", request.kind.clone()))
-            .bind(("app_id", request.app_id.clone()))
-            .bind(("app_display_name", request.app_display_name.clone()))
-            .bind(("device_display_name", request.device_display_name.clone()))
-            .bind(("profile_tag", request.profile_tag.clone()))
-            .bind(("lang", request.lang.clone()))
-            .bind(("data", data_json.clone()))
+        let config = PusherConfig {
+            kind: &request.kind,
+            app_id: &request.app_id,
+            app_display_name: &request.app_display_name,
+            device_display_name: &request.device_display_name,
+            profile_tag: request.profile_tag.as_deref(),
+            lang: &request.lang,
+            data: &data_json,
+        };
+
+        if let Err(e) = push_repo
+            .upsert_pusher(
+                &user_id,
+                &request.pusher_id,
+                config,
+            )
             .await
         {
             error!("Failed to set pusher: {}", e);
@@ -143,8 +135,8 @@ pub async fn post(
         }
 
         info!(
-            "Set pusher {} for user {} with URL {:?}",
-            request.pusher_id, user_id, request.data.url
+            "Set pusher {} for user {} with URL {:?} (append={})",
+            request.pusher_id, user_id, request.data.url, append_mode
         );
     }
 

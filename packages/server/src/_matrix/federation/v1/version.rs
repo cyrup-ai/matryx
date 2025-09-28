@@ -6,13 +6,16 @@ use serde_json::{Value, json};
 ///
 /// Get the implementation name and version of this homeserver.
 pub async fn get() -> Result<Json<Value>, StatusCode> {
-    let config = ServerConfig::get();
+    let config = ServerConfig::get().map_err(|e| {
+        tracing::error!("Failed to get server config: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let _server_name = format!("{}:{}", config.homeserver_name, config.federation_port);
 
     Ok(Json(json!({
         "server": {
-            "name": "matryx",
-            "version": "0.1.0"
+            "name": config.server_implementation_name,
+            "version": config.server_implementation_version
         }
     })))
 }

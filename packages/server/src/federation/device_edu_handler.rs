@@ -1,11 +1,11 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::federation::device_management::{DeviceError, DeviceListUpdate};
 use matryx_entity::types::{Device, EDU, EphemeralEvent, EventContent};
-use matryx_surrealdb::repository::{DeviceRepository, EDURepository, RepositoryError};
+use matryx_surrealdb::repository::{DeviceRepository, EDURepository};
 
 /// EDU (Ephemeral Data Unit) for device list updates
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, Room};
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_entity::types::Room;
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Query parameters for backfill request
 #[derive(Debug, Deserialize)]
@@ -92,9 +92,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -145,14 +144,76 @@ pub async fn get(
             warn!("Room {} not found", room_id);
             StatusCode::NOT_FOUND
         })?;
+        
+    // Validate room federation settings per Matrix specification
+    if let Some(false) = room.federate {
+        warn!(
+            "Federation disabled for room {}, denying backfill request from {}",
+            room_id, x_matrix_auth.origin
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Validate room version compatibility for backfill (Matrix spec compliance)
+    let supported_versions = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
+    if !supported_versions.contains(&room.room_version.as_str()) {
+        warn!(
+            "Unsupported room version {} for backfill in room {}, denying request from {}",
+            room.room_version, room_id, x_matrix_auth.origin
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate Server ACL restrictions per Matrix spec Section 20
+    let acl_validation_result = validate_server_acl(&state, &room, &x_matrix_auth.origin).await;
+    match acl_validation_result {
+        Ok(true) => {
+            debug!("Server {} passed ACL validation for room {}", x_matrix_auth.origin, room_id);
+        },
+        Ok(false) => {
+            warn!(
+                "Server {} denied by room ACL for backfill in room {}",
+                x_matrix_auth.origin, room_id
+            );
+            return Err(StatusCode::FORBIDDEN);
+        },
+        Err(e) => {
+            error!("Failed to validate server ACL for {}: {}", x_matrix_auth.origin, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // Additional room-specific validation based on room properties
+    validate_room_access_for_backfill(&room, &x_matrix_auth.origin)?;
+
+    info!(
+        "Processing backfill request for room {} (version: {}, federation: {}) from server {}",
+        room_id,
+        room.room_version,
+        room.federate.unwrap_or(true),
+        x_matrix_auth.origin
+    );
 
     // Check if requesting server has permission to backfill
-    let has_permission = check_backfill_permission(&state, &room, &x_matrix_auth.origin)
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let has_users = membership_repo.server_has_users_in_room(&room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
-            error!("Failed to check backfill permissions: {}", e);
+            error!("Failed to check server membership: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    let has_permission = if has_users {
+        true
+    } else {
+        // Check if room is world-readable
+        room_repo.is_room_world_readable(&room_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to check room world-readable status: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
 
     if !has_permission {
         warn!("Server {} not authorized to backfill room {}", x_matrix_auth.origin, room_id);
@@ -204,76 +265,7 @@ pub async fn get(
     Ok(Json(response))
 }
 
-/// Check if a server has permission to backfill a room
-async fn check_backfill_permission(
-    state: &AppState,
-    room: &Room,
-    requesting_server: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if the requesting server has any users in the room (current or historical)
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        LIMIT 1
-    ";
 
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
-
-    if has_users {
-        return Ok(true);
-    }
-
-    // Check if room is world-readable
-    let world_readable = is_room_world_readable(state, &room.room_id).await?;
-    Ok(world_readable)
-}
-
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
 
 /// Backfill events using breadth-first traversal
 async fn backfill_events(
@@ -292,25 +284,13 @@ async fn backfill_events(
     }
 
     while !to_visit.is_empty() && result_events.len() < limit {
-        let current_batch: Vec<String> = to_visit.drain(..).collect();
+        let current_batch: Vec<String> = std::mem::take(&mut to_visit);
 
         // Fetch current batch of events
-        let query = "
-            SELECT *
-            FROM event
-            WHERE event_id IN $event_ids
-            AND room_id = $room_id
-            ORDER BY depth DESC, origin_server_ts DESC
-        ";
-
-        let mut response = state
-            .db
-            .query(query)
-            .bind(("event_ids", current_batch.clone()))
-            .bind(("room_id", room_id.to_string()))
+        let event_repo = EventRepository::new(state.db.clone());
+        let events = event_repo
+            .get_events_by_ids_for_backfill(&current_batch, room_id)
             .await?;
-
-        let events: Vec<Event> = response.take(0)?;
 
         // Add events to result
         for event in events {
@@ -349,4 +329,251 @@ async fn backfill_events(
     });
 
     Ok(result_events)
+}
+
+/// Validate server against room's Server ACL restrictions per Matrix specification
+///
+/// Implements Matrix Server ACL validation according to the Matrix Server-Server API
+/// specification Section 20. Server ACLs enable room administrators to control
+/// which homeservers can participate in federation for specific rooms.
+async fn validate_server_acl(
+    state: &AppState,
+    room: &Room,
+    requesting_server: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Query for m.room.server_acl state event in the room
+    let event_repo = EventRepository::new(state.db.clone());
+    let acl_event = event_repo
+        .get_server_acl_event(&room.room_id)
+        .await?;
+
+    let acl_event = match acl_event {
+        Some(event) => event,
+        None => {
+            // No Server ACL configured - allow all servers
+            debug!("No Server ACL found for room {}, allowing server {}", room.room_id, requesting_server);
+            return Ok(true);
+        }
+    };
+    let acl_content = acl_event.content.as_object()
+        .ok_or("Server ACL content is not an object")?;
+
+    // Get allow and deny lists from the ACL content
+    let allow_list = acl_content
+        .get("allow")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<&str>>()
+        })
+        .unwrap_or_else(|| vec!["*"]); // Default: allow all
+
+    let deny_list = acl_content
+        .get("deny")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<&str>>()
+        })
+        .unwrap_or_default();
+
+    let allow_ip_literals = acl_content
+        .get("allow_ip_literals")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Check if server is an IP literal and IP literals are denied
+    if !allow_ip_literals && is_ip_literal(requesting_server) {
+        debug!(
+            "Server {} is IP literal and IP literals are not allowed in room {}",
+            requesting_server, room.room_id
+        );
+        return Ok(false);
+    }
+
+    // Check deny list first (takes precedence)
+    for deny_pattern in &deny_list {
+        if matches_server_pattern(requesting_server, deny_pattern) {
+            debug!(
+                "Server {} matches deny pattern '{}' in room {}",
+                requesting_server, deny_pattern, room.room_id
+            );
+            return Ok(false);
+        }
+    }
+
+    // Check allow list
+    for allow_pattern in &allow_list {
+        if matches_server_pattern(requesting_server, allow_pattern) {
+            debug!(
+                "Server {} matches allow pattern '{}' in room {}",
+                requesting_server, allow_pattern, room.room_id
+            );
+            return Ok(true);
+        }
+    }
+
+    // If no allow patterns matched, deny access
+    debug!(
+        "Server {} does not match any allow patterns in room {}",
+        requesting_server, room.room_id
+    );
+    Ok(false)
+}
+
+/// Check if a server name is an IP literal
+fn is_ip_literal(server_name: &str) -> bool {
+    use std::net::IpAddr;
+
+    // Split server name to handle port numbers
+    let host_part = server_name.split(':').next().unwrap_or(server_name);
+
+    // Remove brackets for IPv6 literals
+    let host_clean = host_part.trim_start_matches('[').trim_end_matches(']');
+
+    // Try parsing as IP address
+    host_clean.parse::<IpAddr>().is_ok()
+}
+
+/// Check if a server name matches a Server ACL pattern
+///
+/// Implements Matrix Server ACL pattern matching:
+/// - '*' matches any sequence of characters
+/// - '?' matches any single character
+/// - Literal characters must match exactly
+fn matches_server_pattern(server_name: &str, pattern: &str) -> bool {
+    // Convert pattern to regex-like matching
+    let mut regex_pattern = String::new();
+    let chars = pattern.chars().peekable();
+
+    for ch in chars {
+        match ch {
+            '*' => regex_pattern.push_str(".*"),
+            '?' => regex_pattern.push('.'),
+            // Escape special regex characters
+            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' => {
+                regex_pattern.push('\\');
+                regex_pattern.push(ch);
+            }
+            _ => regex_pattern.push(ch),
+        }
+    }
+
+    // Use simple pattern matching for now - in production would use regex crate
+    // For simplicity, implement basic wildcard matching
+    simple_wildcard_match(server_name, pattern)
+}
+
+/// Simple wildcard pattern matching for Server ACL patterns
+fn simple_wildcard_match(text: &str, pattern: &str) -> bool {
+    let text_chars: Vec<char> = text.chars().collect();
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+
+    wildcard_match_recursive(&text_chars, &pattern_chars, 0, 0)
+}
+
+/// Recursive wildcard matching implementation
+fn wildcard_match_recursive(
+    text: &[char],
+    pattern: &[char],
+    text_idx: usize,
+    pattern_idx: usize
+) -> bool {
+    // Base cases
+    if pattern_idx == pattern.len() {
+        return text_idx == text.len();
+    }
+
+    if text_idx == text.len() {
+        // Check if remaining pattern is all '*'
+        return pattern[pattern_idx..].iter().all(|&c| c == '*');
+    }
+
+    match pattern[pattern_idx] {
+        '*' => {
+            // Try matching zero characters or more
+            wildcard_match_recursive(text, pattern, text_idx, pattern_idx + 1) ||
+            wildcard_match_recursive(text, pattern, text_idx + 1, pattern_idx)
+        },
+        '?' => {
+            // Match any single character
+            wildcard_match_recursive(text, pattern, text_idx + 1, pattern_idx + 1)
+        },
+        c if c == text[text_idx] => {
+            // Exact character match
+            wildcard_match_recursive(text, pattern, text_idx + 1, pattern_idx + 1)
+        },
+        _ => false, // No match
+    }
+}
+
+/// Additional room access validation for backfill requests
+///
+/// Performs Matrix specification-compliant validation of room access
+/// based on room properties and requesting server characteristics.
+fn validate_room_access_for_backfill(
+    room: &Room,
+    requesting_server: &str,
+) -> Result<(), StatusCode> {
+    // Validate room is not tombstoned (room version upgrade scenario)
+    if let Some(tombstone) = &room.tombstone
+        && tombstone.get("replacement_room").is_some() {
+        warn!(
+            "Room {} is tombstoned, denying backfill request from {}",
+            room.room_id, requesting_server
+        );
+        return Err(StatusCode::GONE); // HTTP 410 Gone for tombstoned rooms
+    }
+
+    // Validate room type restrictions for backfill
+    if let Some(room_type) = &room.room_type {
+        match room_type.as_str() {
+            "m.space" => {
+                // Spaces may have different backfill policies
+                debug!(
+                    "Backfill request for space room {} from server {}",
+                    room.room_id, requesting_server
+                );
+            },
+            other_type => {
+                // Unknown room types - be cautious but allow
+                debug!(
+                    "Backfill request for room type '{}' in room {} from server {}",
+                    other_type, room.room_id, requesting_server
+                );
+            }
+        }
+    }
+
+    // Validate history visibility for federation backfill
+    match room.history_visibility.as_deref() {
+        Some("world_readable") => {
+            // World readable rooms allow backfill from any server
+            debug!(
+                "World readable room {}, allowing backfill from {}",
+                room.room_id, requesting_server
+            );
+        },
+        Some("shared") | Some("invited") | Some("joined") | None => {
+            // These visibility levels require membership validation (handled elsewhere)
+            debug!(
+                "Room {} has visibility '{}', membership validation required",
+                room.room_id, room.history_visibility.as_deref().unwrap_or("default")
+            );
+        },
+        Some(unknown) => {
+            warn!(
+                "Unknown history visibility '{}' for room {}, allowing with caution",
+                unknown, room.room_id
+            );
+        }
+    }
+
+    debug!(
+        "Room access validation passed for backfill: room={}, server={}",
+        room.room_id, requesting_server
+    );
+    Ok(())
 }

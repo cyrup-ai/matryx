@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
+use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
 use matryx_entity::utils::canonical_json;
 use matryx_surrealdb::repository::InfrastructureService;
 
@@ -37,8 +38,11 @@ pub async fn get(
     // Create InfrastructureService instance
     let infrastructure_service = create_infrastructure_service(&state).await;
 
+    // Create ServerDiscoveryOrchestrator for Matrix DNS resolution
+    let server_discovery = ServerDiscoveryOrchestrator::new(state.dns_resolver.clone());
+
     // Fetch and sign server keys using repository
-    match fetch_server_keys(&infrastructure_service, &client, &server_name, &state.homeserver_name)
+    match fetch_server_keys(&infrastructure_service, &server_discovery, &client, &server_name, &state.homeserver_name)
         .await
     {
         Ok(server_keys) => {
@@ -79,17 +83,20 @@ async fn create_infrastructure_service(
 /// Fetch server keys from a specific server and sign them as a notary using repository
 async fn fetch_server_keys(
     infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
+    server_discovery: &ServerDiscoveryOrchestrator,
     client: &Client,
     server_name: &str,
     homeserver_name: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    // Fetch keys from the remote server's /_matrix/key/v2/server endpoint
-    let url = format!("https://{}/_matrix/key/v2/server", server_name);
+    // Resolve server using Matrix DNS resolution
+    let connection = server_discovery.discover_server(server_name).await?;
+    let url = format!("{}/_matrix/key/v2/server", connection.base_url);
     debug!("Fetching server keys from: {}", url);
 
     let response = client
         .get(&url)
         .header("User-Agent", "matryx-homeserver/1.0")
+        .header("Host", connection.host_header)
         .send()
         .await?;
 

@@ -494,4 +494,117 @@ impl KeyBackupRepository {
 
         Ok(backup_version.count == actual_count)
     }
+
+    /// Store room key with raw encrypted data (for legacy compatibility)
+    pub async fn store_room_key_raw(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+        session_id: &str,
+        encrypted_data: &serde_json::Value,
+    ) -> Result<(), RepositoryError> {
+        let query = r#"
+            CREATE room_key_backups CONTENT {
+                user_id: $user_id,
+                backup_version: $version,
+                room_id: $room_id,
+                session_id: $session_id,
+                encrypted_data: $encrypted_data,
+                created_at: time::now()
+            }
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("version", version.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("session_id", session_id.to_string()))
+            .bind(("encrypted_data", encrypted_data.clone()))
+            .await?;
+
+        // Update the count in the backup version
+        self.increment_backup_count(user_id, version).await?;
+
+        Ok(())
+    }
+
+    /// Get backup count for a specific version
+    pub async fn get_backup_count(
+        &self,
+        user_id: &str,
+        version: &str,
+    ) -> Result<u64, RepositoryError> {
+        let query = "SELECT count() AS count FROM room_key_backups WHERE user_id = $user_id AND backup_version = $version GROUP ALL";
+        let mut response = self
+            .db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("version", version.to_string()))
+            .await?;
+
+        #[derive(Deserialize)]
+        struct CountResult {
+            count: u64,
+        }
+
+        let result: Vec<CountResult> = response.take(0)?;
+        Ok(result.into_iter().next().map(|r| r.count).unwrap_or(0))
+    }
+
+    /// Get latest backup version string for user
+    pub async fn get_latest_backup_version_string(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<String>, RepositoryError> {
+        let query = "SELECT version FROM backup_version WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
+        let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
+
+        #[derive(Deserialize)]
+        struct VersionResult {
+            version: String,
+        }
+
+        let records: Vec<VersionResult> = result.take(0)?;
+        Ok(records.into_iter().next().map(|r| r.version))
+    }
+
+    /// Delete all room keys for a specific room and version
+    pub async fn delete_room_keys_for_room(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "DELETE FROM room_key_backups WHERE user_id = $user_id AND room_id = $room_id AND version = $version";
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("version", version.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get room keys for a specific room with raw data format
+    pub async fn get_room_keys_raw(
+        &self,
+        user_id: &str,
+        version: &str,
+        room_id: &str,
+    ) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        let query = "SELECT * FROM room_key_backups WHERE user_id = $user_id AND room_id = $room_id AND version = $version";
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("version", version.to_string()))
+            .await?;
+
+        let backups: Vec<serde_json::Value> = result.take(0)?;
+        Ok(backups)
+    }
 }

@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::federation::client::FederationClient;
+use crate::federation::membership_federation::validate_federation_join_allowed;
+use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
@@ -90,9 +92,8 @@ pub async fn put(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -188,19 +189,47 @@ pub async fn put(
             StatusCode::NOT_FOUND
         })?;
 
+    // Validate room state and membership constraints per Matrix specification
+    if room.room_version.as_str() < "6" {
+        debug!("Processing join for room {} with version {}", room_id, room.room_version);
+    }
+
+    // Ensure the room allows federation joins from this origin server
+    if !validate_federation_join_allowed(&room, &x_matrix_auth.origin) {
+        warn!(
+            "Federation join denied for server {} in room {} - federation restrictions apply",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    info!(
+        "Room validation passed for join request in room {} (version {}) from server {}",
+        room_id, room.room_version, x_matrix_auth.origin
+    );
+
     // Validate the PDU through the 6-step validation pipeline
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
     let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
     let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
-    let pdu_validator = PduValidator::new(
-        state.session_service.clone(),
-        event_repo.clone(),
-        room_repo.clone(),
-        federation_repo.clone(),
-        key_server_repo.clone(),
-        state.db.clone(),
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let federation_client = Arc::new(FederationClient::new(
+        state.http_client.clone(),
+        state.event_signer.clone(),
         state.homeserver_name.clone(),
-    );
+    ));
+    let pdu_validator = PduValidator::new(PduValidatorParams {
+        session_service: state.session_service.clone(),
+        event_repo: event_repo.clone(),
+        room_repo: room_repo.clone(),
+        membership_repo: membership_repo.clone(),
+        federation_repo: federation_repo.clone(),
+        key_server_repo: key_server_repo.clone(),
+        federation_client: federation_client.clone(),
+        dns_resolver: state.dns_resolver.clone(),
+        db: state.db.clone(),
+        homeserver_name: state.homeserver_name.clone(),
+    }).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Validate the join event PDU
     let validated_event = match pdu_validator.validate_pdu(&payload, &x_matrix_auth.origin).await {
@@ -264,18 +293,32 @@ pub async fn put(
     })?;
 
     // Get current room state (excluding the join event we just processed)
-    let room_state = get_room_state(&state, &room_id, Some(&stored_event.event_id))
+    let room_state_events = event_repo.get_room_current_state(&room_id, Some(&stored_event.event_id))
         .await
         .map_err(|e| {
             error!("Failed to get room state: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    // Convert events to JSON format for response
+    let room_state: Vec<Value> = room_state_events
+        .iter()
+        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
+        .collect();
+
     // Get auth chain for the current room state
-    let auth_chain = get_auth_chain(&state, &room_state).await.map_err(|e| {
-        error!("Failed to get auth chain: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let auth_chain_events = event_repo.get_auth_chain_for_events(&room_state_events)
+        .await
+        .map_err(|e| {
+            error!("Failed to get auth chain: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Convert auth chain events to JSON format for response
+    let auth_chain: Vec<Value> = auth_chain_events
+        .into_iter()
+        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
+        .collect();
 
     // Build response in the Matrix v1 format (array format)
     let response = json!([
@@ -344,95 +387,4 @@ async fn sign_join_event(
     Ok(event)
 }
 
-/// Get the current state of a room
-async fn get_room_state(
-    state: &AppState,
-    room_id: &str,
-    exclude_event_id: Option<&str>,
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut query = "
-        SELECT *
-        FROM event
-        WHERE room_id = $room_id
-        AND state_key IS NOT NULL
-        AND (
-            SELECT COUNT() 
-            FROM event e2 
-            WHERE e2.room_id = $room_id 
-            AND e2.type = event.type 
-            AND e2.state_key = event.state_key 
-            AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
-        ) = 0
-        ORDER BY type, state_key
-    ".to_string();
 
-    let mut bindings = vec![("room_id", room_id.to_string())];
-
-    if let Some(exclude_id) = exclude_event_id {
-        query = format!("{} AND event_id != $exclude_event_id", query);
-        bindings.push(("exclude_event_id", exclude_id.to_string()));
-    }
-
-    let mut response = state.db.query(&query).bind(("room_id", room_id.to_string()));
-
-    if let Some(exclude_id) = exclude_event_id {
-        response = response.bind(("exclude_event_id", exclude_id.to_string()));
-    }
-
-    let mut response = response.await?;
-
-    let events: Vec<Event> = response.take(0)?;
-
-    // Convert events to JSON format for response
-    let state_events: Vec<Value> = events
-        .into_iter()
-        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
-        .collect();
-
-    Ok(state_events)
-}
-
-/// Get the auth chain for a set of state events
-async fn get_auth_chain(
-    state: &AppState,
-    room_state: &[Value],
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut auth_event_ids = std::collections::HashSet::new();
-
-    // Collect all auth_events from the state
-    for state_event in room_state {
-        if let Some(auth_events) = state_event.get("auth_events").and_then(|v| v.as_array()) {
-            for auth_event in auth_events {
-                if let Some(auth_event_id) = auth_event.as_str() {
-                    auth_event_ids.insert(auth_event_id.to_string());
-                }
-            }
-        }
-    }
-
-    if auth_event_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Convert HashSet to Vec for query binding
-    let auth_ids: Vec<String> = auth_event_ids.into_iter().collect();
-
-    let query = "
-        SELECT *
-        FROM event
-        WHERE event_id IN $auth_event_ids
-        ORDER BY depth, origin_server_ts
-    ";
-
-    let mut response = state.db.query(query).bind(("auth_event_ids", auth_ids)).await?;
-
-    let events: Vec<Event> = response.take(0)?;
-
-    // Convert events to JSON format for response
-    let auth_chain: Vec<Value> = events
-        .into_iter()
-        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
-        .collect();
-
-    Ok(auth_chain)
-}

@@ -1,4 +1,4 @@
-use matryx_surrealdb::repository::{PushGatewayRepository, RepositoryError};
+use matryx_surrealdb::repository::PushGatewayRepository;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

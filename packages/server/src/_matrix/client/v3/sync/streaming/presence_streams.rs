@@ -4,6 +4,7 @@ use serde_json::json;
 
 use crate::state::AppState;
 use matryx_entity::sync::PresenceUpdate;
+use matryx_surrealdb::repository::PresenceRepository;
 
 use super::super::types::*;
 
@@ -15,19 +16,9 @@ pub async fn create_presence_live_stream(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     // Create LiveQuery for presence changes affecting this user's contacts
-    let mut stream = state
-        .db
-        .query(
-            r#"
-            LIVE SELECT * FROM presence_events
-            WHERE user_id IN (
-                SELECT VALUE target_user_id FROM user_relationships
-                WHERE user_id = $user_id AND relationship_type = 'friend'
-            )
-            OR user_id = $user_id
-        "#,
-        )
-        .bind(("user_id", user_id.clone()))
+    let presence_repo = PresenceRepository::new(state.db.clone());
+    let mut stream = presence_repo
+        .create_presence_live_query(&user_id)
         .await?;
 
     let sync_stream = stream.stream::<surrealdb::Notification<serde_json::Value>>(0)?

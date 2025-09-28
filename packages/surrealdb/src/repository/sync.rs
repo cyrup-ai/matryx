@@ -7,6 +7,47 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use crate::repository::RepositoryError;
 
+// Type alias for complex tuple types to satisfy clippy::type_complexity
+type ThreadSummaryTuple = (Option<Vec<String>>, Option<u64>, Option<u64>);
+
+// TASK14 SUBTASK 9: Add supporting types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub content: Value,
+    pub sender: String,
+    pub origin_server_ts: u64,
+    pub unsigned: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub content: Value,
+    pub sender: String,
+    pub origin_server_ts: u64,
+    pub state_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub content: Value,
+    pub sender: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountDataEvent {
+    pub account_data_type: String,
+    pub content: Value,
+}
+
+// Re-export PresenceEvent and PresenceState from presence module
+pub use crate::repository::presence::{PresenceEvent, PresenceState};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filter {
     pub room: Option<RoomFilter>,
@@ -355,8 +396,7 @@ impl SyncRepository {
         let state_events = self.get_room_state_events(room_id, since_position.as_ref()).await?;
         let timeline_events =
             self.get_room_timeline_events(room_id, since_position.as_ref()).await?;
-        let ephemeral_events =
-            self.get_room_ephemeral_events(room_id, since_position.as_ref()).await?;
+        let ephemeral_events = self.get_room_ephemeral_events_internal(room_id, since_position.as_ref()).await?;
         let account_data_events = self
             .get_room_account_data_events(user_id, room_id, since_position.as_ref())
             .await?;
@@ -737,56 +777,7 @@ impl SyncRepository {
         Ok(events)
     }
 
-    async fn get_room_ephemeral_events(
-        &self,
-        room_id: &str,
-        since: Option<&SyncPosition>,
-    ) -> Result<Vec<Value>, RepositoryError> {
-        // Build query with optional since timestamp for incremental sync
-        let ephemeral_query = if since.is_some() {
-            r#"
-                SELECT * FROM ephemeral_events 
-                WHERE room_id = $room_id AND timestamp > $since_timestamp
-                ORDER BY timestamp DESC 
-                LIMIT 10
-            "#
-        } else {
-            r#"
-                SELECT * FROM ephemeral_events 
-                WHERE room_id = $room_id 
-                ORDER BY timestamp DESC 
-                LIMIT 10
-            "#
-        };
 
-        let mut query_builder = self
-            .db
-            .query(ephemeral_query)
-            .bind(("room_id", room_id.to_string()));
-
-        // Add since timestamp if provided for incremental sync
-        if let Some(sync_pos) = since {
-            query_builder = query_builder.bind(("since_timestamp", sync_pos.timestamp));
-        }
-
-        let mut response = query_builder
-            .await
-            .map_err(|e| {
-                RepositoryError::DatabaseError {
-                    message: e.to_string(),
-                    operation: "get_room_ephemeral_events".to_string(),
-                }
-            })?;
-
-        let events: Vec<Value> = response.take(0).map_err(|e| {
-            RepositoryError::DatabaseError {
-                message: e.to_string(),
-                operation: "get_room_ephemeral_events_parse".to_string(),
-            }
-        })?;
-
-        Ok(events)
-    }
 
     async fn get_room_account_data_events(
         &self,
@@ -938,7 +929,7 @@ impl SyncRepository {
                 }
             })?;
 
-        let summaries: Vec<(Option<Vec<String>>, Option<u64>, Option<u64>)> =
+        let summaries: Vec<ThreadSummaryTuple> =
             response.take(0).map_err(|e| {
                 RepositoryError::DatabaseError {
                     message: e.to_string(),
@@ -961,4 +952,225 @@ impl SyncRepository {
         // Simple implementation - in practice this would be more sophisticated
         Ok(Utc::now().timestamp() as u64)
     }
+
+    // TASK14 SUBTASK 2: Add missing sync methods
+    
+    /// Get room member count for joined members
+    pub async fn get_room_member_count(&self, room_id: &str) -> Result<u32, RepositoryError> {
+        let query = "SELECT count() FROM membership WHERE room_id = $room_id AND membership = 'join' GROUP ALL";
+        
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_member_count".to_string(),
+            })?;
+
+        let count: Option<i64> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_member_count_parse".to_string(),
+        })?;
+
+        Ok(count.unwrap_or(0) as u32)
+    }
+
+    /// Get room invited member count
+    pub async fn get_room_invited_member_count(&self, room_id: &str) -> Result<u32, RepositoryError> {
+        let query = "SELECT count() FROM membership WHERE room_id = $room_id AND membership = 'invite' GROUP ALL";
+        
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_invited_member_count".to_string(),
+            })?;
+
+        let count: Option<i64> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_invited_member_count_parse".to_string(),
+        })?;
+
+        Ok(count.unwrap_or(0) as u32)
+    }
+
+    /// Get room ephemeral events with optional since token
+    pub async fn get_room_ephemeral_events(&self, room_id: &str, since: Option<&str>) -> Result<Vec<EphemeralEvent>, RepositoryError> {
+        let mut query_parts = vec![
+            "SELECT event_id, event_type, content, sender FROM events",
+            "WHERE room_id = $room_id AND (event_type LIKE 'm.typing%' OR event_type LIKE 'm.receipt%')"
+        ];
+
+        let mut bindings = vec![("room_id", room_id.to_string())];
+
+        // Add since filter if provided
+        if let Some(since_token) = since {
+            let since_position = self.parse_sync_token(since_token).await?;
+            query_parts.push("AND origin_server_ts > $since_timestamp");
+            bindings.push(("since_timestamp", since_position.timestamp.timestamp_millis().to_string()));
+        }
+
+        query_parts.push("ORDER BY origin_server_ts DESC LIMIT 10");
+        let final_query = query_parts.join(" ");
+        
+        let mut query_builder = self.db.query(final_query);
+        for (key, value) in bindings {
+            query_builder = query_builder.bind((key, value));
+        }
+        
+        let mut response = query_builder.await.map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_ephemeral_events".to_string(),
+        })?;
+
+        let events: Vec<(String, String, Value, String)> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_ephemeral_events_parse".to_string(),
+        })?;
+
+        let ephemeral_events = events.into_iter().map(|(event_id, event_type, content, sender)| {
+            EphemeralEvent {
+                event_id,
+                event_type,
+                content,
+                sender,
+            }
+        }).collect();
+
+        Ok(ephemeral_events)
+    }
+
+    // Internal method for compatibility with existing sync logic
+    async fn get_room_ephemeral_events_internal(
+        &self,
+        room_id: &str,
+        since: Option<&SyncPosition>,
+    ) -> Result<Vec<Value>, RepositoryError> {
+        // Build query with optional since timestamp for incremental sync
+        let ephemeral_query = if since.is_some() {
+            r#"
+                SELECT * FROM ephemeral_events 
+                WHERE room_id = $room_id AND timestamp > $since_timestamp
+                ORDER BY timestamp DESC 
+                LIMIT 10
+            "#
+        } else {
+            r#"
+                SELECT * FROM ephemeral_events 
+                WHERE room_id = $room_id 
+                ORDER BY timestamp DESC 
+                LIMIT 10
+            "#
+        };
+
+        let mut query_builder = self
+            .db
+            .query(ephemeral_query)
+            .bind(("room_id", room_id.to_string()));
+
+        // Add since timestamp if provided for incremental sync
+        if let Some(sync_pos) = since {
+            query_builder = query_builder.bind(("since_timestamp", sync_pos.timestamp));
+        }
+
+        let mut response = query_builder
+            .await
+            .map_err(|e| {
+                RepositoryError::DatabaseError {
+                    message: e.to_string(),
+                    operation: "get_room_ephemeral_events_internal".to_string(),
+                }
+            })?;
+
+        let events: Vec<Value> = response.take(0).map_err(|e| {
+            RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_ephemeral_events_internal_parse".to_string(),
+            }
+        })?;
+
+        Ok(events)
+    }
+
+    /// Get unread notification counts for a user in a room
+    pub async fn get_room_unread_notifications(&self, user_id: &str, room_id: &str) -> Result<UnreadNotificationCounts, RepositoryError> {
+        let query = r#"
+            SELECT 
+                SUM(CASE WHEN highlight = true THEN 1 ELSE 0 END) AS highlight_count,
+                COUNT(*) AS notification_count
+            FROM notifications 
+            WHERE user_id = $user_id AND room_id = $room_id AND read = false
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_unread_notifications".to_string(),
+            })?;
+
+        let counts: Vec<(Option<u64>, Option<u64>)> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_unread_notifications_parse".to_string(),
+        })?;
+
+        let (highlight_count, notification_count) = counts.first()
+            .map(|(h, n)| (*h, *n))
+            .unwrap_or((Some(0), Some(0)));
+
+        Ok(UnreadNotificationCounts {
+            highlight_count: Some(highlight_count.unwrap_or(0)),
+            notification_count: Some(notification_count.unwrap_or(0)),
+        })
+    }
+
+    /// Get room heroes (other prominent members for room summary)
+    pub async fn get_room_heroes(
+        &self,
+        room_id: &str,
+        current_user_id: &str,
+    ) -> Result<Vec<String>, RepositoryError> {
+        let query = r#"
+            SELECT user_id FROM membership
+            WHERE room_id = $room_id
+            AND membership = 'join'
+            AND user_id != $current_user_id
+            ORDER BY updated_at DESC
+            LIMIT 5
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("current_user_id", current_user_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_heroes".to_string(),
+            })?;
+
+        #[derive(serde::Deserialize)]
+        struct MemberInfo {
+            user_id: String,
+        }
+
+        let members: Vec<MemberInfo> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_heroes_parse".to_string(),
+        })?;
+
+        let heroes = members.into_iter().map(|m| m.user_id).collect();
+        Ok(heroes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    include!("sync_tests.rs");
 }

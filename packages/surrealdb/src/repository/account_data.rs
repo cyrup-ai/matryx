@@ -428,4 +428,48 @@ impl AccountDataRepository {
 
         Ok(sync_data)
     }
+
+    /// Check if user is a member of a room
+    pub async fn check_room_membership(
+        &self,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<bool, RepositoryError> {
+        let query = "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
+
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        let membership_rows: Vec<serde_json::Value> = result.take(0)?;
+        let is_member = membership_rows
+            .first()
+            .and_then(|row| row.get("membership"))
+            .and_then(|v| v.as_str())
+            .map(|membership| membership == "join" || membership == "invite")
+            .unwrap_or(false);
+
+        Ok(is_member)
+    }
+
+    /// Create a live query for account data changes for a specific user
+    pub async fn create_account_data_live_query(
+        &self,
+        user_id: &str,
+    ) -> Result<surrealdb::Response, RepositoryError> {
+        let query = r#"
+            LIVE SELECT * FROM account_data
+            WHERE user_id = $user_id
+        "#;
+
+        let response = self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        Ok(response)
+    }
 }

@@ -6,11 +6,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use uuid::Uuid;
 
-use crate::{AppState, auth::MatrixSessionService};
-use matryx_surrealdb::repository::ProfileManagementService;
+
+use crate::AppState;
+use matryx_surrealdb::repository::{ProfileManagementService, AccountDataRepository};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AccountData {
@@ -95,25 +94,11 @@ pub async fn set_room_account_data(
     }
 
     // Verify user is member of the room
-    let membership_query =
-        "SELECT membership FROM room_members WHERE room_id = $room_id AND user_id = $user_id";
-
-    let mut membership_result = state
-        .db
-        .query(membership_query)
-        .bind(("room_id", room_id.clone()))
-        .bind(("user_id", user_id.clone()))
+    let account_data_repo = AccountDataRepository::new(state.db.clone());
+    let is_member = account_data_repo
+        .check_room_membership(&room_id, &user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let membership_rows: Vec<HashMap<String, Value>> =
-        membership_result.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let is_member = membership_rows
-        .first()
-        .and_then(|row| row.get("membership"))
-        .and_then(|v| v.as_str())
-        .map(|membership| membership == "join" || membership == "invite")
-        .unwrap_or(false);
 
     if !is_member {
         return Err(StatusCode::FORBIDDEN);

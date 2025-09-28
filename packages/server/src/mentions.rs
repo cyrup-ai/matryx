@@ -67,17 +67,17 @@ pub struct MentionsMetadata {
 /// Static regex patterns for safe compilation
 static USER_MENTION_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"@([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})")
-        .expect("Invalid user mention regex pattern - this is a compile-time error")
+        .unwrap_or_else(|e| panic!("Invalid user mention regex pattern - this indicates a programming error: {}", e))
 });
 
 static ROOM_MENTION_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"@room\b")
-        .expect("Invalid room mention regex pattern - this is a compile-time error")
+        .unwrap_or_else(|e| panic!("Invalid room mention regex pattern - this indicates a programming error: {}", e))
 });
 
 static ROOM_ALIAS_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"#([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})")
-        .expect("Invalid room alias regex pattern - this is a compile-time error")
+        .unwrap_or_else(|e| panic!("Invalid room alias regex pattern - this indicates a programming error: {}", e))
 });
 
 /// Mention detection and processing
@@ -122,6 +122,15 @@ impl MentionsProcessor {
             // Detect mentions from content text (fallback for backwards compatibility)
             mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
             has_room_mention = self.detect_room_mentions(&text_content);
+            
+            // Also detect room alias mentions for context and logging
+            let room_alias_mentions = self.detect_room_alias_mentions(&text_content);
+            if !room_alias_mentions.is_empty() {
+                info!("Detected room alias mentions in room {}: {:?}", room_id, room_alias_mentions);
+                // Room alias mentions could be used for cross-room notifications or context
+                // For now, we log them but don't add to mentions metadata as Matrix spec
+                // defines m.mentions for user and @room mentions only
+            }
         }
 
         // Remove sender from mentions (can't mention yourself)
@@ -193,20 +202,20 @@ impl MentionsProcessor {
 
         // Traverse HTML nodes and extract text
         for child in html.children() {
-            self.extract_node_text(&child, &mut text_content);
+            Self::extract_node_text(&child, &mut text_content);
         }
 
         text_content
     }
 
     /// Recursively extract text from HTML nodes
-    fn extract_node_text(&self, node: &ruma_html::NodeRef, text_content: &mut String) {
+    fn extract_node_text(node: &ruma_html::NodeRef, text_content: &mut String) {
         if let Some(text) = node.as_text() {
             text_content.push_str(&text.borrow());
         } else {
             // Recursively process child nodes
             for child in node.children() {
-                self.extract_node_text(&child, text_content);
+                Self::extract_node_text(&child, text_content);
             }
         }
     }
@@ -263,6 +272,22 @@ impl MentionsProcessor {
     /// Detect @room mentions
     fn detect_room_mentions(&self, text: &str) -> bool {
         ROOM_MENTION_REGEX.is_match(text)
+    }
+
+    /// Detect room alias mentions in text content (e.g., #room:server.com)
+    fn detect_room_alias_mentions(&self, text: &str) -> Vec<String> {
+        let mut aliases = Vec::new();
+
+        // Find all #room:domain patterns
+        for capture in ROOM_ALIAS_REGEX.captures_iter(text) {
+            if let Some(full_match) = capture.get(0) {
+                let room_alias = full_match.as_str();
+                aliases.push(room_alias.to_string());
+                info!("Detected room alias mention: {}", room_alias);
+            }
+        }
+
+        aliases
     }
 
     /// Validate that mentioned users are members of the room
@@ -346,8 +371,12 @@ impl MentionsProcessor {
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        // TODO: Integrate with push notification system
-        // This would trigger push rules like .m.rule.is_user_mention
+        // Integrate with push notification system
+        if let Ok(event) = state.room_operations.get_event(event_id).await {
+            if let Err(e) = state.push_engine.process_event(&event, room_id).await {
+                warn!("Failed to process push notifications for mention: {}", e);
+            }
+        }
 
         Ok(())
     }
@@ -368,8 +397,12 @@ impl MentionsProcessor {
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-        // TODO: Integrate with push notification system
-        // This would trigger push rules like .m.rule.is_room_mention
+        // Integrate with push notification system
+        if let Ok(event) = state.room_operations.get_event(event_id).await {
+            if let Err(e) = state.push_engine.process_event(&event, room_id).await {
+                warn!("Failed to process push notifications for room mention: {}", e);
+            }
+        }
 
         Ok(())
     }

@@ -1,2 +1,2 @@
-pub mod register;
-pub use register::post_register as post;
+pub mod handlers;
+pub use handlers::post_register as post;

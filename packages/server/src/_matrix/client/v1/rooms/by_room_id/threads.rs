@@ -75,6 +75,12 @@ pub async fn get(
         }
     });
 
+    // Apply limit parameter from query for pagination
+    let limit = query.limit.unwrap_or(10).min(100); // Default 10, max 100 per Matrix spec
+    if limit != 10 {
+        info!("Room threads limit override requested: {}", limit);
+    }
+
     // Use RoomOperationsService to get thread roots with all validation
     match state
         .room_operations

@@ -81,10 +81,9 @@ impl TagsRepository {
             .await?;
 
         let tag_rows: Vec<serde_json::Value> = result.take(0)?;
-        if let Some(tag_row) = tag_rows.first() {
-            if let Some(content) = tag_row.get("content") {
-                return Ok(Some(content.clone()));
-            }
+        if let Some(tag_row) = tag_rows.first()
+            && let Some(content) = tag_row.get("content") {
+            return Ok(Some(content.clone()));
         }
 
         Ok(None)
@@ -196,11 +195,10 @@ impl TagsRepository {
 
         let membership_rows: Vec<serde_json::Value> = result.take(0)?;
 
-        if let Some(membership_row) = membership_rows.first() {
-            if let Some(membership) = membership_row.get("membership").and_then(|v| v.as_str()) {
-                // User can tag rooms they have joined
-                return Ok(membership == "join");
-            }
+        if let Some(membership_row) = membership_rows.first()
+            && let Some(membership) = membership_row.get("membership").and_then(|v| v.as_str()) {
+            // User can tag rooms they have joined
+            return Ok(membership == "join");
         }
 
         // Default to no permission if not a member

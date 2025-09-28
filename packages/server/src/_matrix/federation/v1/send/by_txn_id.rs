@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use base64::Engine;
+
 use chrono::Utc;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -11,13 +11,15 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::MatrixAuthError;
-use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::federation::client::FederationClient;
+use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::state::AppState;
 use matryx_surrealdb::repository::{
     DeviceRepository,
     EventRepository,
     FederationRepository,
     KeyServerRepository,
+    MembershipRepository,
     RoomRepository,
     TransactionRepository,
     UserRepository,
@@ -25,7 +27,7 @@ use matryx_surrealdb::repository::{
 
 /// Matrix X-Matrix authentication header parsed structure with comprehensive validation
 #[derive(Debug, Clone)]
-struct XMatrixAuth {
+pub struct XMatrixAuth {
     origin: String,
     key_id: String, // Full key_id including algorithm prefix (e.g., "ed25519:abc123")
     signature: String,
@@ -128,11 +130,10 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
     let destination = params.get("destination").cloned();
 
     // Validate destination if present
-    if let Some(dest) = &destination {
-        if !is_valid_server_name(dest) {
-            warn!("Invalid destination server name format: {}", dest);
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    if let Some(dest) = &destination
+        && !is_valid_server_name(dest) {
+        warn!("Invalid destination server name format: {}", dest);
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     debug!(
@@ -237,7 +238,7 @@ fn parse_quoted_string(quoted_content: &str) -> Result<String, String> {
 /// 2. Construct canonical request string for signature verification
 /// 3. Verify Ed25519 signature using server's public key
 /// 4. Handle key caching and expiration
-async fn verify_server_signature(
+pub async fn verify_server_signature(
     state: &AppState,
     x_matrix_auth: &XMatrixAuth,
     method: &str,
@@ -247,7 +248,7 @@ async fn verify_server_signature(
 ) -> Result<(), MatrixAuthError> {
     use base64::{Engine as _, engine::general_purpose};
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    use sha2::{Digest, Sha256};
+
 
     debug!(
         "Verifying server signature from {} using key {}",
@@ -366,7 +367,7 @@ fn construct_canonical_request(
 /// Valid formats:
 /// - domain.com
 /// - domain.com:8008
-/// - [::1]:8008 (IPv6)
+/// - [::1][]:8008 (IPv6)
 /// - 192.168.1.1:8008 (IPv4)
 fn is_valid_server_name(server_name: &str) -> bool {
     if server_name.is_empty() {
@@ -422,9 +423,8 @@ pub async fn put(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -454,7 +454,7 @@ pub async fn put(
     }
 
     // Comprehensive Matrix server signature verification according to Matrix specification
-    let signature_validation_result = verify_server_signature(
+    verify_server_signature(
         &state,
         &x_matrix_auth,
         "PUT",
@@ -512,18 +512,27 @@ pub async fn put(
     // Process PDUs through the 6-step validation pipeline
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
     let federation_repo = Arc::new(FederationRepository::new(state.db.clone()));
     let key_server_repo = Arc::new(KeyServerRepository::new(state.db.clone()));
-    let pdu_validator = PduValidator::new(
-        state.session_service.clone(),
-        event_repo.clone(),
-        room_repo.clone(),
-        federation_repo.clone(),
-        key_server_repo.clone(),
-        state.db.clone(),
+    let federation_client = Arc::new(FederationClient::new(
+        state.http_client.clone(),
+        state.event_signer.clone(),
         state.homeserver_name.clone(),
-    );
+    ));
+    let params = PduValidatorParams {
+        session_service: state.session_service.clone(),
+        event_repo: event_repo.clone(),
+        room_repo: room_repo.clone(),
+        membership_repo: membership_repo.clone(),
+        federation_repo: federation_repo.clone(),
+        key_server_repo: key_server_repo.clone(),
+        federation_client: federation_client.clone(),
+        dns_resolver: state.dns_resolver.clone(),
+        db: state.db.clone(),
+        homeserver_name: state.homeserver_name.clone(),
+    };
+    let pdu_validator = PduValidator::new(params).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut pdu_results = HashMap::new();
     let mut processed_events = Vec::new();
@@ -790,49 +799,15 @@ async fn process_typing_edu(
         },
     }
 
+    let federation_repo = FederationRepository::new(state.db.clone());
+    federation_repo
+        .process_typing_edu(room_id, user_id, origin_server, typing)
+        .await
+        .map_err(|e| format!("Failed to process typing EDU: {}", e))?;
+
     if typing {
-        // User started typing - create/update typing event with timeout
-        let expires_at = Utc::now() + chrono::Duration::seconds(30); // 30 second timeout
-
-        let query = "
-            BEGIN;
-            DELETE typing_events WHERE room_id = $room_id AND user_id = $user_id;
-            CREATE typing_events SET
-                room_id = $room_id,
-                user_id = $user_id,
-                server_name = $server_name,
-                started_at = $started_at,
-                expires_at = $expires_at;
-            COMMIT;
-        ";
-
-        let _response = state
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .bind(("server_name", origin_server.to_string()))
-            .bind(("started_at", Utc::now()))
-            .bind(("expires_at", expires_at))
-            .await
-            .map_err(|e| format!("Failed to store typing start EDU: {}", e))?;
-
-        debug!("User {} started typing in room {} (expires: {})", user_id, room_id, expires_at);
+        debug!("User {} started typing in room {}", user_id, room_id);
     } else {
-        // User stopped typing - remove typing event
-        let query = "
-            DELETE typing_events 
-            WHERE room_id = $room_id AND user_id = $user_id
-        ";
-
-        let _response = state
-            .db
-            .query(query)
-            .bind(("room_id", room_id.to_string()))
-            .bind(("user_id", user_id.to_string()))
-            .await
-            .map_err(|e| format!("Failed to remove typing stop EDU: {}", e))?;
-
         debug!("User {} stopped typing in room {}", user_id, room_id);
     }
 
@@ -899,35 +874,18 @@ async fn process_receipt_edu(
                     let timestamp = user_receipt
                         .get("ts")
                         .and_then(|v| v.as_i64())
-                        .map(|ts| chrono::DateTime::from_timestamp_millis(ts))
-                        .flatten()
+                        .and_then(chrono::DateTime::from_timestamp_millis)
                         .unwrap_or_else(Utc::now);
 
-                    let query = "
-                        CREATE receipts SET
-                            room_id = $room_id,
-                            user_id = $user_id,
-                            event_id = $event_id,
-                            receipt_type = $receipt_type,
-                            thread_id = $thread_id,
-                            timestamp = $timestamp,
-                            is_private = $is_private,
-                            server_name = $server_name,
-                            received_at = $received_at
-                    ";
-
-                    let _response = state
-                        .db
-                        .query(query)
-                        .bind(("room_id", room_id.to_string()))
-                        .bind(("user_id", user_id.to_string()))
-                        .bind(("event_id", event_id.to_string()))
-                        .bind(("receipt_type", receipt_type.to_string()))
-                        .bind(("thread_id", thread_id.clone()))
-                        .bind(("timestamp", timestamp))
-                        .bind(("is_private", is_private))
-                        .bind(("server_name", origin_server.to_string()))
-                        .bind(("received_at", Utc::now()))
+                    let federation_repo = FederationRepository::new(state.db.clone());
+                    federation_repo
+                        .process_receipt_edu(
+                            room_id,
+                            user_id,
+                            event_id,
+                            receipt_type,
+                            timestamp.timestamp_millis(),
+                        )
                         .await
                         .map_err(|e| format!("Failed to store receipt EDU: {}", e))?;
 
@@ -995,27 +953,15 @@ async fn process_presence_edu(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let query = "
-            CREATE presence_events SET
-                user_id = $user_id,
-                presence = $presence,
-                status_msg = $status_msg,
-                last_active_ago = $last_active_ago,
-                currently_active = $currently_active,
-                server_name = $server_name,
-                updated_at = $updated_at
-        ";
-
-        let _response = state
-            .db
-            .query(query)
-            .bind(("user_id", user_id.to_string()))
-            .bind(("presence", presence.to_string()))
-            .bind(("status_msg", status_msg))
-            .bind(("last_active_ago", last_active_ago.map(|v| v as i64)))
-            .bind(("currently_active", currently_active))
-            .bind(("server_name", origin_server.to_string()))
-            .bind(("updated_at", Utc::now()))
+        let federation_repo = FederationRepository::new(state.db.clone());
+        federation_repo
+            .process_presence_edu(
+                user_id,
+                presence,
+                status_msg.as_deref(),
+                last_active_ago.map(|v| v as i64),
+                currently_active,
+            )
             .await
             .map_err(|e| format!("Failed to store presence EDU: {}", e))?;
 
@@ -1056,8 +1002,7 @@ async fn process_device_list_edu(
     let prev_id = content
         .get("prev_id")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<i64>>())
-        .unwrap_or_default();
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<i64>>());
 
     let deleted = content.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1066,33 +1011,19 @@ async fn process_device_list_edu(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let keys = content.get("keys").map(|v| v.clone());
+    let keys = content.get("keys").cloned();
 
-    let query = "
-        CREATE device_list_updates SET
-            user_id = $user_id,
-            device_id = $device_id,
-            stream_id = $stream_id,
-            prev_id = $prev_id,
-            deleted = $deleted,
-            device_display_name = $device_display_name,
-            keys = $keys,
-            server_name = $server_name,
-            received_at = $received_at
-    ";
-
-    let _response = state
-        .db
-        .query(query)
-        .bind(("user_id", user_id.to_string()))
-        .bind(("device_id", device_id.to_string()))
-        .bind(("stream_id", stream_id))
-        .bind(("prev_id", prev_id))
-        .bind(("deleted", deleted))
-        .bind(("device_display_name", device_display_name))
-        .bind(("keys", keys))
-        .bind(("server_name", origin_server.to_string()))
-        .bind(("received_at", Utc::now()))
+    let federation_repo = FederationRepository::new(state.db.clone());
+    federation_repo
+        .process_device_list_edu(matryx_surrealdb::repository::federation::ProcessDeviceListEduParams {
+            user_id: user_id.to_string(),
+            device_id: device_id.to_string(),
+            stream_id,
+            deleted,
+            prev_id,
+            device_display_name,
+            keys,
+        })
         .await
         .map_err(|e| format!("Failed to store device list EDU: {}", e))?;
 
@@ -1161,7 +1092,8 @@ async fn process_cross_signing_key(
         .and_then(|v| v.as_object())
         .ok_or(format!("Missing or invalid keys in {} key", key_type))?;
 
-    let signatures = key_data.get("signatures").and_then(|v| v.as_object()).cloned();
+    let signatures = key_data.get("signatures").and_then(|v| v.as_object()).cloned()
+        .map(|s| serde_json::to_value(s).unwrap_or_default());
 
     let usage = key_data
         .get("usage")
@@ -1176,20 +1108,20 @@ async fn process_cross_signing_key(
     match key_type {
         "master" => {
             if !usage.contains(&"master".to_string()) {
-                return Err(format!("Master key must have 'master' in usage array").into());
+                return Err("Master key must have 'master' in usage array".to_string().into());
             }
         },
         "self_signing" => {
             if !usage.contains(&"self_signing".to_string()) {
                 return Err(
-                    format!("Self-signing key must have 'self_signing' in usage array").into()
+                    "Self-signing key must have 'self_signing' in usage array".to_string().into()
                 );
             }
         },
         "user_signing" => {
             if !usage.contains(&"user_signing".to_string()) {
                 return Err(
-                    format!("User-signing key must have 'user_signing' in usage array").into()
+                    "User-signing key must have 'user_signing' in usage array".to_string().into()
                 );
             }
         },
@@ -1197,28 +1129,14 @@ async fn process_cross_signing_key(
     }
 
     // Store or update the cross-signing key
-    let query = "
-        BEGIN;
-        DELETE cross_signing_keys WHERE user_id = $user_id AND key_type = $key_type;
-        CREATE cross_signing_keys SET
-            user_id = $user_id,
-            key_type = $key_type,
-            keys = $keys,
-            signatures = $signatures,
-            usage = $usage,
-            updated_at = $updated_at;
-        COMMIT;
-    ";
-
-    let _response = state
-        .db
-        .query(query)
-        .bind(("user_id", user_id.to_string()))
-        .bind(("key_type", key_type.to_string()))
-        .bind(("keys", serde_json::to_value(keys)?))
-        .bind(("signatures", serde_json::to_value(signatures)?))
-        .bind(("usage", usage))
-        .bind(("updated_at", Utc::now()))
+    let federation_repo = FederationRepository::new(state.db.clone());
+    federation_repo
+        .process_signing_key_update_edu(
+            user_id,
+            key_type,
+            serde_json::to_value(keys)?,
+            signatures,
+        )
         .await
         .map_err(|e| {
             format!("Failed to store {} cross-signing key for {}: {}", key_type, user_id, e)
@@ -1265,27 +1183,7 @@ async fn process_direct_to_device_edu(
         messages.len()
     );
 
-    // Check for duplicate message_id to ensure idempotence
-    let duplicate_check = "
-        SELECT message_id 
-        FROM to_device_messages 
-        WHERE message_id = $message_id AND origin_server = $origin
-        LIMIT 1
-    ";
-
-    let mut duplicate_result = state
-        .db
-        .query(duplicate_check)
-        .bind(("message_id", message_id.to_string()))
-        .bind(("origin", origin.to_string()))
-        .await?;
-
-    let existing_messages: Vec<serde_json::Value> = duplicate_result.take(0)?;
-
-    if !existing_messages.is_empty() {
-        debug!("Duplicate direct-to-device message ignored: {}", message_id);
-        return Ok(());
-    }
+    let federation_repo = FederationRepository::new(state.db.clone());
 
     // Process messages for each user
     for (user_id, user_devices) in messages {
@@ -1318,17 +1216,19 @@ async fn process_direct_to_device_edu(
                 match device_repo.get_all_user_devices(user_id).await {
                     Ok(user_devices) => {
                         for device in user_devices {
-                            store_to_device_message(
-                                state,
-                                message_id,
-                                origin,
-                                sender,
-                                event_type,
-                                user_id,
-                                &device.device_id,
-                                message_content,
-                            )
-                            .await?;
+                            federation_repo
+                                .process_direct_to_device_edu(
+                                    matryx_surrealdb::repository::federation::DirectToDeviceEduParams {
+                                        message_id,
+                                        origin,
+                                        sender,
+                                        message_type: event_type,
+                                        content: message_content.clone(),
+                                        target_user_id: user_id,
+                                        target_device_id: Some(&device.device_id),
+                                    }
+                                )
+                                .await?;
                         }
                     },
                     Err(e) => {
@@ -1355,17 +1255,19 @@ async fn process_direct_to_device_edu(
                     },
                 }
 
-                store_to_device_message(
-                    state,
-                    message_id,
-                    origin,
-                    sender,
-                    event_type,
-                    user_id,
-                    device_id,
-                    message_content,
-                )
-                .await?;
+                federation_repo
+                    .process_direct_to_device_edu(
+                        matryx_surrealdb::repository::federation::DirectToDeviceEduParams {
+                            message_id,
+                            origin,
+                            sender,
+                            message_type: event_type,
+                            content: message_content.clone(),
+                            target_user_id: user_id,
+                            target_device_id: Some(device_id),
+                        }
+                    )
+                    .await?;
             }
         }
     }
@@ -1374,50 +1276,4 @@ async fn process_direct_to_device_edu(
     Ok(())
 }
 
-/// Store a to-device message in the database
-async fn store_to_device_message(
-    state: &AppState,
-    message_id: &str,
-    origin: &str,
-    sender: &str,
-    event_type: &str,
-    user_id: &str,
-    device_id: &str,
-    content: &serde_json::Value,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        CREATE to_device_messages SET
-            message_id = $message_id,
-            origin_server = $origin,
-            sender = $sender,
-            event_type = $event_type,
-            user_id = $user_id,
-            device_id = $device_id,
-            content = $content,
-            received_at = $received_at,
-            delivered = false
-    ";
 
-    let _response = state
-        .db
-        .query(query)
-        .bind(("message_id", message_id.to_string()))
-        .bind(("origin", origin.to_string()))
-        .bind(("sender", sender.to_string()))
-        .bind(("event_type", event_type.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .bind(("device_id", device_id.to_string()))
-        .bind(("content", content.clone()))
-        .bind(("received_at", Utc::now()))
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to store to-device message {} for {}:{}: {}",
-                message_id, user_id, device_id, e
-            )
-        })?;
-
-    debug!("Stored to-device message {} for user {} device {}", message_id, user_id, device_id);
-
-    Ok(())
-}

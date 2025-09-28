@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use serde_json::Value;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -14,9 +14,8 @@ use matryx_entity::types::{
     SpaceHierarchyChildRoomsChunk,
     SpaceHierarchyParentRoom,
     SpaceHierarchyResponse,
-    StrippedStateEvent,
 };
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -96,9 +95,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<SpaceHierarchyResponse>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!("Space hierarchy request - origin: {}, room: {}", x_matrix_auth.origin, room_id);
@@ -175,102 +173,36 @@ async fn check_space_access_permission(
     room: &Room,
     requesting_server: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let membership_repo = MembershipRepository::new(state.db.clone());
+    let event_repo = EventRepository::new(state.db.clone());
+
     // Check if the requesting server has any users in the room (current or historical)
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        LIMIT 1
-    ";
-
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
+    let has_users = membership_repo
+        .has_server_users_in_room(&room.room_id, requesting_server)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     if has_users {
         return Ok(true);
     }
 
     // Check if space is world-readable or publicly joinable
-    let world_readable = is_room_world_readable(state, &room.room_id).await?;
-    let publicly_joinable = is_room_publicly_joinable(state, &room.room_id).await?;
+    let world_readable = event_repo
+        .get_room_history_visibility(&room.room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        == "world_readable";
+
+    let publicly_joinable = event_repo
+        .get_room_join_rules(&room.room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        == "public";
 
     Ok(world_readable || publicly_joinable)
 }
 
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
-
-/// Check if a room is publicly joinable
-async fn is_room_publicly_joinable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.join_rule
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.join_rules'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct JoinRules {
-        join_rule: Option<String>,
-    }
-
-    let join_rules: Option<JoinRules> = response.take(0)?;
-    let join_rule = join_rules
-        .and_then(|j| j.join_rule)
-        .unwrap_or_else(|| "invite".to_string());
-
-    Ok(join_rule == "public")
-}
 
 /// Get space hierarchy for a room
 async fn get_space_hierarchy(
@@ -297,26 +229,16 @@ async fn get_room_hierarchy_info(
     room_id: &str,
     _requesting_server: &str,
 ) -> Result<SpaceHierarchyParentRoom, Box<dyn std::error::Error + Send + Sync>> {
+    let event_repo = EventRepository::new(state.db.clone());
+    let membership_repo = MembershipRepository::new(state.db.clone());
+
     // Get room metadata from state events
-    let query = "
-        SELECT type, state_key, content
-        FROM event
-        WHERE room_id = $room_id
-        AND type IN ['m.room.name', 'm.room.topic', 'm.room.avatar', 'm.room.canonical_alias', 'm.room.join_rules', 'm.room.history_visibility', 'm.room.guest_access', 'm.room.create']
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-    ";
+    let event_types = &["m.room.name", "m.room.topic", "m.room.avatar", "m.room.canonical_alias", "m.room.join_rules", "m.room.history_visibility", "m.room.guest_access", "m.room.create"];
+    let events = event_repo
+        .get_room_state_by_types(room_id, event_types)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct StateEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        content: Value,
-    }
-
-    let events: Vec<StateEvent> = response.take(0)?;
     let mut room_data = HashMap::new();
 
     // Process state events to extract room metadata
@@ -377,7 +299,10 @@ async fn get_room_hierarchy_info(
     }
 
     // Get member count
-    let member_count = get_room_member_count(state, room_id).await?;
+    let member_count = membership_repo
+        .get_member_count(room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(SpaceHierarchyParentRoom {
         room_id: room_id.to_string(),
@@ -397,28 +322,7 @@ async fn get_room_hierarchy_info(
     })
 }
 
-/// Get member count for a room
-async fn get_room_member_count(
-    state: &AppState,
-    room_id: &str,
-) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND membership = 'join'
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    Ok(count_result.map(|c| c.count).unwrap_or(0))
-}
 
 /// Get child rooms for a space
 async fn get_space_children(
@@ -426,29 +330,18 @@ async fn get_space_children(
     room_id: &str,
     requesting_server: &str,
 ) -> Result<Vec<SpaceHierarchyChildRoomsChunk>, Box<dyn std::error::Error + Send + Sync>> {
+    let event_repo = EventRepository::new(state.db.clone());
+
     // Get m.space.child events
-    let query = "
-        SELECT state_key, content
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.space.child'
-        AND state_key != ''
-        ORDER BY depth DESC, origin_server_ts DESC
-    ";
+    let child_events = event_repo
+        .get_space_child_events(room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct SpaceChildEvent {
-        state_key: String,
-        content: Value,
-    }
-
-    let child_events: Vec<SpaceChildEvent> = response.take(0)?;
     let mut children = Vec::new();
 
     for child_event in child_events {
-        let child_room_id = child_event.state_key;
+        let child_room_id = child_event.state_key.unwrap_or_default();
 
         // Check if child room exists and is accessible
         if let Ok(child_room_info) =
@@ -467,26 +360,16 @@ async fn get_child_room_info(
     room_id: &str,
     _requesting_server: &str,
 ) -> Result<SpaceHierarchyChildRoomsChunk, Box<dyn std::error::Error + Send + Sync>> {
+    let event_repo = EventRepository::new(state.db.clone());
+    let membership_repo = MembershipRepository::new(state.db.clone());
+
     // Get room metadata from state events
-    let query = "
-        SELECT type, state_key, content
-        FROM event
-        WHERE room_id = $room_id
-        AND type IN ['m.room.name', 'm.room.topic', 'm.room.avatar', 'm.room.canonical_alias', 'm.room.join_rules', 'm.room.history_visibility', 'm.room.guest_access', 'm.room.create']
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-    ";
+    let event_types = &["m.room.name", "m.room.topic", "m.room.avatar", "m.room.canonical_alias", "m.room.join_rules", "m.room.history_visibility", "m.room.guest_access", "m.room.create"];
+    let events = event_repo
+        .get_room_state_by_types(room_id, event_types)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct StateEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        content: Value,
-    }
-
-    let events: Vec<StateEvent> = response.take(0)?;
     let mut room_data = HashMap::new();
 
     // Process state events to extract room metadata
@@ -547,7 +430,10 @@ async fn get_child_room_info(
     }
 
     // Get member count
-    let member_count = get_room_member_count(state, room_id).await?;
+    let member_count = membership_repo
+        .get_member_count(room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(SpaceHierarchyChildRoomsChunk {
         room_id: room_id.to_string(),

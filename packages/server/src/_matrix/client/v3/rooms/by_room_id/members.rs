@@ -113,8 +113,8 @@ pub async fn get(
     }
 
     // Convert query parameters to appropriate types
-    let membership_filter = query.membership.map(|s| MembershipState::from(s));
-    let not_membership_filter = query.not_membership.map(|s| MembershipState::from(s));
+    let membership_filter = query.membership.map(MembershipState::from);
+    let not_membership_filter = query.not_membership.map(MembershipState::from);
 
     // Use RoomOperationsService to get room members with Matrix spec compliance
     match state

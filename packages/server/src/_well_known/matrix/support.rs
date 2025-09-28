@@ -7,17 +7,17 @@
 use crate::config::{ServerConfig, SupportConfig};
 use axum::{http::StatusCode, response::Json};
 use serde_json::{Value, json};
-use std::env;
+
 use tracing::{error, warn};
 
 /// Matrix server support information
 /// Returns JSON object with administrator contact information and support page URL
 pub async fn get() -> Result<Json<Value>, StatusCode> {
     // Get configuration from centralized ServerConfig
-    let server_config = match std::panic::catch_unwind(|| ServerConfig::get()) {
+    let server_config = match ServerConfig::get() {
         Ok(config) => config,
-        Err(_) => {
-            error!("Failed to get server configuration for support endpoint");
+        Err(e) => {
+            error!("Failed to get server configuration for support endpoint: {:?}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };

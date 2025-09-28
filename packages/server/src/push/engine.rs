@@ -4,7 +4,7 @@ use crate::{
         gateway::{
             NotificationCounts,
             NotificationData,
-            PushDeviceInfo,
+
             PushError,
             PushGateway,
             PushNotification,
@@ -12,10 +12,10 @@ use crate::{
         rules::PushRuleEngine,
     },
 };
-use matryx_entity::{PDU, Pusher, PusherData};
+use matryx_entity::{PDU, Pusher};
 use matryx_surrealdb::repository::PusherRepository;
+use matryx_surrealdb::repository::notification::NotificationRepository;
 use matryx_surrealdb::repository::push_service::{
-    Event as PushEvent,
     PushAction,
     PushCleanupResult,
     PushReceipt,
@@ -24,12 +24,12 @@ use matryx_surrealdb::repository::push_service::{
 };
 use matryx_surrealdb::repository::pusher::RoomMember as PusherRoomMember;
 use moka::future::Cache;
-use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use surrealdb::engine::any::Any;
-use surrealdb::{Surreal, engine::local::Db};
+use surrealdb::Surreal;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -94,7 +94,7 @@ impl PushEngine {
         db: Arc<Surreal<Any>>,
         cache_config: PushCacheConfig,
     ) -> Result<Self, PushError> {
-        let rule_engine = PushRuleEngine::new(db.as_ref().clone().into());
+        let rule_engine = PushRuleEngine::new(db.as_ref().clone());
 
         // Configure high-performance cache with TTL and capacity limits
         let gateways = Cache::builder()
@@ -112,7 +112,7 @@ impl PushEngine {
             .map_err(PushError::HttpError)?;
 
         let pusher_repository = PusherRepository::new(db.as_ref().clone());
-        let push_service = PushService::new(db.as_ref().clone().into());
+        let push_service = PushService::new(db.as_ref().clone());
 
         Ok(Self {
             rule_engine,
@@ -200,17 +200,30 @@ impl PushEngine {
     pub async fn process_event(&self, event: &PDU, room_id: &str) -> Result<(), PushError> {
         info!("Processing push notifications for event {} in room {}", event.event_id, room_id);
 
-        // Convert PDU to PushEvent
-        let push_event = PushEvent {
+        // Convert PDU to Event for push processing
+        let matrix_event = matryx_entity::types::Event {
             event_id: event.event_id.clone(),
-            event_type: event.event_type.clone(),
             sender: event.sender.clone(),
-            content: serde_json::to_value(&event.content)?,
+            origin_server_ts: event.origin_server_ts,
+            event_type: event.event_type.clone(),
+            room_id: event.room_id.clone(),
+            content: event.content.clone(),
             state_key: event.state_key.clone(),
+            unsigned: event.unsigned.as_ref().map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null)),
+            auth_events: Some(event.auth_events.clone()),
+            depth: Some(event.depth),
+            hashes: Some(event.hashes.clone()),
+            prev_events: Some(event.prev_events.clone()),
+            signatures: Some(event.signatures.clone()),
+            soft_failed: None,
+            received_ts: None,
+            outlier: None,
+            redacts: None, // PDU doesn't have redacts field
+            rejected_reason: None,
         };
 
         // Use PushService to process the event
-        match self.push_service.process_event_for_push(&push_event, room_id).await {
+        match self.push_service.process_event_for_push(&matrix_event, room_id).await {
             Ok(notifications) => {
                 info!(
                     "Generated {} push notifications for event {}",
@@ -365,9 +378,21 @@ impl PushEngine {
         &self,
         user_id: &str,
     ) -> Result<NotificationCounts, PushError> {
-        // This would query the database for unread counts
-        // For now, return default counts
-        Ok(NotificationCounts { unread: Some(1), missed_calls: None })
+        // Create notification repository to query unread counts
+        let notification_repo = NotificationRepository::new(self.db.as_ref().clone());
+        
+        // Get total unread notification count for user
+        let unread_count = notification_repo
+            .get_notification_count(user_id, None)
+            .await
+            .map_err(PushError::RepositoryError)?;
+        
+        // For now, missed_calls would require additional logic to count call-related notifications
+        // This could be implemented by filtering notifications by type in the future
+        Ok(NotificationCounts { 
+            unread: Some(unread_count), 
+            missed_calls: None 
+        })
     }
 
     async fn get_room_name(&self, room_id: &str) -> Result<String, PushError> {

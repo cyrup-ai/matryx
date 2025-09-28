@@ -435,12 +435,10 @@ impl RoomKeysRepository {
 
         let versions: Vec<Value> = result.take(0)?;
 
-        if let Some(version_data) = versions.first() {
-            if let Some(version_str) = version_data.get("version").and_then(|v| v.as_str()) {
-                if let Ok(version_num) = version_str.parse::<u32>() {
-                    return Ok(version_num + 1);
-                }
-            }
+        if let Some(version_data) = versions.first()
+            && let Some(version_str) = version_data.get("version").and_then(|v| v.as_str())
+            && let Ok(version_num) = version_str.parse::<u32>() {
+            return Ok(version_num + 1);
         }
 
         // Start with version 1 if no versions exist

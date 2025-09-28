@@ -4,7 +4,7 @@
 //! according to the Matrix specification. Provides production-quality event signing,
 //! hash calculation, validation, and redaction algorithms.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use surrealdb::engine::any::Any;
 
@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
 use crate::auth::MatrixSessionService;
+use crate::federation::dns_resolver::{MatrixDnsResolver, DnsResolutionError};
 use crate::utils::canonical_json::to_canonical_json;
 use matryx_entity::types::{Event, ServerKeysResponse};
 use matryx_surrealdb::repository::{KeyServerRepository, error::RepositoryError};
@@ -41,6 +42,9 @@ pub enum EventSigningError {
     #[error("JSON processing error: {0}")]
     JsonError(#[from] serde_json::Error),
 
+    #[error("Invalid destination server: {0}")]
+    InvalidDestination(String),
+
     #[error("Database error: {0}")]
     DatabaseError(#[from] RepositoryError),
 
@@ -52,6 +56,18 @@ pub enum EventSigningError {
 
     #[error("Cryptographic operation failed: {0}")]
     CryptoError(String),
+
+    #[error("DNS resolution failed: {0}")]
+    DnsResolutionError(#[from] DnsResolutionError),
+
+    #[error("Invalid signature data: {0}")]
+    InvalidSignature(String),
+
+    #[error("Invalid HTTP request: {0}")]
+    InvalidRequest(String),
+
+    #[error("Authorization header format error: {0}")]
+    HeaderFormatError(String),
 }
 
 /// Matrix Event Signing Engine
@@ -59,10 +75,12 @@ pub enum EventSigningError {
 /// Provides complete Matrix-compliant event signing and validation functionality
 /// including redaction algorithms, hash calculations, signature generation/verification,
 /// and remote server key management.
+#[derive(Clone)]
 pub struct EventSigningEngine {
     pub session_service: Arc<MatrixSessionService<Any>>,
     pub db: surrealdb::Surreal<surrealdb::engine::any::Any>,
     key_server_repo: Arc<KeyServerRepository<surrealdb::engine::any::Any>>,
+    dns_resolver: Arc<MatrixDnsResolver>,
     http_client: Client,
     homeserver_name: String,
 }
@@ -71,23 +89,25 @@ impl EventSigningEngine {
     pub fn new(
         session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dns_resolver: Arc<MatrixDnsResolver>,
         homeserver_name: String,
-    ) -> Self {
+    ) -> Result<Self, EventSigningError> {
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("matryx-server/1.0")
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| EventSigningError::HttpError(e))?;
 
         let key_server_repo = Arc::new(KeyServerRepository::new(db.clone()));
 
-        Self {
+        Ok(Self {
             session_service,
             db,
             key_server_repo,
+            dns_resolver,
             http_client,
             homeserver_name,
-        }
+        })
     }
 
     /// Sign an outgoing event with server's signing key
@@ -132,17 +152,29 @@ impl EventSigningEngine {
             .map_err(|e| EventSigningError::SignatureCreationError(format!("{:?}", e)))?;
 
         // Step 6: Add signature to original event
-        let mut signatures_map = event
-            .signatures
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
+        let mut signatures_map = if let Some(signatures) = &event.signatures {
+            if let Ok(value) = serde_json::to_value(signatures) {
+                if let Some(object) = value.as_object() {
+                    object.clone()
+                } else {
+                    Map::new()
+                }
+            } else {
+                Map::new()
+            }
+        } else {
+            Map::new()
+        };
 
-        let mut server_signatures = signatures_map
-            .get(&self.homeserver_name)
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
+        let mut server_signatures = if let Some(sig_value) = signatures_map.get(&self.homeserver_name) {
+            if let Some(sig_object) = sig_value.as_object() {
+                sig_object.clone()
+            } else {
+                Map::new()
+            }
+        } else {
+            Map::new()
+        };
 
         server_signatures.insert(signing_key_id.to_string(), Value::String(signature));
         signatures_map.insert(self.homeserver_name.clone(), Value::Object(server_signatures));
@@ -182,7 +214,7 @@ impl EventSigningEngine {
         let hash = hasher.finalize();
 
         // Encode as unpadded base64 per Matrix specification
-        let hash_b64 = general_purpose::STANDARD_NO_PAD.encode(&hash);
+        let hash_b64 = general_purpose::STANDARD_NO_PAD.encode(hash);
 
         debug!("Calculated content hash: {}", hash_b64);
         Ok(hash_b64)
@@ -195,9 +227,9 @@ impl EventSigningEngine {
     /// - Remove signatures and unsigned fields
     /// - Convert to canonical JSON
     /// - Calculate SHA-256 hash
-    pub fn calculate_reference_hash(&self, event: &Event) -> Result<String, EventSigningError> {
+    pub fn calculate_reference_hash(&self, event: &Event, room_version: &str) -> Result<String, EventSigningError> {
         // Step 1: Apply redaction algorithm
-        let redacted_event = self.redact_event(event)?;
+        let redacted_event = self.redact_event(event, room_version)?;
 
         // Step 2: Remove signatures and unsigned fields
         let mut event_json = redacted_event;
@@ -217,7 +249,7 @@ impl EventSigningEngine {
         let hash = hasher.finalize();
 
         // Step 5: Encode as unpadded base64
-        let hash_b64 = general_purpose::STANDARD_NO_PAD.encode(&hash);
+        let hash_b64 = general_purpose::STANDARD_NO_PAD.encode(hash);
 
         debug!("Calculated reference hash: {}", hash_b64);
         Ok(hash_b64)
@@ -227,7 +259,7 @@ impl EventSigningEngine {
     ///
     /// Preserves only essential fields according to Matrix specification.
     /// Different event types preserve different content fields.
-    pub fn redact_event(&self, event: &Event) -> Result<Value, EventSigningError> {
+    pub fn redact_event(&self, event: &Event, room_version: &str) -> Result<Value, EventSigningError> {
         let mut redacted = json!({
             "event_id": event.event_id,
             "type": event.event_type,
@@ -238,6 +270,10 @@ impl EventSigningEngine {
             "prev_events": event.prev_events,
             "auth_events": event.auth_events
         });
+
+        // Room version-specific top-level field preservation is handled at the
+        // content level, not at the Event struct level since these fields
+        // don't exist on the Event struct
 
         // Add state_key if present (for state events)
         if let Some(state_key) = &event.state_key {
@@ -252,8 +288,8 @@ impl EventSigningEngine {
         // Preserve specific content fields based on event type
         let content_value = serde_json::to_value(&event.content)?;
         let preserved_content =
-            self.get_preserved_content_fields(&event.event_type, &content_value)?;
-        if preserved_content.as_object().map_or(false, |obj| !obj.is_empty()) {
+            self.get_preserved_content_fields(&event.event_type, &content_value, room_version)?;
+        if preserved_content.as_object().is_some_and(|obj| !obj.is_empty()) {
             redacted["content"] = preserved_content;
         }
 
@@ -294,40 +330,78 @@ impl EventSigningEngine {
         &self,
         event_type: &str,
         content: &Value,
+        room_version: &str,
     ) -> Result<Value, EventSigningError> {
         let content_obj = content.as_object().ok_or_else(|| {
             EventSigningError::RedactionError("Event content must be an object".to_string())
         })?;
 
-        let preserved_fields: HashSet<&str> = match event_type {
-            "m.room.create" => ["creator", "m.federate", "room_version"].iter().cloned().collect(),
-            "m.room.join_rules" => ["join_rule", "allow"].iter().cloned().collect(),
-            "m.room.power_levels" => {
+        let preserved_fields: HashSet<&str> = match (event_type, room_version) {
+            // m.room.member - room version specific
+            ("m.room.member", "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8") => {
+                ["membership"].iter().cloned().collect()
+            },
+            ("m.room.member", "9" | "10") => {
+                ["membership", "join_authorised_via_users_server"].iter().cloned().collect()
+            },
+            ("m.room.member", "11" | _) => {
+                // Version 11+ also allows signed key of third_party_invite
+                ["membership", "join_authorised_via_users_server"].iter().cloned().collect()
+            },
+
+            // m.room.create - room version specific
+            ("m.room.create", "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10") => {
+                ["creator", "m.federate", "room_version"].iter().cloned().collect()
+            },
+            ("m.room.create", "11" | _) => {
+                // Version 11+ allows ALL keys for m.room.create
+                return Ok(content.clone());
+            },
+
+            // m.room.join_rules - room version specific
+            ("m.room.join_rules", "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8") => {
+                ["join_rule"].iter().cloned().collect()
+            },
+            ("m.room.join_rules", "9" | "10" | "11" | _) => {
+                ["join_rule", "allow"].iter().cloned().collect()
+            },
+
+            // m.room.power_levels - room version specific
+            ("m.room.power_levels", "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10") => {
                 [
-                    "ban",
-                    "events",
-                    "events_default",
-                    "kick",
-                    "redact",
-                    "state_default",
-                    "users",
-                    "users_default",
-                    "invite",
-                    "historical",
-                ]
-                .iter()
-                .cloned()
-                .collect()
+                    "ban", "events", "events_default", "kick", "redact",
+                    "state_default", "users", "users_default"
+                ].iter().cloned().collect()
             },
-            "m.room.history_visibility" => ["history_visibility"].iter().cloned().collect(),
-            "m.room.member" => {
-                ["membership", "join_authorised_via_users_server"]
-                    .iter()
-                    .cloned()
-                    .collect()
+            ("m.room.power_levels", "11" | _) => {
+                [
+                    "ban", "events", "events_default", "invite", "kick", "redact",
+                    "state_default", "users", "users_default"
+                ].iter().cloned().collect()
             },
-            "m.room.aliases" => ["aliases"].iter().cloned().collect(),
-            _ => HashSet::new(),
+
+            // m.room.history_visibility - consistent across versions
+            ("m.room.history_visibility", _) => {
+                ["history_visibility"].iter().cloned().collect()
+            },
+
+            // m.room.aliases - room version specific
+            ("m.room.aliases", "1" | "2" | "3" | "4" | "5") => {
+                ["aliases"].iter().cloned().collect()
+            },
+            ("m.room.aliases", "6" | "7" | "8" | "9" | "10" | "11" | _) => {
+                // Version 6+ removes m.room.aliases preservation
+                HashSet::new()
+            },
+
+            // m.room.redaction - version 11+ only
+            ("m.room.redaction", "11") => {
+                ["redacts"].iter().cloned().collect()
+            },
+            ("m.room.redaction", _) => HashSet::new(),
+
+            // All other event types
+            (_, _) => HashSet::new(),
         };
 
         let mut preserved_content = Map::new();
@@ -360,11 +434,18 @@ impl EventSigningEngine {
             return Ok(cached_key);
         }
 
-        // Fetch from remote server
-        let key_url = format!("https://{}/_matrix/key/v2/server", server_name);
+        // Fetch from remote server using Matrix DNS resolution
+        let resolved = self.dns_resolver.resolve_server(server_name).await?;
+        let base_url = self.dns_resolver.get_base_url(&resolved);
+        let host_header = self.dns_resolver.get_host_header(&resolved);
+        let key_url = format!("{}/_matrix/key/v2/server", base_url);
         debug!("Fetching server keys from: {}", key_url);
 
-        let response = self.http_client.get(&key_url).send().await?;
+        let response = self.http_client
+            .get(&key_url)
+            .header("Host", host_header)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             return Err(EventSigningError::KeyRetrievalError(format!(
@@ -376,6 +457,20 @@ impl EventSigningEngine {
 
         let server_keys: ServerKeysResponse = response.json().await?;
         debug!("Received server keys response from {}", server_name);
+
+        // Validate key expiration with 7-day maximum as per Matrix spec
+        let now = Utc::now().timestamp_millis();
+        let seven_days_from_now = now + (7 * 24 * 60 * 60 * 1000); // 7 days in milliseconds
+        let effective_valid_until = std::cmp::min(server_keys.valid_until_ts, seven_days_from_now);
+
+        if effective_valid_until <= now {
+            return Err(EventSigningError::KeyRetrievalError(format!(
+                "Server key from {} has expired or will expire within 7 days (valid_until_ts: {}, now: {})",
+                server_name, server_keys.valid_until_ts, now
+            )));
+        }
+
+        debug!("Key lifetime validation passed for {} (effective_valid_until: {})", server_name, effective_valid_until);
 
         // Verify server key signatures
         self.verify_server_key_signatures(&server_keys, server_name).await?;
@@ -460,20 +555,31 @@ impl EventSigningEngine {
         let verify_keys = &server_keys.verify_keys;
 
         let now = Utc::now();
-        let valid_until = chrono::DateTime::from_timestamp(server_keys.valid_until_ts / 1000, 0);
+        let valid_until = chrono::DateTime::from_timestamp(server_keys.valid_until_ts / 1000, 0)
+            .ok_or_else(|| EventSigningError::KeyRetrievalError(
+                format!("Invalid timestamp in server keys: {}", server_keys.valid_until_ts)
+            ))?;
+
+        // Calculate cache expiration as half the key lifetime per Matrix spec
+        // "Intermediate notary servers should cache a response for half of its lifetime"
+        let key_lifetime = valid_until.signed_duration_since(now);
+        let cache_lifetime = key_lifetime / 2;
+        let cache_until = now + cache_lifetime;
+
+        debug!("Caching server keys for {} until {} (half of lifetime)", server_name, cache_until);
 
         for (key_id, key_data) in verify_keys {
             // Cache server signing key using key server repository
             self.key_server_repo
                 .cache_server_signing_key(
                     server_name,
-                    &key_id,
+                    key_id,
                     &key_data.key,
                     now,
-                    valid_until.unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24)),
+                    cache_until,
                 )
                 .await
-                .map_err(|e| EventSigningError::DatabaseError(e))?;
+                .map_err(EventSigningError::DatabaseError)?;
 
             debug!("Cached server key {}:{}", server_name, key_id);
         }
@@ -491,7 +597,7 @@ impl EventSigningEngine {
         self.key_server_repo
             .get_server_signing_key(server_name, key_id)
             .await
-            .map_err(|e| EventSigningError::DatabaseError(e))
+            .map_err(EventSigningError::DatabaseError)
     }
 
     /// Validate event signatures and hashes
@@ -525,11 +631,15 @@ impl EventSigningEngine {
         event: &Event,
         expected_servers: &[String],
     ) -> Result<(), EventSigningError> {
-        let signatures_value = event
-            .signatures
-            .as_ref()
-            .map(|s| serde_json::to_value(s).unwrap_or_default())
-            .unwrap_or_default();
+        let signatures_value = if let Some(signatures) = &event.signatures {
+            if let Ok(value) = serde_json::to_value(signatures) {
+                value
+            } else {
+                Value::Object(Map::new())
+            }
+        } else {
+            Value::Object(Map::new())
+        };
 
         let signatures_obj = signatures_value.as_object().ok_or_else(|| {
             EventSigningError::CryptoError("Signatures must be an object".to_string())
@@ -591,11 +701,15 @@ impl EventSigningEngine {
 
     /// Validate content hash of an event
     async fn validate_event_hash(&self, event: &Event) -> Result<(), EventSigningError> {
-        let hashes_value = event
-            .hashes
-            .as_ref()
-            .map(|h| serde_json::to_value(h).unwrap_or_default())
-            .unwrap_or_default();
+        let hashes_value = if let Some(hashes) = &event.hashes {
+            if let Ok(value) = serde_json::to_value(hashes) {
+                value
+            } else {
+                Value::Object(Map::new())
+            }
+        } else {
+            Value::Object(Map::new())
+        };
 
         let hashes_obj = hashes_value.as_object().ok_or_else(|| {
             EventSigningError::CryptoError("Hashes must be an object".to_string())
@@ -615,6 +729,77 @@ impl EventSigningEngine {
         }
 
         Ok(())
+    }
+
+    /// Sign arbitrary JSON object with server's signing key
+    ///
+    /// Implements Matrix JSON signing algorithm for federation requests.
+    /// Follows the same pattern as sign_event() but works with arbitrary JSON Values.
+    ///
+    /// # Arguments
+    /// * `json_object` - The JSON value to sign
+    /// * `key_name` - Optional key ID to use (defaults to "ed25519:auto")
+    ///
+    /// # Returns
+    /// * `Ok(Value)` - The original JSON with signatures field added
+    /// * `Err(EventSigningError)` - If signing fails
+    pub async fn sign_json(
+        &self,
+        json_object: &Value,
+        key_name: Option<&str>,
+    ) -> Result<Value, EventSigningError> {
+        let signing_key_id = if let Some(key) = key_name {
+            key
+        } else {
+            "ed25519:auto"
+        };
+
+        debug!("Signing JSON object with key {}", signing_key_id);
+
+        // Step 1: Convert JSON to canonical form (same as sign_event pattern)
+        let canonical_json = to_canonical_json(json_object).map_err(|e| {
+            EventSigningError::HashCalculationError(format!("Canonical JSON error: {}", e))
+        })?;
+
+        // Step 2: Sign the canonical JSON (same as sign_event pattern)
+        let signature = self
+            .session_service
+            .sign_json(&canonical_json, signing_key_id)
+            .await
+            .map_err(|e| EventSigningError::SignatureCreationError(format!("{:?}", e)))?;
+
+        // Step 3: Add signature to JSON (same as sign_event pattern)
+        let mut signed_json = json_object.clone();
+
+        let mut signatures_map = if let Some(sig_value) = signed_json.get("signatures") {
+            if let Some(sig_object) = sig_value.as_object() {
+                sig_object.clone()
+            } else {
+                Map::new()
+            }
+        } else {
+            Map::new()
+        };
+
+        let mut server_signatures = if let Some(sig_value) = signatures_map.get(&self.homeserver_name) {
+            if let Some(sig_object) = sig_value.as_object() {
+                sig_object.clone()
+            } else {
+                Map::new()
+            }
+        } else {
+            Map::new()
+        };
+
+        server_signatures.insert(signing_key_id.to_string(), Value::String(signature));
+        signatures_map.insert(self.homeserver_name.clone(), Value::Object(server_signatures));
+
+        signed_json.as_object_mut()
+            .ok_or_else(|| EventSigningError::InvalidFormat("Input must be JSON object".to_string()))?
+            .insert("signatures".to_string(), Value::Object(signatures_map));
+
+        debug!("Successfully signed JSON object with key {}", signing_key_id);
+        Ok(signed_json)
     }
 }
 
@@ -648,7 +833,7 @@ mod tests {
         });
 
         let event: Event = serde_json::from_value(event_json).unwrap();
-        let redacted = engine.redact_event(&event).unwrap();
+        let redacted = engine.redact_event(&event, "10").unwrap();
 
         // Essential fields should be preserved
         assert_eq!(redacted["event_id"], "$test:example.org");
@@ -693,6 +878,7 @@ mod tests {
     fn create_test_engine() -> EventSigningEngine {
         use matryx_surrealdb::test_utils::create_test_db;
         use std::sync::Arc;
+        use crate::federation::well_known_client::WellKnownClient;
 
         let test_db = create_test_db().expect("Failed to create test database");
         
@@ -706,6 +892,12 @@ mod tests {
             key_server_repo,
         ));
 
-        EventSigningEngine::new(session_service, test_db, "test.example.org".to_string())
+        // Create test DNS resolver
+        let http_client = Arc::new(reqwest::Client::new());
+        let well_known_client = Arc::new(WellKnownClient::new(http_client));
+        let dns_resolver = Arc::new(MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
+
+        EventSigningEngine::new(session_service, test_db, dns_resolver, "test.example.org".to_string())
+            .expect("Failed to create test EventSigningEngine")
     }
 }

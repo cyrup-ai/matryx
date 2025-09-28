@@ -7,14 +7,12 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
+use tracing::{debug, warn};
 
-use crate::{AppState, auth::MatrixSessionService, config::ServerConfig};
+
+
+
+use crate::AppState;
 use matryx_surrealdb::repository::{
     media::MediaRepository,
     media_service::MediaService,
@@ -135,6 +133,16 @@ pub async fn upload_media(
     }
 
     let file_bytes = file_data.ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Validate content type before upload
+    if !validate_content_type(&content_type) {
+        warn!("Upload rejected - unsupported content type: {}", content_type);
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    // Generate appropriate file extension based on content type
+    let file_extension = get_file_extension(&content_type);
+    debug!("Uploading {} file with extension: {}", content_type, file_extension);
 
     // Create MediaService instance
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));

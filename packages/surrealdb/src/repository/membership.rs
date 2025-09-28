@@ -607,10 +607,9 @@ impl MembershipRepository {
         match new_membership {
             MembershipState::Ban => {
                 // Can't ban someone who is already banned
-                if let Some(current) = current_membership {
-                    if current.membership == MembershipState::Ban {
-                        return Ok(false);
-                    }
+                if let Some(current) = current_membership
+                    && current.membership == MembershipState::Ban {
+                    return Ok(false);
                 }
                 Ok(true)
             },
@@ -851,20 +850,18 @@ impl MembershipRepository {
         // For self-membership changes (join, leave, knock), sender must be the target
         if let Ok(content) =
             serde_json::from_value::<serde_json::Value>(serde_json::to_value(&event.content)?)
-        {
-            if let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
-                match membership {
-                    "join" | "leave" | "knock" => {
-                        if sender != target_user {
-                            return Ok(false);
-                        }
-                    },
-                    "invite" | "ban" => {
-                        // For invites and bans, sender must have appropriate power level
-                        // This would be validated by the calling code
-                    },
-                    _ => return Ok(false),
-                }
+            && let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
+            match membership {
+                "join" | "leave" | "knock" => {
+                    if sender != target_user {
+                        return Ok(false);
+                    }
+                },
+                "invite" | "ban" => {
+                    // For invites and bans, sender must have appropriate power level
+                    // This would be validated by the calling code
+                },
+                _ => return Ok(false),
             }
         }
 
@@ -950,11 +947,10 @@ impl MembershipRepository {
         let mut server_counts = std::collections::HashMap::new();
 
         for member in members {
-            if member.membership == MembershipState::Join {
-                if let Some(colon_pos) = member.user_id.rfind(':') {
-                    let server = &member.user_id[colon_pos + 1..];
-                    *server_counts.entry(server.to_string()).or_insert(0) += 1;
-                }
+            if member.membership == MembershipState::Join
+                && let Some(colon_pos) = member.user_id.rfind(':') {
+                let server = &member.user_id[colon_pos + 1..];
+                *server_counts.entry(server.to_string()).or_insert(0) += 1;
             }
         }
 
@@ -969,12 +965,10 @@ impl MembershipRepository {
         // Validate that the event content is valid for a membership event
         if let Ok(content) =
             serde_json::from_value::<serde_json::Value>(serde_json::to_value(&event.content)?)
-        {
-            if let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
-                match membership {
-                    "join" | "leave" | "invite" | "ban" | "knock" => return Ok(true),
-                    _ => return Ok(false),
-                }
+            && let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
+            match membership {
+                "join" | "leave" | "invite" | "ban" | "knock" => return Ok(true),
+                _ => return Ok(false),
             }
         }
 
@@ -1071,12 +1065,11 @@ impl MembershipRepository {
 
         // Check if user is already banned
         let existing_membership = self.get_membership(room_id, user_id).await?;
-        if let Some(membership) = &existing_membership {
-            if membership.membership == MembershipState::Ban {
-                return Err(RepositoryError::Conflict {
-                    message: "User is already banned from the room".to_string(),
-                });
-            }
+        if let Some(membership) = &existing_membership
+            && membership.membership == MembershipState::Ban {
+            return Err(RepositoryError::Conflict {
+                message: "User is already banned from the room".to_string(),
+            });
         }
 
         // Create ban membership
@@ -1712,12 +1705,10 @@ impl MembershipRepository {
 
         let conflicting_events: Vec<serde_json::Value> = result.take(0)?;
 
-        if !conflicting_events.is_empty() {
-            if let Some(conflict) = conflicting_events.first() {
-                if let Some(event_id) = conflict.get("event_id").and_then(|v| v.as_str()) {
-                    return Ok(Some(format!("Temporal conflict with event: {}", event_id)));
-                }
-            }
+        if !conflicting_events.is_empty()
+            && let Some(conflict) = conflicting_events.first()
+            && let Some(event_id) = conflict.get("event_id").and_then(|v| v.as_str()) {
+            return Ok(Some(format!("Temporal conflict with event: {}", event_id)));
         }
 
         // Check for state conflicts
@@ -1808,18 +1799,17 @@ impl MembershipRepository {
         }
 
         // Extract membership state from winning event
-        if let Some(content) = winning_event.get("content") {
-            if let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
-                let membership_state = match membership {
-                    "join" => MembershipState::Join,
-                    "leave" => MembershipState::Leave,
-                    "invite" => MembershipState::Invite,
-                    "ban" => MembershipState::Ban,
-                    "knock" => MembershipState::Knock,
-                    _ => MembershipState::Leave,
-                };
-                return Ok(membership_state);
-            }
+        if let Some(content) = winning_event.get("content")
+            && let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
+            let membership_state = match membership {
+                "join" => MembershipState::Join,
+                "leave" => MembershipState::Leave,
+                "invite" => MembershipState::Invite,
+                "ban" => MembershipState::Ban,
+                "knock" => MembershipState::Knock,
+                _ => MembershipState::Leave,
+            };
+            return Ok(membership_state);
         }
 
         // Default to leave if unable to determine
@@ -2121,14 +2111,13 @@ impl MembershipRepository {
             let mut result = self.db.query(query).bind(("event_id", auth_event_id.clone())).await?;
             let events: Vec<serde_json::Value> = result.take(0)?;
 
-            if let Some(event) = events.first() {
-                if let Some(event_type) = event.get("event_type").and_then(|v| v.as_str()) {
-                    match event_type {
-                        "m.room.create" => has_create_event = true,
-                        "m.room.power_levels" => has_power_levels = true,
-                        "m.room.join_rules" => has_join_rules = true,
-                        _ => {},
-                    }
+            if let Some(event) = events.first()
+                && let Some(event_type) = event.get("event_type").and_then(|v| v.as_str()) {
+                match event_type {
+                    "m.room.create" => has_create_event = true,
+                    "m.room.power_levels" => has_power_levels = true,
+                    "m.room.join_rules" => has_join_rules = true,
+                    _ => {},
                 }
             }
         }
@@ -2174,5 +2163,650 @@ impl MembershipRepository {
         }
     }
 
+    // TASK16 SUBTASK 2: Add missing membership operation methods
 
+    /// Kick a member from a room
+    pub async fn kick_member(&self, room_id: &str, user_id: &str, _kicker_id: &str, reason: Option<&str>) -> Result<(), RepositoryError> {
+        // Update membership to leave state
+        let membership_id = format!("{}:{}", user_id, room_id);
+        
+        let query = r#"
+            UPDATE membership SET 
+                membership = 'leave',
+                reason = $reason,
+                updated_at = time::now()
+            WHERE id = $membership_id
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("membership_id", membership_id))
+            .bind(("reason", reason.map(|r| r.to_string())))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "kick_member".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Ban a member from a room
+    pub async fn ban_member(&self, room_id: &str, user_id: &str, banner_id: &str, reason: Option<&str>) -> Result<(), RepositoryError> {
+        // Update or create membership with ban state
+        let membership_id = format!("{}:{}", user_id, room_id);
+        
+        let query = r#"
+            UPSERT membership:$membership_id CONTENT {
+                user_id: $user_id,
+                room_id: $room_id,
+                membership: 'ban',
+                reason: $reason,
+                invited_by: $banner_id,
+                updated_at: time::now(),
+                display_name: NONE,
+                avatar_url: NONE,
+                is_direct: false,
+                third_party_invite: NONE,
+                join_authorised_via_users_server: NONE
+            }
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("membership_id", membership_id))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("reason", reason.map(|r| r.to_string())))
+            .bind(("banner_id", banner_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "ban_member".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Unban a member from a room
+    pub async fn unban_member(&self, room_id: &str, user_id: &str, _unbanner_id: &str, reason: Option<&str>) -> Result<(), RepositoryError> {
+        // Update membership from ban to leave state
+        let membership_id = format!("{}:{}", user_id, room_id);
+        
+        let query = r#"
+            UPDATE membership SET 
+                membership = 'leave',
+                reason = $reason,
+                updated_at = time::now()
+            WHERE id = $membership_id AND membership = 'ban'
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("membership_id", membership_id))
+            .bind(("reason", reason.map(|r| r.to_string())))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "unban_member".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Invite a member to a room
+    pub async fn invite_member(&self, room_id: &str, user_id: &str, inviter_id: &str, reason: Option<&str>) -> Result<(), RepositoryError> {
+        // Create or update membership with invite state
+        let membership_id = format!("{}:{}", user_id, room_id);
+        
+        let query = r#"
+            UPSERT membership:$membership_id CONTENT {
+                user_id: $user_id,
+                room_id: $room_id,
+                membership: 'invite',
+                reason: $reason,
+                invited_by: $inviter_id,
+                updated_at: time::now(),
+                display_name: NONE,
+                avatar_url: NONE,
+                is_direct: false,
+                third_party_invite: NONE,
+                join_authorised_via_users_server: NONE
+            }
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("membership_id", membership_id))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("reason", reason.map(|r| r.to_string())))
+            .bind(("inviter_id", inviter_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "invite_member".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+
+    /// Forget a room as a user
+    pub async fn forget_room(&self, room_id: &str, user_id: &str) -> Result<(), RepositoryError> {
+        // Delete membership record
+        let membership_id = format!("{}:{}", user_id, room_id);
+        
+        let _: Option<matryx_entity::types::Membership> = self.db
+            .delete(("membership", membership_id))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "forget_room".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Check if user can perform a membership action
+    pub async fn can_perform_action(&self, room_id: &str, user_id: &str, action: crate::repository::room_operations::MembershipAction, target_user: Option<&str>) -> Result<bool, RepositoryError> {
+        // Get user's power level
+        let user_power_level = self.get_user_power_level(room_id, user_id).await.unwrap_or(0);
+        
+        // Get required power level for the action
+        let required_power_level = match action {
+            crate::repository::room_operations::MembershipAction::Kick => 50,
+            crate::repository::room_operations::MembershipAction::Ban => 50,
+            crate::repository::room_operations::MembershipAction::Unban => 50,
+            crate::repository::room_operations::MembershipAction::Invite => 0,
+            crate::repository::room_operations::MembershipAction::Join => 0,
+            crate::repository::room_operations::MembershipAction::Leave => 0,
+            crate::repository::room_operations::MembershipAction::Forget => 0,
+        };
+
+        // Check if user has sufficient power level
+        if user_power_level < required_power_level {
+            return Ok(false);
+        }
+
+        // For actions targeting other users, check target's power level
+        if let Some(target_id) = target_user
+            && target_id != user_id {
+                let target_power_level = self.get_user_power_level(room_id, target_id).await.unwrap_or(0);
+                // User must have higher power level than target
+                if user_power_level <= target_power_level {
+                    return Ok(false);
+                }
+            }
+
+        Ok(true)
+    }
+
+    /// Get membership history for a user in a room (TASK16 version)
+    pub async fn get_membership_history_events(&self, room_id: &str, user_id: &str) -> Result<Vec<crate::repository::room_operations::MembershipEvent>, RepositoryError> {
+        let query = r#"
+            SELECT event_id, room_id, state_key as user_id, content, sender, origin_server_ts
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.member' 
+            AND state_key = $user_id
+            ORDER BY origin_server_ts ASC
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_membership_history_events".to_string(),
+            })?;
+
+        let events: Vec<(String, String, String, serde_json::Value, String, i64)> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_membership_history_events_parse".to_string(),
+        })?;
+
+        let membership_events = events.into_iter().map(|(event_id, room_id, user_id, content, sender, timestamp)| {
+            let membership_str = content.get("membership").and_then(|m| m.as_str()).unwrap_or("leave");
+            let membership = match membership_str {
+                "join" => MembershipState::Join,
+                "leave" => MembershipState::Leave,
+                "invite" => MembershipState::Invite,
+                "ban" => MembershipState::Ban,
+                "knock" => MembershipState::Knock,
+                _ => MembershipState::Leave,
+            };
+
+            let reason = content.get("reason").and_then(|r| r.as_str()).map(|s| s.to_string());
+
+            crate::repository::room_operations::MembershipEvent {
+                event_id,
+                room_id,
+                user_id,
+                membership,
+                reason,
+                actor_id: Some(sender),
+                timestamp: chrono::DateTime::from_timestamp_millis(timestamp).unwrap_or_else(chrono::Utc::now),
+            }
+        }).collect();
+
+        Ok(membership_events)
+    }
+
+    /// Get user power level in a room (helper method)
+    pub async fn get_user_power_level(&self, room_id: &str, user_id: &str) -> Result<i64, RepositoryError> {
+        // Get power levels from room state
+        let query = r#"
+            SELECT content FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.power_levels' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC 
+            LIMIT 1
+        "#;
+
+        let mut response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_user_power_level".to_string(),
+            })?;
+
+        let content: Option<serde_json::Value> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_user_power_level_parse".to_string(),
+        })?;
+
+        if let Some(power_levels) = content {
+            if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
+                && let Some(user_level) = users.get(user_id).and_then(|l| l.as_i64()) {
+                    return Ok(user_level);
+                }
+            // Return users_default if user not explicitly listed
+            if let Some(default_level) = power_levels.get("users_default").and_then(|d| d.as_i64()) {
+                return Ok(default_level);
+            }
+        }
+
+        Ok(0) // Default power level
+    }
+
+    /// Check if a server has users in a room (for federation access)
+    pub async fn has_server_users_in_room(
+        &self,
+        room_id: &str,
+        server_name: &str,
+    ) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT COUNT() as count
+            FROM membership
+            WHERE room_id = $room_id
+            AND user_id CONTAINS $server_suffix
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", server_name);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let count_result: Option<CountResult> = response.take(0)?;
+        Ok(count_result.map(|c| c.count > 0).unwrap_or(false))
+    }
+
+    /// Get room membership for knock validation
+    pub async fn get_room_membership_for_knock(&self, room_id: &str, user_id: &str) -> Result<Option<Membership>, RepositoryError> {
+        let query = "
+            SELECT * FROM membership 
+            WHERE room_id = $room_id AND user_id = $user_id
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        let memberships: Vec<Membership> = response.take(0)?;
+        Ok(memberships.into_iter().next())
+    }
+
+    /// Get user joined rooms for client endpoint
+    pub async fn get_user_joined_rooms(&self, user_id: &str) -> Result<Vec<String>, RepositoryError> {
+        let query = "
+            SELECT room_id FROM membership 
+            WHERE user_id = $user_id AND membership = 'join'
+            ORDER BY updated_at DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        let room_ids: Vec<String> = response.take(0)?;
+        Ok(room_ids)
+    }
+
+    /// Create knock membership for federation
+    pub async fn create_knock_membership(&self, room_id: &str, user_id: &str, reason: Option<String>) -> Result<Membership, RepositoryError> {
+        let membership = Membership {
+            user_id: user_id.to_string(),
+            room_id: room_id.to_string(),
+            membership: MembershipState::Knock,
+            reason,
+            invited_by: None,
+            updated_at: Some(chrono::Utc::now()),
+            display_name: None,
+            avatar_url: None,
+            is_direct: None,
+            third_party_invite: None,
+            join_authorised_via_users_server: None,
+        };
+
+        let membership_id = format!("{}:{}", room_id, user_id);
+        let created_membership: Option<Membership> = self.db.create(("membership", &membership_id)).content(membership).await?;
+        created_membership.ok_or_else(|| RepositoryError::NotFound { 
+            entity_type: "membership".to_string(), 
+            id: membership_id 
+        })
+    }
+
+    /// Validate join permissions for federation
+    pub async fn validate_join_permissions(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        // Check if user is already a member
+        let existing_membership = self.get_membership(room_id, user_id).await?;
+        
+        match existing_membership {
+            Some(membership) => {
+                match membership.membership {
+                    MembershipState::Join => Ok(true), // Already joined
+                    MembershipState::Invite => Ok(true), // Has invite
+                    MembershipState::Ban => Ok(false), // Banned
+                    _ => Ok(false), // Other states don't allow join
+                }
+            },
+            None => {
+                // Check room join rules - this would need room repository integration
+                // For now, assume public rooms allow join
+                Ok(true)
+            }
+        }
+    }
+
+    /// Get room ban status for unban operations
+    pub async fn get_room_ban_status(&self, room_id: &str, user_id: &str) -> Result<Option<Membership>, RepositoryError> {
+        let query = "
+            SELECT * FROM membership 
+            WHERE room_id = $room_id AND user_id = $user_id AND membership = 'ban'
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        let memberships: Vec<Membership> = response.take(0)?;
+        Ok(memberships.into_iter().next())
+    }
+
+    /// Validate unban permissions
+    pub async fn validate_unban_permissions(&self, room_id: &str, unbanner_user_id: &str, target_user_id: &str) -> Result<bool, RepositoryError> {
+        // Check if target user is actually banned
+        let ban_status = self.get_room_ban_status(room_id, target_user_id).await?;
+        if ban_status.is_none() {
+            return Ok(false); // User is not banned
+        }
+
+        // Check if unbanner has sufficient power level (would need power level repository integration)
+        // For now, check if unbanner is a member with join status
+        let unbanner_membership = self.get_membership(room_id, unbanner_user_id).await?;
+        match unbanner_membership {
+            Some(membership) => Ok(membership.membership == MembershipState::Join),
+            None => Ok(false),
+        }
+    }
+
+    /// Update membership for unban operation
+    pub async fn update_unban_membership(&self, room_id: &str, user_id: &str) -> Result<(), RepositoryError> {
+        let query = "
+            UPDATE membership SET 
+                membership = 'leave',
+                updated_at = $updated_at
+            WHERE room_id = $room_id AND user_id = $user_id AND membership = 'ban'
+        ";
+
+        self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("updated_at", chrono::Utc::now()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Check if a server has users in a room for federation permission checks
+    pub async fn check_server_has_users_in_room(&self, room_id: &str, server_name: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT COUNT() as count
+            FROM membership
+            WHERE room_id = $room_id
+            AND user_id CONTAINS $server_suffix
+            AND membership IN ['join', 'invite', 'leave']
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", server_name);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let count_result: Option<CountResult> = response.take(0)?;
+        Ok(count_result.map(|c| c.count > 0).unwrap_or(false))
+    }
+
+    /// Upsert membership record for unban operations
+    pub async fn upsert_membership_record(&self, membership: Membership) -> Result<(), RepositoryError> {
+        let membership_id = format!("{}:{}", membership.user_id, membership.room_id);
+        
+        let _: Option<Membership> = self.db
+            .upsert(("membership", membership_id))
+            .content(membership)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Check user's membership status in a room
+    pub async fn get_user_membership_status(&self, room_id: &str, user_id: &str) -> Result<Option<String>, RepositoryError> {
+        let query = "
+            SELECT membership
+            FROM membership
+            WHERE room_id = $room_id AND user_id = $user_id
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct MembershipResult {
+            membership: String,
+        }
+
+        let membership: Option<MembershipResult> = response.take(0)?;
+        Ok(membership.map(|m| m.membership))
+    }
+
+    /// Find a user from a specific server who can authorize restricted room joins
+    pub async fn find_authorizing_user(&self, room_id: &str, server_name: &str) -> Result<Option<String>, RepositoryError> {
+        let query = "
+            SELECT user_id
+            FROM membership
+            WHERE room_id = $room_id
+            AND membership = 'join'
+            AND user_id CONTAINS $server_suffix
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", server_name);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct AuthUser {
+            user_id: String,
+        }
+
+        let auth_user: Option<AuthUser> = response.take(0)?;
+        Ok(auth_user.map(|u| u.user_id))
+    }
+
+    /// Check if a server has any users in a room (current or historical)
+    pub async fn server_has_users_in_room(&self, room_id: &str, server_name: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT COUNT() as count
+            FROM membership
+            WHERE room_id = $room_id
+            AND user_id CONTAINS $server_suffix
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", server_name);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let count_result: Option<CountResult> = response.take(0)?;
+        Ok(count_result.map(|c| c.count > 0).unwrap_or(false))
+    }
+
+    /// Get all joined rooms for a user
+    pub async fn get_joined_rooms_for_user(&self, user_id: &str) -> Result<Vec<String>, RepositoryError> {
+        let query = "
+            SELECT room_id 
+            FROM membership 
+            WHERE user_id = $user_id 
+              AND membership = 'join'
+            ORDER BY updated_at DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct RoomResult {
+            room_id: String,
+        }
+
+        let room_results: Vec<RoomResult> = response.take(0)?;
+        Ok(room_results.into_iter().map(|r| r.room_id).collect())
+    }
+
+    /// Create a live query for membership changes for a specific user
+    pub async fn create_user_membership_live_query(
+        &self,
+        user_id: &str,
+    ) -> Result<surrealdb::Response, RepositoryError> {
+        let query = r#"
+            LIVE SELECT *, meta::id(id) as membership_id FROM membership
+            WHERE room_id IN (
+                SELECT VALUE room_id FROM membership 
+                WHERE user_id = $user_id AND membership IN ['join', 'invite']
+            )
+        "#;
+
+        let response = self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        Ok(response)
+    }
+
+    /// Create a live query for membership changes in a specific room
+    pub async fn create_room_membership_live_query(
+        &self,
+        room_id: &str,
+    ) -> Result<surrealdb::Response, RepositoryError> {
+        let query = r#"
+            LIVE SELECT *, meta::id(id) as membership_id FROM membership
+            WHERE room_id = $room_id
+        "#;
+
+        let response = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        Ok(response)
+    }
+
+    /// Create a live query for membership changes in multiple rooms
+    pub async fn create_batched_membership_live_query(
+        &self,
+        room_ids: Vec<String>,
+    ) -> Result<surrealdb::Response, RepositoryError> {
+        let query = r#"
+            LIVE SELECT *, meta::id(id) as membership_id FROM membership
+            WHERE room_id IN $room_ids
+        "#;
+
+        let response = self.db
+            .query(query)
+            .bind(("room_ids", room_ids))
+            .await?;
+
+        Ok(response)
+    }
+
+    /// Create a simple live query for membership changes for a specific user
+    pub async fn create_user_membership_simple_live_query(
+        &self,
+        user_id: &str,
+    ) -> Result<surrealdb::Response, RepositoryError> {
+        let query = "LIVE SELECT * FROM membership WHERE user_id = $user_id";
+
+        let response = self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        Ok(response)
+    }
 }

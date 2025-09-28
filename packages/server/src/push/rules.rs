@@ -1,6 +1,6 @@
 use matryx_entity::PDU;
 use matryx_surrealdb::repository::push::{
-    Event,
+    PushEvent,
     PushAction,
     PushCondition,
     PushRule,
@@ -8,10 +8,10 @@ use matryx_surrealdb::repository::push::{
     RoomContext,
 };
 use matryx_surrealdb::repository::{PushRepository, RepositoryError};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
+
 use surrealdb::engine::any::Any;
-use surrealdb::{Connection, Surreal};
+use surrealdb::Surreal;
 
 // Types are now imported from the repository module
 
@@ -71,7 +71,7 @@ impl PushRuleEngine {
         context: &RoomContext,
     ) -> Result<PushRuleEvaluation, RepositoryError> {
         // Convert PDU to Event
-        let push_event = Event {
+        let push_event = PushEvent {
             event_id: event.event_id.clone(),
             event_type: event.event_type.clone(),
             sender: event.sender.clone(),
@@ -114,6 +114,12 @@ impl PushRuleEngine {
             PushCondition::SenderNotificationPermission { key } => {
                 self.evaluate_sender_notification_permission(key, event, context)
             },
+            PushCondition::EventPropertyContains { key, value } => {
+                self.evaluate_event_property_contains(key, value, event)
+            },
+            PushCondition::EventPropertyIs { key, value } => {
+                self.evaluate_event_property_is(key, value, event)
+            },
         }
     }
 
@@ -140,13 +146,11 @@ impl PushRuleEngine {
     }
 
     fn evaluate_contains_display_name(&self, event: &PDU, context: &RoomContext) -> bool {
-        if let Some(display_name) = &context.user_display_name {
-            if let Some(body) = event.content.get("body") {
-                if let Some(body_str) = body.as_str() {
-                    return body_str.contains(display_name);
-                }
+        if let Some(display_name) = &context.user_display_name
+            && let Some(body) = event.content.get("body")
+            && let Some(body_str) = body.as_str() {
+                return body_str.contains(display_name);
             }
-        }
         false
     }
 
@@ -160,11 +164,10 @@ impl PushRuleEngine {
             if let Ok(num) = num_str.parse::<u64>() {
                 return context.member_count > num;
             }
-        } else if let Some(num_str) = is_condition.strip_prefix("<") {
-            if let Ok(num) = num_str.parse::<u64>() {
+        } else if let Some(num_str) = is_condition.strip_prefix("<")
+            && let Ok(num) = num_str.parse::<u64>() {
                 return context.member_count < num;
             }
-        }
         false
     }
 
@@ -185,6 +188,34 @@ impl PushRuleEngine {
         } else {
             false
         }
+    }
+
+    fn evaluate_event_property_contains(&self, key: &str, value: &str, event: &PDU) -> bool {
+        // For Matrix v1.7 user mentions: "content.m\\.mentions.user_ids"
+        if key == "content.m\\.mentions.user_ids" {
+            if let Some(mentions) = event.content.get("m.mentions") {
+                if let Some(user_ids) = mentions.get("user_ids") {
+                    if let Some(user_ids_array) = user_ids.as_array() {
+                        return user_ids_array.iter().any(|id| {
+                            id.as_str().map_or(false, |id_str| id_str.contains(value))
+                        });
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn evaluate_event_property_is(&self, key: &str, value: &serde_json::Value, event: &PDU) -> bool {
+        // For Matrix v1.7 room mentions: "content.m\\.mentions.room"
+        if key == "content.m\\.mentions.room" {
+            if let Some(mentions) = event.content.get("m.mentions") {
+                if let Some(room_mention) = mentions.get("room") {
+                    return room_mention == value;
+                }
+            }
+        }
+        false
     }
 
     /// Create a push rule for a user using the repository
@@ -271,6 +302,53 @@ impl PushRuleEngine {
                         set_tweak: "sound".to_string(),
                         value: serde_json::Value::String("default".to_string()),
                     },
+                    PushAction::SetTweak {
+                        set_tweak: "highlight".to_string(),
+                        value: serde_json::Value::Bool(true),
+                    },
+                ],
+                default: true,
+                enabled: true,
+            },
+            // Matrix v1.7 user mention rule
+            PushRule {
+                rule_id: ".m.rule.is_user_mention".to_string(),
+                priority_class: 4, // Content rules
+                priority: 1,
+                conditions: vec![PushCondition::EventPropertyContains {
+                    key: "content.m\\.mentions.user_ids".to_string(),
+                    value: "[the user's Matrix ID]".to_string(), // Will be replaced at runtime
+                }],
+                actions: vec![
+                    PushAction::Notify,
+                    PushAction::SetTweak {
+                        set_tweak: "sound".to_string(),
+                        value: serde_json::Value::String("default".to_string()),
+                    },
+                    PushAction::SetTweak {
+                        set_tweak: "highlight".to_string(),
+                        value: serde_json::Value::Bool(true),
+                    },
+                ],
+                default: true,
+                enabled: true,
+            },
+            // Matrix v1.7 room mention rule
+            PushRule {
+                rule_id: ".m.rule.is_room_mention".to_string(),
+                priority_class: 4, // Content rules
+                priority: 2,
+                conditions: vec![
+                    PushCondition::EventPropertyIs {
+                        key: "content.m\\.mentions.room".to_string(),
+                        value: serde_json::Value::Bool(true),
+                    },
+                    PushCondition::SenderNotificationPermission {
+                        key: "room".to_string(),
+                    },
+                ],
+                actions: vec![
+                    PushAction::Notify,
                     PushAction::SetTweak {
                         set_tweak: "highlight".to_string(),
                         value: serde_json::Value::Bool(true),

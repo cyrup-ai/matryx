@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+
 use tracing::{error, info, warn};
 
 use crate::{AppState, auth::MatrixAuthError};

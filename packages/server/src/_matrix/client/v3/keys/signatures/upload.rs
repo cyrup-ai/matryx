@@ -3,9 +3,9 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use chrono::Utc;
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
+
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 
@@ -13,6 +13,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::KeysRepository;
 
 #[derive(Deserialize)]
 pub struct SignaturesUploadRequest {
@@ -45,6 +46,7 @@ pub async fn post(
     };
 
     let mut failures = std::collections::HashMap::new();
+    let keys_repo = KeysRepository::new(state.db.clone());
 
     // Process signatures for each target user
     for (target_user_id, target_signatures) in request.signatures {
@@ -56,23 +58,13 @@ pub async fn post(
                 if parts.len() >= 2 {
                     let device_id = parts[1].to_string();
 
-                    // Update device key signatures
-                    let query = "
-                        UPDATE device_keys 
-                        SET signatures = array::union(signatures, $new_signatures), updated_at = $updated_at
-                        WHERE user_id = $user_id AND device_id = $device_id
-                    ";
-
-                    let result = state
-                        .db
-                        .query(query)
-                        .bind(("user_id", target_user_id.clone()))
-                        .bind(("device_id", device_id.clone()))
-                        .bind(("new_signatures", json!({ signing_user_id.clone(): signatures })))
-                        .bind(("updated_at", Utc::now()))
-                        .await;
-
-                    match result {
+                    // Update device key signatures using repository
+                    match keys_repo.update_device_key_signatures(
+                        &target_user_id,
+                        &device_id,
+                        &signing_user_id,
+                        &signatures,
+                    ).await {
                         Ok(_) => {
                             info!(
                                 "Device key signature added: signer={} target_user={} device={}",
@@ -108,22 +100,13 @@ pub async fn post(
                 };
 
                 if key_type != "unknown" {
-                    let query = "
-                        UPDATE cross_signing_keys 
-                        SET signatures = array::union(signatures, $new_signatures), created_at = $updated_at
-                        WHERE user_id = $user_id AND key_type = $key_type
-                    ";
-
-                    let result = state
-                        .db
-                        .query(query)
-                        .bind(("user_id", target_user_id.clone()))
-                        .bind(("key_type", key_type))
-                        .bind(("new_signatures", json!({ signing_user_id.clone(): signatures })))
-                        .bind(("updated_at", Utc::now()))
-                        .await;
-
-                    match result {
+                    // Update cross-signing key signatures using repository
+                    match keys_repo.update_cross_signing_key_signatures(
+                        &target_user_id,
+                        key_type,
+                        &signing_user_id,
+                        &signatures,
+                    ).await {
                         Ok(_) => {
                             info!(
                                 "Cross-signing key signature added: signer={} target_user={} key_type={}",

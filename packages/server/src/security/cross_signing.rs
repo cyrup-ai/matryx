@@ -1,18 +1,15 @@
 use async_trait::async_trait;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
 
-use crate::federation::device_management::CrossSigningKey as FederationCrossSigningKey;
-use matryx_entity::types::DeviceKey as EntityDeviceKey;
 use matryx_surrealdb::repository::cross_signing::{
     CrossSigningKey,
     CrossSigningKeys,
     DeviceKey,
     Signature,
 };
-use matryx_surrealdb::repository::{CrossSigningRepository, RepositoryError};
+use matryx_surrealdb::repository::CrossSigningRepository;
 
 #[derive(Debug)]
 pub enum CryptoError {

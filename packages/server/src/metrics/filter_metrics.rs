@@ -12,28 +12,28 @@ lazy_static! {
         "matrix_filter_operations_total",
         "Total number of filter operations"
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("Failed to register prometheus filter operations metric - this indicates a duplicate metric name: {}", e));
     static ref FILTER_PROCESSING_TIME: Histogram =
         register_histogram!("matrix_filter_processing_seconds", "Time spent processing filters")
-            .unwrap();
+            .unwrap_or_else(|e| panic!("Failed to register prometheus filter processing time metric - this indicates a duplicate metric name: {}", e));
     static ref EVENTS_FILTERED: IntCounter =
         register_int_counter!("matrix_events_filtered_total", "Total number of events filtered")
-            .unwrap();
+            .unwrap_or_else(|e| panic!("Failed to register prometheus events filtered metric - this indicates a duplicate metric name: {}", e));
     static ref CACHE_HITS: IntCounter = register_int_counter!(
         "matrix_filter_cache_hits_total",
         "Total number of filter cache hits"
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("Failed to register prometheus cache hits metric - this indicates a duplicate metric name: {}", e));
     static ref CACHE_MISSES: IntCounter = register_int_counter!(
         "matrix_filter_cache_misses_total",
         "Total number of filter cache misses"
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("Failed to register prometheus cache misses metric - this indicates a duplicate metric name: {}", e));
     static ref LIVE_QUERY_OPERATIONS: IntCounter = register_int_counter!(
         "matrix_live_query_operations_total",
         "Total number of live query operations"
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("Failed to register prometheus live query operations metric - this indicates a duplicate metric name: {}", e));
 }
 
 /// Performance monitoring for filtering operations

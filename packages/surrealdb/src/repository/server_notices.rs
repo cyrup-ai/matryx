@@ -182,10 +182,9 @@ impl<C: Connection> ServerNoticesRepository<C> {
         let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
         let rooms: Vec<Value> = result.take(0)?;
 
-        if let Some(room_data) = rooms.first() {
-            if let Some(room_id) = room_data.get("room_id").and_then(|v| v.as_str()) {
-                return Ok(Some(room_id.to_string()));
-            }
+        if let Some(room_data) = rooms.first()
+            && let Some(room_id) = room_data.get("room_id").and_then(|v| v.as_str()) {
+            return Ok(Some(room_id.to_string()));
         }
 
         Ok(None)
@@ -359,10 +358,9 @@ impl<C: Connection> ServerNoticesRepository<C> {
         let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
         let counts: Vec<Value> = result.take(0)?;
 
-        if let Some(count_data) = counts.first() {
-            if let Some(count) = count_data.get("count").and_then(|v| v.as_u64()) {
-                return Ok(count as u32);
-            }
+        if let Some(count_data) = counts.first()
+            && let Some(count) = count_data.get("count").and_then(|v| v.as_u64()) {
+            return Ok(count as u32);
         }
 
         Ok(0)

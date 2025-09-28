@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
+    use super::{TrustLevel, ClientDeviceInfo};
     use crate::federation::device_management::{DeviceListCache, DeviceListUpdate};
     use chrono::Utc;
     use std::collections::HashMap;
+    use matryx_entity::DeviceKeys;
 
     #[tokio::test]
     async fn test_device_list_update_application() {
@@ -110,7 +111,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_device_info_serialization() {
-        let device_info = DeviceInfo {
+        let device_info = ClientDeviceInfo {
             device_id: "TEST123".to_string(),
             display_name: Some("Test Device".to_string()),
             last_seen_ip: Some("192.168.1.1".to_string()),
@@ -127,7 +128,7 @@ mod integration_tests {
         assert!(serialized.contains("TEST123"));
         assert!(serialized.contains("@test:example.com"));
 
-        let deserialized: DeviceInfo =
+        let deserialized: ClientDeviceInfo =
             serde_json::from_str(&serialized).expect("Deserialization should work");
         assert_eq!(deserialized.device_id, "TEST123");
         assert_eq!(deserialized.trust_level, TrustLevel::Verified);

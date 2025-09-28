@@ -1,14 +1,11 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::state::AppState;
-use matryx_entity::types::{Membership, MembershipState, Room};
+use matryx_entity::types::{MembershipState, Room};
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
-use surrealdb::engine::any::Any;
 
 /// Join Rules Validation System for Matrix room access control
 ///
@@ -89,8 +86,12 @@ impl JoinRulesValidator {
             "restricted" => self.validate_restricted_join(&room, user_id, via_invite).await,
             "knock" => self.validate_knock_join(&room, user_id).await,
             "knock_restricted" => self.validate_knock_restricted_join(&room, user_id).await,
-            "private" | _ => {
+            "private" => {
                 warn!("Join denied to private room {} for user {}", room_id, user_id);
+                Err(StatusCode::FORBIDDEN)
+            },
+            _ => {
+                warn!("Join denied to room {} with unknown join rule for user {}", room_id, user_id);
                 Err(StatusCode::FORBIDDEN)
             },
         }
@@ -216,15 +217,14 @@ impl JoinRulesValidator {
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            if let Some(m) = membership {
-                if m.membership == MembershipState::Invite {
+            if let Some(m) = membership
+                && m.membership == MembershipState::Invite {
                     info!(
                         "Restricted join approved for user {} to room {} (has pending invitation)",
                         user_id, room.room_id
                     );
                     return Ok(());
                 }
-            }
         }
 
         // Check allow conditions from room's join_rules state event
@@ -239,8 +239,8 @@ impl JoinRulesValidator {
 
         // Check if user is a member of any of the allowed rooms/spaces
         for condition in allow_conditions {
-            if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership") {
-                if let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str()) {
+            if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership")
+                && let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str()) {
                     // Check if user is a member of this allowed room
                     let allowed_membership = self.membership_repo.get_by_room_user(allowed_room_id, user_id).await
                         .map_err(|e| {
@@ -248,8 +248,8 @@ impl JoinRulesValidator {
                             StatusCode::INTERNAL_SERVER_ERROR
                         })?;
 
-                    if let Some(m) = allowed_membership {
-                        if m.membership == MembershipState::Join {
+                    if let Some(m) = allowed_membership
+                        && m.membership == MembershipState::Join {
                             info!(
                                 "Restricted join approved for user {} to room {} via membership in room {}",
                                 user_id, room.room_id, allowed_room_id
@@ -257,8 +257,6 @@ impl JoinRulesValidator {
                             return Ok(());
                         }
                     }
-                }
-            }
         }
 
         warn!(
@@ -388,6 +386,136 @@ impl JoinRulesValidator {
                 Err(StatusCode::FORBIDDEN)
             },
             _ => Ok(()),
+        }
+    }
+
+    /// Validate power level authorization for membership actions
+    ///
+    /// Per Matrix spec: Users must have sufficient power level to perform membership
+    /// actions like invite, kick, ban. This requires direct database queries for
+    /// power level validation as specified in Section 8 - Room State Management.
+    ///
+    /// # Arguments
+    /// * `room_id` - The room where the action is being performed
+    /// * `actor_id` - The user performing the action
+    /// * `action` - The type of membership action
+    /// * `target_power_level` - Power level of the target user (if applicable)
+    ///
+    /// # Returns
+    /// * `Result<bool, StatusCode>` - True if user has sufficient power level
+    ///
+    /// # Errors
+    /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database query error
+    /// * `StatusCode::FORBIDDEN` - Insufficient power level
+    pub async fn validate_power_level_authorization(
+        &self,
+        room_id: &str,
+        actor_id: &str,
+        action: MembershipAction,
+        target_power_level: Option<i64>,
+    ) -> Result<bool, StatusCode> {
+        debug!("Validating power level for {:?} action by {} in room {}", action, actor_id, room_id);
+        
+        // Direct database query to get current power levels state event per Matrix spec
+        let query = "
+            SELECT content FROM room_state_events 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.power_levels' 
+            AND state_key = ''
+            ORDER BY origin_server_ts DESC 
+            LIMIT 1
+        ";
+        
+        let mut result = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| {
+                error!("Failed to query power levels for room {}: {:?}", room_id, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            
+        let power_levels_records: Vec<Value> = result.take(0).map_err(|e| {
+            error!("Failed to parse power levels query result: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        
+        let power_levels = power_levels_records
+            .first()
+            .and_then(|record| record.get("content"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+            
+        // Get actor's power level
+        let actor_power = self.get_user_power_level(&power_levels, actor_id).await?;
+        
+        // Get required power level for this action
+        let required_power = self.get_required_power_level(&power_levels, action).await?;
+        
+        // For ban/kick actions, actor must have higher power level than target
+        if matches!(action, MembershipAction::Ban | MembershipAction::Kick)
+            && let Some(target_power) = target_power_level
+            && actor_power <= target_power {
+                    warn!("Power level authorization failed - actor {} (power {}) cannot {} user with power {}",
+                          actor_id, actor_power, action.as_str(), target_power);
+                return Ok(false);
+            }
+        
+        let authorized = actor_power >= required_power;
+        if !authorized {
+            warn!("Power level authorization failed - actor {} (power {}) needs {} for {:?}", 
+                  actor_id, actor_power, required_power, action);
+        } else {
+            debug!("Power level authorization passed - actor {} (power {}) authorized for {:?}", 
+                   actor_id, actor_power, action);
+        }
+        
+        Ok(authorized)
+    }
+
+    /// Get user's power level from power_levels event content
+    ///
+    /// Per Matrix spec: Users default to power level 0, room creator gets 100.
+    /// This method implements the Matrix power level resolution algorithm.
+    async fn get_user_power_level(&self, power_levels: &Value, user_id: &str) -> Result<i64, StatusCode> {
+        // Check users object for explicit power level
+        if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
+            && let Some(user_power) = users.get(user_id).and_then(|p| p.as_i64()) {
+                return Ok(user_power);
+            }
+        
+        // Default power level for users (Matrix spec default: 0)
+        let default_power = power_levels
+            .get("users_default")
+            .and_then(|d| d.as_i64())
+            .unwrap_or(0);
+            
+        Ok(default_power)
+    }
+    
+    /// Get required power level for membership action
+    ///
+    /// Per Matrix spec: Different actions require different power levels.
+    /// This implements the Matrix power level requirements.
+    async fn get_required_power_level(&self, power_levels: &Value, action: MembershipAction) -> Result<i64, StatusCode> {
+        match action {
+            MembershipAction::Invite => {
+                Ok(power_levels.get("invite").and_then(|p| p.as_i64()).unwrap_or(0))
+            },
+            MembershipAction::Kick => {
+                Ok(power_levels.get("kick").and_then(|p| p.as_i64()).unwrap_or(50))
+            },
+            MembershipAction::Ban => {
+                Ok(power_levels.get("ban").and_then(|p| p.as_i64()).unwrap_or(50))
+            },
+            MembershipAction::Join | MembershipAction::Leave | MembershipAction::Knock => {
+                // These actions don't require special power levels beyond membership
+                Ok(0)
+            },
+            MembershipAction::Unban => {
+                // Unban typically requires same power as ban
+                Ok(power_levels.get("ban").and_then(|p| p.as_i64()).unwrap_or(50))
+            },
         }
     }
 
@@ -625,6 +753,7 @@ impl JoinRulesValidator {
             _ => Ok(()),
         }
     }
+
 }
 
 /// Types of membership actions that require authorization
@@ -656,8 +785,6 @@ impl MembershipAction {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests would be implemented here following Rust testing best practices
     // Using expect() in tests (never unwrap()) for proper error messages
     // These tests would cover all join rule scenarios and edge cases

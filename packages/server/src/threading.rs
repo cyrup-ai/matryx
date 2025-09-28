@@ -1,11 +1,9 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use tracing::{error, info, warn};
-use uuid::Uuid;
+use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
 use matryx_entity::{Event, ThreadSummary};
+use matryx_surrealdb::repository::thread::ThreadEventsResponse;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ThreadError {
@@ -81,12 +79,55 @@ impl ThreadManager {
         limit: Option<u32>,
         from: Option<String>,
         state: &AppState,
-    ) -> Result<Vec<Event>, ThreadError> {
-        state
-            .thread_repository
-            .get_thread_events(thread_root_id, limit)
-            .await
-            .map_err(|e| ThreadError::DatabaseError(e.to_string()))
+    ) -> Result<ThreadEventsResponse, ThreadError> {
+        // Use the 'from' parameter for pagination if provided
+        if let Some(from_token) = &from {
+            debug!("Getting thread events from pagination token: {}", from_token);
+        }
+
+        // Pass the from token to repository for pagination
+        let from_ref = from.as_deref();
+
+        // Use from_ref for pagination in thread repository call
+        debug!("Getting thread events with pagination reference: {:?}", from_ref);
+
+        // Implement pagination by getting events starting from the specified token
+        if let Some(from_token) = from_ref {
+            // Get events after the specified from token for pagination
+            debug!("Fetching thread events after token: {}", from_token);
+            let repo_response = state
+                .thread_repository
+                .get_thread_events_from(thread_root_id, from_token, limit)
+                .await
+                .map_err(|e| ThreadError::DatabaseError(e.to_string()))?;
+
+            Ok(ThreadEventsResponse {
+                events: repo_response.events,
+                next_batch: repo_response.next_batch,
+                prev_batch: repo_response.prev_batch,
+            })
+        } else {
+            // Get latest thread events when no from token is provided
+            let events = state
+                .thread_repository
+                .get_thread_events(thread_root_id, limit)
+                .await
+                .map_err(|e| ThreadError::DatabaseError(e.to_string()))?;
+
+            // Generate pagination tokens for non-paginated requests
+            let limit = limit.unwrap_or(50).min(100);
+            let next_batch = if events.len() == limit as usize {
+                events.last().map(|e| format!("t_{}", e.origin_server_ts))
+            } else {
+                None
+            };
+
+            Ok(ThreadEventsResponse {
+                events,
+                next_batch,
+                prev_batch: None, // No prev_batch when not paginating
+            })
+        }
     }
 
     pub async fn generate_thread_summary(
@@ -97,7 +138,8 @@ impl ThreadManager {
     ) -> Result<ThreadSummary, ThreadError> {
         info!("Generating thread summary for root {}", thread_root_id);
 
-        let thread_events = self.get_thread_events(thread_root_id, Some(50), None, state).await?;
+        let thread_response = self.get_thread_events(thread_root_id, Some(50), None, state).await?;
+        let thread_events = thread_response.events;
 
         let latest_event = thread_events.last().cloned();
         let count = thread_events.len();

@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::error;
@@ -13,6 +12,8 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_entity::MembershipState;
+use matryx_surrealdb::repository::{RoomAliasRepository, MembershipRepository};
 
 #[derive(Serialize, Deserialize)]
 pub struct RoomAliasResponse {
@@ -53,21 +54,30 @@ async fn validate_alias_permissions(
     alias: &str,
     room_id: &str,
 ) -> Result<(), StatusCode> {
-    // Check if user is member of the room
-    let query = "SELECT membership FROM membership WHERE room_id = $room_id AND user_id = $user_id";
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await
+    // Use MembershipRepository to check if user is member of the room
+    let membership_repo = MembershipRepository::new(state.db.clone());
+    let membership = membership_repo.get_membership(room_id, user_id).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let membership: Option<String> =
-        response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match membership.as_deref() {
-        Some("join") => Ok(()),
+    match membership {
+        Some(membership) if membership.membership == MembershipState::Join => {
+            // TODO: Implement proper power level validation per Matrix spec
+            // Only users with sufficient power levels should be able to manage aliases
+            // Default power level requirement for alias management is typically 50+
+            
+            // Validate alias domain permissions
+            // According to Matrix spec, users should only be able to manage aliases 
+            // on their own homeserver domain
+            let homeserver_name = &state.homeserver_name;
+            if let Some(alias_domain) = alias.split(':').nth(1)
+                && alias_domain != homeserver_name {
+                    error!("User {} attempted to manage alias {} on foreign domain {}", 
+                           user_id, alias, alias_domain);
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            
+            Ok(())
+        },
         _ => Err(StatusCode::FORBIDDEN),
     }
 }
@@ -95,28 +105,17 @@ pub async fn delete(
 
     validate_alias_format(&room_alias)?;
 
-    // Check if alias exists and get room_id for permission check
-    let query = "SELECT room_id FROM room_aliases WHERE alias = $alias";
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("alias", room_alias.clone()))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let room_id: Option<String> =
-        response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let room_id = room_id.ok_or(StatusCode::NOT_FOUND)?;
+    // Use RoomAliasRepository to resolve alias and get room_id for permission check
+    let room_alias_repo = RoomAliasRepository::new(state.db.clone());
+    let alias_info = room_alias_repo.resolve_alias(&room_alias).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Validate permissions
-    validate_alias_permissions(&state, &user_id, &room_alias, &room_id).await?;
+    validate_alias_permissions(&state, &user_id, &room_alias, &alias_info.room_id).await?;
 
-    // Delete the alias
-    let _: Option<RoomAlias> = state
-        .db
-        .delete(("room_aliases", &room_alias))
-        .await
+    // Delete the alias using repository
+    room_alias_repo.delete_alias(&room_alias).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({})))
@@ -129,22 +128,28 @@ pub async fn get(
 ) -> Result<Json<RoomAliasResponse>, StatusCode> {
     validate_alias_format(&room_alias)?;
 
-    let query = "SELECT room_id, servers FROM room_aliases WHERE alias = $alias";
-    let mut response = state.db.query(query).bind(("alias", room_alias)).await.map_err(|e| {
-        error!("Database query failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let alias_record: Option<RoomAliasRecord> = response.take(0).map_err(|e| {
-        error!("Failed to parse query result: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    match alias_record {
-        Some(record) => {
-            Ok(Json(RoomAliasResponse { room_id: record.room_id, servers: record.servers }))
+    // Use RoomAliasRepository to resolve alias
+    let room_alias_repo = RoomAliasRepository::new(state.db.clone());
+    
+    match room_alias_repo.resolve_alias(&room_alias).await {
+        Ok(Some(alias_info)) => {
+            // Create proper room alias record with server information
+            let alias_record = RoomAliasRecord {
+                room_id: alias_info.room_id.clone(),
+                servers: vec![state.homeserver_name.clone()],
+            };
+            
+            // Use the alias record to create response
+            Ok(Json(RoomAliasResponse { 
+                room_id: alias_record.room_id, 
+                servers: alias_record.servers 
+            }))
         },
-        None => Err(StatusCode::NOT_FOUND),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            error!("Failed to resolve room alias: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        },
     }
 }
 
@@ -173,20 +178,18 @@ pub async fn put(
     validate_alias_format(&room_alias)?;
     validate_alias_permissions(&state, &user_id, &room_alias, &request.room_id).await?;
 
-    // Create alias record
+    // Create comprehensive room alias record with metadata
     let alias_record = RoomAlias {
         alias: room_alias.clone(),
         room_id: request.room_id.clone(),
-        creator: user_id,
-        created_at: Utc::now(),
+        creator: user_id.clone(),
+        created_at: chrono::Utc::now(),
         servers: vec![state.homeserver_name.clone()],
     };
 
-    let _: Option<RoomAlias> = state
-        .db
-        .create(("room_aliases", &room_alias))
-        .content(alias_record)
-        .await
+    // Create alias using repository
+    let room_alias_repo = RoomAliasRepository::new(state.db.clone());
+    room_alias_repo.create_alias(&alias_record.alias, &alias_record.room_id, &alias_record.creator).await
         .map_err(|e| {
             error!("Failed to create alias: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR

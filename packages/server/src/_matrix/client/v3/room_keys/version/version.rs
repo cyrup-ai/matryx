@@ -12,6 +12,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::key_backup::KeyBackupRepository;
 
 #[derive(Deserialize)]
 pub struct BackupVersionCreateRequest {
@@ -55,18 +56,9 @@ pub async fn post(
     let etag = version.clone();
 
     // Create backup version
-    let _: Option<Value> = state.db
-        .create(("backup_versions", format!("{}:{}", user_id, version)))
-        .content(json!({
-            "user_id": user_id,
-            "version": version,
-            "algorithm": request.algorithm,
-            "auth_data": request.auth_data,
-            "count": 0,
-            "etag": etag,
-            "created_at": Utc::now(),
-            "updated_at": Utc::now()
-        }))
+    let backup_repo = KeyBackupRepository::new(state.db.clone());
+    let version = backup_repo
+        .create_backup_version(&user_id, &request.algorithm, &request.auth_data)
         .await
         .map_err(|e| {
             error!("Failed to create backup version: {}", e);
@@ -101,28 +93,21 @@ pub async fn get(
     };
 
     // Get the latest backup version for this user
-    let query = "SELECT * FROM backup_versions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 1";
-    let mut response = state.db
-        .query(query)
-        .bind(("user_id", user_id.clone()))
-        .await
-        .map_err(|e| {
+    let backup_repo = KeyBackupRepository::new(state.db.clone());
+    match backup_repo.get_latest_backup_version(&user_id).await {
+        Ok(Some(backup)) => {
+            Ok(Json(json!({
+                "algorithm": backup.algorithm,
+                "auth_data": backup.auth_data,
+                "count": backup.count,
+                "etag": backup.etag,
+                "version": backup.version
+            })))
+        },
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
             error!("Failed to query backup versions: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let backup_version: Option<Value> = response.take(0)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(backup) = backup_version {
-        Ok(Json(json!({
-            "algorithm": backup.get("algorithm").unwrap_or(&json!("")),
-            "auth_data": backup.get("auth_data").unwrap_or(&json!({})),
-            "count": backup.get("count").unwrap_or(&json!(0)),
-            "etag": backup.get("etag").unwrap_or(&json!("")),
-            "version": backup.get("version").unwrap_or(&json!(""))
-        })))
-    } else {
-        Err(StatusCode::NOT_FOUND)
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }

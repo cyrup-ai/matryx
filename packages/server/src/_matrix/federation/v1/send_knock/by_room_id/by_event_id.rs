@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+use crate::federation::membership_federation::validate_room_knock_allowed;
 use crate::state::AppState;
 use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
@@ -84,9 +85,8 @@ pub async fn put(
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -127,6 +127,35 @@ pub async fn put(
             warn!("Room {} not found", room_id);
             StatusCode::NOT_FOUND
         })?;
+
+    // Validate room allows knocking per Matrix specification
+    if !validate_room_knock_allowed(&room, &x_matrix_auth.origin).await.map_err(|e| {
+        error!("Failed to validate knock permissions for room {}: {}", room_id, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })? {
+        warn!(
+            "Knock denied for server {} in room {} - room join rules don't permit knocking",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check room version compatibility for knock support
+    let version_num = room.room_version.chars().next()
+        .and_then(|c| c.to_digit(10))
+        .unwrap_or(1);
+    if version_num < 7 {
+        warn!(
+            "Knock not supported in room {} with version {} - knocking requires room version 7+",
+            room_id, room.room_version
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    info!(
+        "Room knock validation passed for room {} (version {}) from server {}",
+        room_id, room.room_version, x_matrix_auth.origin
+    );
 
     // Extract and validate the knock event from payload
     let knock_event = payload.as_object().ok_or_else(|| {
@@ -410,114 +439,30 @@ pub async fn put(
     Ok(Json(response))
 }
 
-/// Check if room allows knocking by examining join rules
+/// Check if room allows knocking by examining join rules using repository
 async fn check_room_allows_knocking(
     state: &AppState,
     room_id: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.join_rule
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.join_rules' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct JoinRulesContent {
-        join_rule: Option<String>,
-    }
-
-    let join_rules: Option<JoinRulesContent> = response.take(0)?;
-
-    match join_rules {
-        Some(rules) => {
-            let join_rule = rules.join_rule.unwrap_or_else(|| "invite".to_string());
-            Ok(join_rule == "knock")
-        },
-        None => {
-            // No join rules event found, default is "invite" which doesn't allow knocking
-            Ok(false)
-        },
-    }
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let allows_knocking = room_repo.check_room_allows_knocking(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(allows_knocking)
 }
 
-/// Check if server is allowed by room ACLs
+/// Check if server is allowed by room ACLs using repository
 async fn check_server_acls(
     state: &AppState,
     room_id: &str,
     server_name: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.allow, content.deny
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.server_acl' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct ServerAclContent {
-        allow: Option<Vec<String>>,
-        deny: Option<Vec<String>>,
-    }
-
-    let server_acl: Option<ServerAclContent> = response.take(0)?;
-
-    match server_acl {
-        Some(acl) => {
-            // Check deny list first
-            if let Some(deny_list) = acl.deny {
-                for pattern in deny_list {
-                    if server_matches_pattern(server_name, &pattern) {
-                        return Ok(false);
-                    }
-                }
-            }
-
-            // Check allow list
-            if let Some(allow_list) = acl.allow {
-                for pattern in allow_list {
-                    if server_matches_pattern(server_name, &pattern) {
-                        return Ok(true);
-                    }
-                }
-                // If allow list exists but server doesn't match, deny
-                Ok(false)
-            } else {
-                // No allow list, server is allowed (unless denied above)
-                Ok(true)
-            }
-        },
-        None => {
-            // No server ACL event, all servers allowed
-            Ok(true)
-        },
-    }
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let server_allowed = room_repo.check_server_acls(room_id, server_name).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(server_allowed)
 }
 
-/// Check if server name matches ACL pattern (supports wildcards)
-fn server_matches_pattern(server_name: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
 
-    if pattern.starts_with("*.") {
-        let domain_suffix = &pattern[2..];
-        return server_name == domain_suffix ||
-            server_name.ends_with(&format!(".{}", domain_suffix));
-    }
-
-    server_name == pattern
-}
 
 /// Validate event signatures
 async fn validate_event_signatures(
@@ -638,78 +583,26 @@ fn validate_pdu_structure(event: &Value) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Check authorization rules for knock event
+/// Check authorization rules for knock event using repository
 async fn check_knock_authorization(
     state: &AppState,
     room_id: &str,
     user_id: &str,
     _event: &Value,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // For knock events, the main authorization check is that the room allows knocking
-    // and the user is not banned or already in the room (checked earlier)
-
-    // Additional authorization checks can be added here based on room power levels
-    // For now, we'll allow any knock if the room permits knocking
-
-    // Check if user has any power level restrictions
-    let query = "
-        SELECT content.users
-        FROM event 
-        WHERE room_id = $room_id 
-        AND type = 'm.room.power_levels' 
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct PowerLevelsContent {
-        users: Option<serde_json::Map<String, serde_json::Value>>,
-    }
-
-    let power_levels: Option<PowerLevelsContent> = response.take(0)?;
-
-    if let Some(levels) = power_levels {
-        if let Some(users) = levels.users {
-            // Check if user has negative power level (effectively banned from actions)
-            if let Some(user_level) = users.get(user_id).and_then(|v| v.as_i64()) {
-                if user_level < 0 {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-
-    Ok(true)
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let authorized = event_repo.check_knock_authorization(room_id, user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(authorized)
 }
 
-/// Get room state events to include in knock response
+/// Get room state events to include in knock response using repository
 async fn get_room_state_for_knock(
     state: &AppState,
     room_id: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    // Return essential room state events for the knocking user
-    let query = "
-        SELECT *
-        FROM event 
-        WHERE room_id = $room_id 
-        AND state_key IS NOT NULL
-        AND type IN [
-            'm.room.create',
-            'm.room.join_rules', 
-            'm.room.power_levels',
-            'm.room.name',
-            'm.room.topic',
-            'm.room.avatar',
-            'm.room.canonical_alias'
-        ]
-        ORDER BY depth DESC, origin_server_ts DESC
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-    let events: Vec<Value> = response.take(0)?;
-
-    Ok(events)
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let state_events = event_repo.get_room_state_for_knock(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(state_events)
 }

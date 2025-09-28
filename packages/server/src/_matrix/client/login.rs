@@ -17,6 +17,6 @@ pub async fn post(
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     // Delegate to v3 login implementation
-    crate::_matrix::client::v3::login::post(State(state), ConnectInfo(addr), headers, Json(request))
+    crate::_matrix::client::v3::login::post(State(state), ConnectInfo(addr), tower_cookies::Cookies::default(), headers, Json(request))
         .await
 }

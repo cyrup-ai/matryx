@@ -3,13 +3,13 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 
 use crate::auth::extract_matrix_auth;
 use crate::state::AppState;
-use matryx_surrealdb::repository::sync::{Filter, SyncRepository};
+use matryx_surrealdb::repository::sync::{SyncRepository, Filter, RoomFilter, RoomEventFilter};
 
 #[derive(Deserialize)]
 pub struct InitialSyncQuery {
@@ -43,8 +43,42 @@ pub async fn get(
     // Create sync repository
     let sync_repo = SyncRepository::new(state.db.clone());
 
-    // Get initial sync data
-    let initial_sync = match sync_repo.get_initial_sync_data(&user_id, None).await {
+    // Apply query parameters for pagination and filtering
+    if query.archived.unwrap_or(false) {
+        tracing::info!("Initial sync requested archived rooms for user: {}", user_id);
+    }
+    
+    // Create filter if limit is specified
+    let filter = query.limit.map(|limit| Filter {
+        room: Some(RoomFilter {
+            timeline: Some(RoomEventFilter {
+                limit: Some(limit as u64),
+                not_senders: None,
+                not_types: None,
+                senders: None,
+                types: None,
+                contains_url: None,
+                lazy_load_members: None,
+                include_redundant_members: None,
+                not_rooms: None,
+                rooms: None,
+                unread_thread_notifications: None,
+            }),
+            not_rooms: None,
+            rooms: None,
+            ephemeral: None,
+            include_leave: None,
+            state: None,
+            account_data: None,
+        }),
+        presence: None,
+        account_data: None,
+        event_format: None,
+        event_fields: None,
+    });
+    
+    // Get initial sync data  
+    let initial_sync = match sync_repo.get_initial_sync_data(&user_id, filter.as_ref()).await {
         Ok(sync_data) => sync_data,
         Err(e) => {
             error!("Failed to get initial sync for user {}: {}", user_id, e);

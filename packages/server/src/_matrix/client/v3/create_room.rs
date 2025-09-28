@@ -5,19 +5,15 @@ use axum::{
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
 };
-use chrono::Utc;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
-    utils::matrix_events::{calculate_content_hashes, sign_event},
 };
-use matryx_entity::types::{Event, Membership, MembershipState, Room};
 use matryx_surrealdb::repository::{
     EventRepository,
     MembershipRepository,
@@ -103,6 +99,17 @@ pub async fn post(
 
     info!("Processing room creation request for user: {} from: {}", user_id, addr);
 
+    // Validate room version if provided
+    if let Some(ref version) = request.room_version
+        && !is_supported_room_version(version) {
+        warn!("Room creation failed - unsupported room version: {}", version);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Generate room ID for the new room
+    let room_id = generate_room_id(&state.homeserver_name);
+    info!("Generated room ID: {} for user: {}", room_id, user_id);
+
     // Create repository instances
     let room_repo = RoomRepository::new(state.db.clone());
     let membership_repo = MembershipRepository::new(state.db.clone());
@@ -143,6 +150,8 @@ pub async fn post(
             })
             .unwrap_or_default(),
         power_level_content_override: request.power_level_content_override.clone(),
+        invite_3pid: request.invite_3pid.clone().unwrap_or_default(),
+        creation_content: request.creation_content.clone(),
     };
 
     // Use the room management service to create the room
@@ -153,6 +162,27 @@ pub async fn post(
                 "Successfully created room {} for user {} in {:?}",
                 room.room_id, user_id, elapsed
             );
+
+            // Handle third party invites if provided
+            if let Some(ref invite_3pid) = request.invite_3pid {
+                for invite in invite_3pid {
+                    if let (Some(medium), Some(address), Some(id_server)) =
+                        (invite.get("medium").and_then(|v| v.as_str()),
+                         invite.get("address").and_then(|v| v.as_str()),
+                         invite.get("id_server").and_then(|v| v.as_str())) {
+                        info!("Processing third party invite: {} {} via {}", medium, address, id_server);
+                        // TODO: Implement third party invite processing
+                        // This would involve contacting the identity server to validate the invite
+                    }
+                }
+            }
+
+            // Apply creation content if provided (custom room creation parameters)
+            if let Some(ref creation_content) = request.creation_content {
+                info!("Applying custom creation content for room {}: {:?}", room.room_id, creation_content);
+                // TODO: Store custom creation content in room metadata
+                // This content is typically used for room versioning or custom room types
+            }
 
             // Create room alias if requested
             let room_alias = if let Some(alias_name) = request.room_alias_name {
@@ -184,7 +214,7 @@ pub async fn post(
     }
 }
 
-fn generate_room_id(homeserver_name: &str) -> String {
+pub fn generate_room_id(homeserver_name: &str) -> String {
     let random_part = Uuid::new_v4().to_string().replace('-', "");
     format!("!{}:{}", &random_part[..18], homeserver_name)
 }

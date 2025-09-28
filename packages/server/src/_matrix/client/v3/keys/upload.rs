@@ -3,9 +3,9 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use chrono::Utc;
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
+
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 
@@ -14,6 +14,7 @@ use crate::{
     auth::{MatrixAuth, extract_matrix_auth},
     crypto::MatryxCryptoProvider,
 };
+use matryx_surrealdb::repository::KeysRepository;
 
 #[derive(Deserialize)]
 pub struct KeysUploadRequest {
@@ -22,31 +23,18 @@ pub struct KeysUploadRequest {
     pub fallback_keys: Option<std::collections::HashMap<String, Value>>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct DeviceKeys {
-    pub user_id: String,
-    pub device_id: String,
-    pub algorithms: Vec<String>,
-    pub keys: std::collections::HashMap<String, String>,
-    pub signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-}
+// Use DeviceKeys from entity package to avoid type conflicts
+use matryx_entity::types::DeviceKeys;
 
 async fn store_device_keys(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    keys_repo: &KeysRepository,
     user_id: &str,
     device_id: &str,
     device_keys: &DeviceKeys,
 ) -> Result<(), StatusCode> {
-    let _: Option<DeviceKeys> = db
-        .create(("device_keys", format!("{}:{}", user_id, device_id)))
-        .content(json!({
-            "user_id": user_id,
-            "device_id": device_id,
-            "device_keys": device_keys,
-            "created_at": Utc::now(),
-            "signature_valid": true,
-            "validation_timestamp": Utc::now()
-        }))
+    // Pass the entity DeviceKeys directly - no conversion needed
+    keys_repo
+        .store_device_keys(user_id, device_id, device_keys)
         .await
         .map_err(|e| {
             error!("Failed to store device keys: {}", e);
@@ -57,62 +45,34 @@ async fn store_device_keys(
 }
 
 async fn store_one_time_keys(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    keys_repo: &KeysRepository,
     user_id: &str,
     device_id: &str,
     one_time_keys: &std::collections::HashMap<String, Value>,
 ) -> Result<(), StatusCode> {
-    for (key_id, key_data) in one_time_keys {
-        let _: Option<Value> = db
-            .create(("one_time_keys", format!("{}:{}:{}", user_id, device_id, key_id)))
-            .content(json!({
-                "key_id": key_id,
-                "key": key_data,
-                "user_id": user_id,
-                "device_id": device_id,
-                "created_at": Utc::now(),
-                "claimed": false,
-                "algorithm_type": key_id.split(':').next().unwrap_or("unknown"),
-                "vodozemac_validated": true
-            }))
-            .await
-            .map_err(|e| {
-                error!("Failed to store one-time key: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    }
+    keys_repo
+        .store_one_time_keys(user_id, device_id, one_time_keys)
+        .await
+        .map_err(|e| {
+            error!("Failed to store one-time keys: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(())
 }
 
 async fn get_one_time_key_counts(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    keys_repo: &KeysRepository,
     user_id: &str,
     device_id: &str,
 ) -> Result<std::collections::HashMap<String, u32>, StatusCode> {
-    let query = "SELECT algorithm_type, count() AS count FROM one_time_keys WHERE user_id = $user_id AND device_id = $device_id AND claimed = false GROUP BY algorithm_type";
-    let user_id_owned = user_id.to_string();
-    let device_id_owned = device_id.to_string();
-    let mut response = db
-        .query(query)
-        .bind(("user_id", user_id_owned))
-        .bind(("device_id", device_id_owned))
+    keys_repo
+        .get_one_time_key_counts(user_id, device_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let results: Vec<Value> = response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut counts = std::collections::HashMap::new();
-    for result in results {
-        if let (Some(algorithm), Some(count)) = (
-            result.get("algorithm_type").and_then(|v| v.as_str()),
-            result.get("count").and_then(|v| v.as_u64()),
-        ) {
-            counts.insert(algorithm.to_string(), count as u32);
-        }
-    }
-
-    Ok(counts)
+        .map_err(|e| {
+            error!("Failed to get one-time key counts: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 /// POST /_matrix/client/v3/keys/upload
@@ -137,6 +97,7 @@ pub async fn post(
     };
 
     let crypto_provider = MatryxCryptoProvider::new(state.db.clone());
+    let keys_repo = KeysRepository::new(state.db.clone());
 
     // Enhanced device key validation with vodozemac
     if let Some(device_keys) = &request.device_keys {
@@ -169,7 +130,7 @@ pub async fn post(
         }
 
         // Store validated keys
-        store_device_keys(&state.db, &user_id, &device_id, device_keys)
+        store_device_keys(&keys_repo, &user_id, &device_id, device_keys)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -191,9 +152,13 @@ pub async fn post(
                 error!("Invalid one-time key format: {}", key_id);
                 return Err(StatusCode::BAD_REQUEST);
             }
+            
+            // Track key counts by algorithm
+            let algorithm = key_id.split(':').next().unwrap_or("unknown");
+            *one_time_key_counts.entry(algorithm.to_string()).or_insert(0) += 1;
         }
 
-        store_one_time_keys(&state.db, &user_id, &device_id, one_time_keys)
+        store_one_time_keys(&keys_repo, &user_id, &device_id, one_time_keys)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -207,23 +172,13 @@ pub async fn post(
 
     // Store fallback keys
     if let Some(fallback_keys) = &request.fallback_keys {
-        for (key_id, key_data) in fallback_keys {
-            let _: Option<Value> = state
-                .db
-                .create(("fallback_keys", format!("{}:{}:{}", user_id, device_id, key_id)))
-                .content(json!({
-                    "key_id": key_id,
-                    "key": key_data,
-                    "user_id": user_id,
-                    "device_id": device_id,
-                    "created_at": Utc::now()
-                }))
-                .await
-                .map_err(|e| {
-                    error!("Failed to store fallback key: {}", e);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-        }
+        keys_repo
+            .store_fallback_keys(&user_id, &device_id, fallback_keys)
+            .await
+            .map_err(|e| {
+                error!("Failed to store fallback keys: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         info!(
             "Fallback keys uploaded: {} keys for user: {} device: {}",
@@ -233,10 +188,15 @@ pub async fn post(
         );
     }
 
-    // Get current counts
-    let counts = get_one_time_key_counts(&state.db, &user_id, &device_id)
+    // Get current counts including newly uploaded keys
+    let mut counts = get_one_time_key_counts(&keys_repo, &user_id, &device_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    // Merge newly uploaded key counts
+    for (algorithm, count) in one_time_key_counts {
+        *counts.entry(algorithm).or_insert(0) += count;
+    }
 
     Ok(Json(json!({
         "one_time_key_counts": counts

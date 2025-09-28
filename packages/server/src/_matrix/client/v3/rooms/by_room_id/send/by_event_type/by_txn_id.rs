@@ -3,16 +3,16 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::Utc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use uuid::Uuid;
 
-use crate::auth::{AuthenticatedUser, MatrixAuth};
+
+use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
-use crate::utils::matrix_events::{calculate_content_hashes, sign_event};
-use matryx_entity::types::{Event, EventContent, Membership, MembershipState, Room};
+
+use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{
     EventRepository,
     MembershipRepository,

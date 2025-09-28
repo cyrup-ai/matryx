@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use axum::{
@@ -6,10 +5,10 @@ use axum::{
     extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
 };
-use chrono::{DateTime, Utc};
-use matryx_entity::{DeviceInfo, DeviceKeys};
+
+use matryx_entity::DeviceKeys;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -27,9 +26,10 @@ fn extract_device_id_from_auth(auth: &MatrixAuth) -> Option<String> {
 }
 
 /// Device trust level enumeration
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub enum TrustLevel {
     #[serde(rename = "unverified")]
+    #[default]
     Unverified,
     #[serde(rename = "cross_signed")]
     CrossSigned,
@@ -37,12 +37,6 @@ pub enum TrustLevel {
     Verified,
     #[serde(rename = "blacklisted")]
     Blacklisted,
-}
-
-impl Default for TrustLevel {
-    fn default() -> Self {
-        TrustLevel::Unverified
-    }
 }
 
 /// Client API Device Information - different from federation DeviceInfo
@@ -210,8 +204,7 @@ pub async fn register_device_with_keys(
         device_keys: request
             .initial_device_keys
             .as_ref()
-            .map(|k| serde_json::to_value(k).ok())
-            .flatten(),
+            .and_then(|k| serde_json::to_value(k).ok()),
         one_time_keys: None,
         fallback_keys: None,
         user_agent: None,

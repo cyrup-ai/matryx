@@ -1,11 +1,11 @@
 use crate::error::MatrixError;
 use axum::{
     body::Body,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
 use serde::Serialize;
-use serde_json::json;
+use uuid::Uuid;
 
 /// Create standardized Matrix JSON response
 pub fn matrix_response<T: Serialize>(data: T) -> impl IntoResponse {
@@ -79,4 +79,78 @@ pub fn is_safe_inline_content_type(content_type: &str) -> bool {
             "audio/flac" |
             "audio/x-flac"
     )
+}
+
+/// Multipart media response containing metadata and content
+pub struct MultipartMediaResponse {
+    pub metadata: serde_json::Value,
+    pub content: MediaContent,
+}
+
+/// Media content can be bytes or a redirect location
+pub enum MediaContent {
+    Bytes {
+        data: Vec<u8>,
+        content_type: String,
+        filename: Option<String>,
+    },
+    Redirect {
+        location: String,
+    },
+}
+
+/// Build Matrix-compliant multipart/mixed response for federation media
+pub fn build_multipart_media_response(
+    response: MultipartMediaResponse,
+) -> Result<Response<Body>, axum::http::Error> {
+    let boundary = format!("matrix_media_{}", Uuid::new_v4().simple());
+
+    let mut body_bytes = Vec::new();
+
+    // Part 1: JSON metadata (currently empty object per spec)
+    let metadata_part = format!(
+        "--{}\r\nContent-Type: application/json\r\n\r\n{}\r\n",
+        boundary,
+        serde_json::to_string(&response.metadata).unwrap_or_else(|_| "{}".to_string())
+    );
+    body_bytes.extend_from_slice(metadata_part.as_bytes());
+
+    // Part 2: Media content or redirect
+    match response.content {
+        MediaContent::Bytes { data, content_type, filename } => {
+            let mut part_header = format!(
+                "--{}\r\nContent-Type: {}\r\n",
+                boundary, content_type
+            );
+
+            if let Some(name) = filename {
+                part_header.push_str(&format!("Content-Disposition: attachment; filename=\"{}\"\r\n", name));
+            }
+
+            part_header.push_str("\r\n");
+            body_bytes.extend_from_slice(part_header.as_bytes());
+            body_bytes.extend_from_slice(&data); // ✅ PRESERVE BINARY DATA
+            body_bytes.extend_from_slice(b"\r\n");
+        }
+        MediaContent::Redirect { location } => {
+            let redirect_part = format!(
+                "--{}\r\nLocation: {}\r\n\r\n\r\n",
+                boundary, location
+            );
+            body_bytes.extend_from_slice(redirect_part.as_bytes());
+        }
+    }
+
+    // Final boundary
+    let final_boundary = format!("--{}--\r\n", boundary);
+    body_bytes.extend_from_slice(final_boundary.as_bytes());
+
+    Response::builder()
+        .status(200)
+        .header("Content-Type", format!("multipart/mixed; boundary={}", boundary))
+        .header("Content-Length", body_bytes.len().to_string())
+        .header("Cache-Control", "public, max-age=31536000, immutable")
+        .header("Cross-Origin-Resource-Policy", "cross-origin")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Body::from(body_bytes)) // ✅ BINARY-SAFE BODY
 }

@@ -3,8 +3,8 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use futures::TryFutureExt;
-use serde::{Deserialize, Serialize};
+
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -13,23 +13,14 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
+use matryx_surrealdb::repository::messaging::{MessagingRepository, ToDeviceMessage};
 
 #[derive(Deserialize)]
 pub struct SendToDeviceRequest {
     messages: std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct ToDeviceMessage {
-    pub id: String,
-    pub sender: String,
-    pub event_type: String,
-    pub content: Value,
-    pub target_user_id: String,
-    pub target_device_id: Option<String>,
-    pub txn_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
+
 
 /// PUT /_matrix/client/v3/sendToDevice/{eventType}/{txnId}
 pub async fn put(
@@ -54,19 +45,12 @@ pub async fn put(
     };
 
     // Check for transaction ID idempotency
-    let query = "SELECT id FROM to_device_messages WHERE sender = $sender AND txn_id = $txn_id";
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("sender", sender_user_id.clone()))
-        .bind(("txn_id", txn_id.clone()))
+    let messaging_repo = MessagingRepository::new(state.db.clone());
+    if messaging_repo
+        .check_transaction_exists(&sender_user_id, &txn_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let existing: Option<String> =
-        response.take(0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if existing.is_some() {
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
         // Transaction already processed - return success (idempotent)
         return Ok(Json(json!({})));
     }
@@ -92,10 +76,8 @@ pub async fn put(
             };
 
             // Store message for delivery via /sync
-            let _: Option<ToDeviceMessage> = state
-                .db
-                .create(("to_device_messages", &to_device_message.id))
-                .content(to_device_message)
+            messaging_repo
+                .store_to_device_message(&to_device_message)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }

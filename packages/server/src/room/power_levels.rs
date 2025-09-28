@@ -1,14 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::state::AppState;
-use matryx_entity::types::{Membership, MembershipState, Room};
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
-use surrealdb::engine::any::Any;
 
 /// Power Level Validation Engine for Matrix room authorization
 ///
@@ -365,11 +361,10 @@ impl PowerLevelValidator {
     /// * `i64` - The user's effective power level in the room
     pub fn get_user_power_level(&self, power_levels: &Value, user_id: &str) -> i64 {
         // Check for user-specific power level
-        if let Some(users) = power_levels.get("users").and_then(|u| u.as_object()) {
-            if let Some(level) = users.get(user_id).and_then(|v| v.as_i64()) {
+        if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
+            && let Some(level) = users.get(user_id).and_then(|v| v.as_i64()) {
                 return level;
             }
-        }
 
         // Fall back to users_default
         if let Some(default_level) = power_levels.get("users_default").and_then(|v| v.as_i64()) {
@@ -421,6 +416,65 @@ impl PowerLevelValidator {
         }
     }
 
+    /// Optimized bulk power level check using direct database query
+    ///
+    /// Uses the direct db connection for high-performance bulk operations
+    /// when checking power levels for multiple users simultaneously.
+    ///
+    /// # Arguments
+    /// * `room_id` - The room to check power levels for
+    /// * `user_ids` - List of user IDs to check
+    ///
+    /// # Returns
+    /// * `Result<Vec<(String, i64)>, StatusCode>` - List of (user_id, power_level) pairs
+    ///
+    /// # Errors
+    /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database query error
+    pub async fn get_bulk_user_power_levels(&self, room_id: String, user_ids: Vec<String>) -> Result<Vec<(String, i64)>, StatusCode> {
+        debug!("Getting bulk power levels for {} users in room {}", user_ids.len(), room_id);
+
+        // First get room power levels configuration
+        let power_levels = self.get_room_power_levels(&room_id).await?;
+        let users_default = power_levels.get("users_default").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        // Use direct database connection for optimized bulk query
+        let query = "
+            SELECT user_id, power_level 
+            FROM room_power_levels 
+            WHERE room_id = $room_id AND user_id IN $user_ids
+        ";
+
+        let mut result = self.db
+            .query(query)
+            .bind(("room_id", room_id.clone()))
+            .bind(("user_ids", user_ids.clone()))
+            .await
+            .map_err(|e| {
+                error!("Bulk power level query failed for room {}: {}", room_id, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        let db_results: Vec<serde_json::Value> = result.take(0).map_err(|e| {
+            error!("Failed to parse bulk power level results: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Build result map with database values and defaults
+        let mut power_levels_result = Vec::new();
+        for user_id in &user_ids {
+            let user_power_level = db_results
+                .iter()
+                .find(|r| r.get("user_id").and_then(|u| u.as_str()) == Some(user_id))
+                .and_then(|r| r.get("power_level").and_then(|p| p.as_i64()))
+                .unwrap_or(users_default);
+
+            power_levels_result.push((user_id.clone(), user_power_level));
+        }
+
+        debug!("Retrieved {} power levels for room {}", power_levels_result.len(), room_id);
+        Ok(power_levels_result)
+    }
+
     /// Get Matrix default power levels configuration
     ///
     /// Returns the standard Matrix power levels when no m.room.power_levels
@@ -461,11 +515,10 @@ impl PowerLevelValidator {
         _state_key: &str,
     ) -> i64 {
         // Check for event-type specific power level
-        if let Some(events) = power_levels.get("events").and_then(|e| e.as_object()) {
-            if let Some(level) = events.get(event_type).and_then(|v| v.as_i64()) {
+        if let Some(events) = power_levels.get("events").and_then(|e| e.as_object())
+            && let Some(level) = events.get(event_type).and_then(|v| v.as_i64()) {
                 return level;
             }
-        }
 
         // Fall back to state_default
         power_levels.get("state_default").and_then(|v| v.as_i64()).unwrap_or(50) // Matrix default state_default is 50
@@ -534,6 +587,7 @@ impl PowerLevelValidator {
     ///
     /// Room administrators typically have power level >= 50 and can perform
     /// most administrative actions like kicks, bans, and state modifications.
+    /// Also validates that the user is actually a member of the room.
     ///
     /// # Arguments
     /// * `room_id` - The room to check admin status for
@@ -545,6 +599,24 @@ impl PowerLevelValidator {
     /// # Errors  
     /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database or validation error
     pub async fn is_room_admin(&self, room_id: &str, user_id: &str) -> Result<bool, StatusCode> {
+        // First verify the user is actually a member of the room
+        match self.membership_repo.get_membership(room_id, user_id).await {
+            Ok(Some(membership)) => {
+                if membership.membership != matryx_entity::MembershipState::Join {
+                    debug!("User {} is not joined to room {} (membership: {:?})", user_id, room_id, membership.membership);
+                    return Ok(false);
+                }
+            },
+            Ok(None) => {
+                debug!("User {} has no membership record for room {}", user_id, room_id);
+                return Ok(false);
+            },
+            Err(e) => {
+                error!("Failed to check membership for user {} in room {}: {:?}", user_id, room_id, e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+
         let power_levels = self.get_room_power_levels(room_id).await?;
         let user_level = self.get_user_power_level(&power_levels, user_id);
 
@@ -564,6 +636,7 @@ impl PowerLevelValidator {
     ///
     /// Room owners typically have power level 100 and can perform all actions
     /// including changing power levels of other users.
+    /// Also validates that the user is actually a member of the room.
     ///
     /// # Arguments
     /// * `room_id` - The room to check owner status for  
@@ -575,6 +648,24 @@ impl PowerLevelValidator {
     /// # Errors
     /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database or validation error
     pub async fn is_room_owner(&self, room_id: &str, user_id: &str) -> Result<bool, StatusCode> {
+        // First verify the user is actually a member of the room
+        match self.membership_repo.get_membership(room_id, user_id).await {
+            Ok(Some(membership)) => {
+                if membership.membership != matryx_entity::MembershipState::Join {
+                    debug!("User {} is not joined to room {} (membership: {:?})", user_id, room_id, membership.membership);
+                    return Ok(false);
+                }
+            },
+            Ok(None) => {
+                debug!("User {} has no membership record for room {}", user_id, room_id);
+                return Ok(false);
+            },
+            Err(e) => {
+                error!("Failed to check membership for user {} in room {}: {:?}", user_id, room_id, e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+
         let power_levels = self.get_room_power_levels(room_id).await?;
         let user_level = self.get_user_power_level(&power_levels, user_id);
 
@@ -593,8 +684,6 @@ impl PowerLevelValidator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests would be implemented here following Rust testing best practices
     // Using expect() in tests (never unwrap()) for proper error messages
     // These tests would cover all power level scenarios and edge cases

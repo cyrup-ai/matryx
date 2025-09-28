@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 use matryx_entity::types::Event;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
 
 /// GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}
 ///
@@ -27,7 +27,7 @@ pub async fn get(
 
     // Validate room exists
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let room = room_repo
+    let _room = room_repo
         .get_by_id(&room_id)
         .await
         .map_err(|e| {
@@ -85,7 +85,7 @@ pub async fn put(
 
     // Validate room exists
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let room = room_repo
+    let _room = room_repo
         .get_by_id(&room_id)
         .await
         .map_err(|e| {
@@ -135,46 +135,30 @@ pub async fn put(
     })))
 }
 
-/// Check if a user has permission to view room state
+/// Check if a user has permission to view room state using repository
 async fn check_room_state_permission(
     state: &AppState,
     room_id: &str,
     user_id: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Check user's membership in the room
-    let query = "
-        SELECT membership
-        FROM membership
-        WHERE room_id = $room_id AND user_id = $user_id
-        ORDER BY updated_at DESC
-        LIMIT 1
-    ";
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct MembershipResult {
-        membership: String,
-    }
-
-    let membership: Option<MembershipResult> = response.take(0)?;
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let membership = membership_repo.get_user_membership_status(room_id, user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     // User can view state if they are joined, invited, or have left (for historical state)
     if let Some(membership) = membership {
-        return Ok(matches!(membership.membership.as_str(), "join" | "invite" | "leave"));
+        return Ok(matches!(membership.as_str(), "join" | "invite" | "leave"));
     }
 
     // Check if room has world-readable history
-    let world_readable = is_room_world_readable(state, room_id).await?;
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let world_readable = room_repo.is_room_world_readable(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(world_readable)
 }
 
-/// Check if user has permission to send state events
+/// Check if user has permission to send state events using repository
 async fn check_state_send_permission(
     state: &AppState,
     room_id: &str,
@@ -182,28 +166,11 @@ async fn check_state_send_permission(
     event_type: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // User must be joined to send state events
-    let membership_query = "
-        SELECT membership
-        FROM membership
-        WHERE room_id = $room_id AND user_id = $user_id
-        ORDER BY updated_at DESC
-        LIMIT 1
-    ";
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let membership = membership_repo.get_user_membership_status(room_id, user_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
-    let mut response = state
-        .db
-        .query(membership_query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("user_id", user_id.to_string()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct MembershipResult {
-        membership: String,
-    }
-
-    let membership: Option<MembershipResult> = response.take(0)?;
-    if !matches!(membership, Some(ref m) if m.membership == "join") {
+    if !matches!(membership, Some(ref m) if m == "join") {
         return Ok(false);
     }
 
@@ -215,62 +182,18 @@ async fn check_state_send_permission(
     Ok(user_power >= required_power)
 }
 
-/// Check if a room has world-readable history
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
 
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
-
-/// Get current state event by type and state_key
+/// Get current state event by type and state_key using repository
 async fn get_current_state_event(
     state: &AppState,
     room_id: &str,
     event_type: &str,
     state_key: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT *
-        FROM event
-        WHERE room_id = $room_id
-        AND type = $event_type
-        AND state_key = $state_key
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("event_type", event_type.to_string()))
-        .bind(("state_key", state_key.to_string()))
-        .await?;
-
-    let event: Option<Event> = response.take(0)?;
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let event = event_repo.get_current_state_event(room_id, event_type, state_key).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     if let Some(event) = event {
         let state_event = json!({
@@ -289,30 +212,15 @@ async fn get_current_state_event(
     }
 }
 
-/// Get room power levels
+/// Get room power levels using repository
 async fn get_room_power_levels(
     state: &AppState,
     room_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.power_levels'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct PowerLevelsEvent {
-        content: Value,
-    }
-
-    let power_levels: Option<PowerLevelsEvent> = response.take(0)?;
-    Ok(power_levels.map(|p| p.content).unwrap_or_else(|| json!({})))
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let power_levels = event_repo.get_room_power_levels(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(power_levels)
 }
 
 /// Get user's power level from power_levels content
@@ -321,11 +229,10 @@ fn get_user_power_level(
     user_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     // Check explicit user power levels
-    if let Some(users) = power_levels.get("users").and_then(|u| u.as_object()) {
-        if let Some(user_power) = users.get(user_id).and_then(|p| p.as_i64()) {
+    if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
+        && let Some(user_power) = users.get(user_id).and_then(|p| p.as_i64()) {
             return Ok(user_power);
         }
-    }
 
     // Default user power level
     Ok(power_levels.get("users_default").and_then(|d| d.as_i64()).unwrap_or(0))
@@ -337,11 +244,10 @@ fn get_required_power_level(
     event_type: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     // Check specific event type power levels
-    if let Some(events) = power_levels.get("events").and_then(|e| e.as_object()) {
-        if let Some(required_power) = events.get(event_type).and_then(|p| p.as_i64()) {
+    if let Some(events) = power_levels.get("events").and_then(|e| e.as_object())
+        && let Some(required_power) = events.get(event_type).and_then(|p| p.as_i64()) {
             return Ok(required_power);
         }
-    }
 
     // Default state event power level
     Ok(power_levels.get("state_default").and_then(|d| d.as_i64()).unwrap_or(50))
@@ -351,32 +257,28 @@ fn get_required_power_level(
 fn validate_state_event_content(event_type: &str, content: &Value) -> Result<(), String> {
     match event_type {
         "m.room.name" => {
-            if let Some(name) = content.get("name") {
-                if !name.is_string() {
+            if let Some(name) = content.get("name")
+                && !name.is_string() {
                     return Err("name must be a string".to_string());
                 }
-            }
         },
         "m.room.topic" => {
-            if let Some(topic) = content.get("topic") {
-                if !topic.is_string() {
+            if let Some(topic) = content.get("topic")
+                && !topic.is_string() {
                     return Err("topic must be a string".to_string());
                 }
-            }
         },
         "m.room.avatar" => {
-            if let Some(url) = content.get("url") {
-                if !url.is_string() {
+            if let Some(url) = content.get("url")
+                && !url.is_string() {
                     return Err("url must be a string".to_string());
                 }
-            }
         },
         "m.room.canonical_alias" => {
-            if let Some(alias) = content.get("alias") {
-                if !alias.is_string() && !alias.is_null() {
+            if let Some(alias) = content.get("alias")
+                && !alias.is_string() && !alias.is_null() {
                     return Err("alias must be a string or null".to_string());
                 }
-            }
         },
         _ => {
             // Allow other event types without validation
@@ -429,26 +331,13 @@ async fn send_state_event(
     Ok(event_id)
 }
 
-/// Get current depth for a room
+/// Get current depth for a room using repository
 async fn get_room_current_depth(
     state: &AppState,
     room_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT depth
-        FROM event
-        WHERE room_id = $room_id
-        ORDER BY depth DESC
-        LIMIT 1
-    ";
-
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    #[derive(serde::Deserialize)]
-    struct DepthResult {
-        depth: i64,
-    }
-
-    let depth: Option<DepthResult> = response.take(0)?;
-    Ok(depth.map(|d| d.depth).unwrap_or(0))
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let depth = event_repo.get_room_current_depth(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(depth)
 }

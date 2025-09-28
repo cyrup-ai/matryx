@@ -13,7 +13,7 @@ use matryx_entity::types::{
     RoomsUpdate,
     TimelineUpdate,
 };
-use matryx_surrealdb::repository::EventRepository;
+use matryx_surrealdb::repository::{EventRepository, AccountDataRepository};
 
 pub async fn create_event_live_stream(
     state: AppState,
@@ -94,15 +94,9 @@ pub async fn create_account_data_live_stream(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     // Create LiveQuery for account data changes
-    let mut stream = state
-        .db
-        .query(
-            r#"
-            LIVE SELECT * FROM account_data
-            WHERE user_id = $user_id
-        "#,
-        )
-        .bind(("user_id", user_id.clone()))
+    let account_data_repo = AccountDataRepository::new(state.db.clone());
+    let mut stream = account_data_repo
+        .create_account_data_live_query(&user_id)
         .await?;
 
     let sync_stream = stream.stream::<surrealdb::Notification<AccountData>>(0)?

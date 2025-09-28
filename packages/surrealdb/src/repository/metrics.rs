@@ -370,7 +370,7 @@ pub struct SystemHealth {
     pub last_check: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HealthStatus {
     Healthy,
     Degraded,

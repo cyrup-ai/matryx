@@ -5,13 +5,12 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::types::{Event, Room};
-use matryx_surrealdb::repository::{EventRepository, RoomRepository};
+use matryx_entity::types::Room;
+use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
 
 /// Query parameters for state request
 #[derive(Debug, Deserialize)]
@@ -89,9 +88,8 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     // Parse X-Matrix authentication header
-    let x_matrix_auth = parse_x_matrix_auth(&headers).map_err(|e| {
+    let x_matrix_auth = parse_x_matrix_auth(&headers).inspect_err(|e| {
         warn!("Failed to parse X-Matrix authentication header: {}", e);
-        e
     })?;
 
     debug!(
@@ -200,206 +198,54 @@ async fn check_state_permission(
     room: &Room,
     requesting_server: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check if the requesting server has any users in the room
-    let query = "
-        SELECT COUNT() as count
-        FROM membership
-        WHERE room_id = $room_id
-        AND user_id CONTAINS $server_suffix
-        AND membership IN ['join', 'invite', 'leave']
-        LIMIT 1
-    ";
-
-    let server_suffix = format!(":{}", requesting_server);
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("room_id", room.room_id.clone()))
-        .bind(("server_suffix", server_suffix))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct CountResult {
-        count: i64,
-    }
-
-    let count_result: Option<CountResult> = response.take(0)?;
-    let has_users = count_result.map(|c| c.count > 0).unwrap_or(false);
+    // Check if the requesting server has any users in the room using repository
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let has_users = membership_repo
+        .check_server_has_users_in_room(&room.room_id, requesting_server)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     if has_users {
         return Ok(true);
     }
 
-    // Check if room is world-readable
-    let world_readable = is_room_world_readable(state, &room.room_id).await?;
+    // Check if room is world-readable using repository
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let world_readable = event_repo
+        .is_room_world_readable(&room.room_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    
     Ok(world_readable)
 }
 
-/// Check if a room is world-readable
-async fn is_room_world_readable(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "
-        SELECT content.history_visibility
-        FROM event
-        WHERE room_id = $room_id
-        AND type = 'm.room.history_visibility'
-        AND state_key = ''
-        ORDER BY depth DESC, origin_server_ts DESC
-        LIMIT 1
-    ";
 
-    let mut response = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
 
-    #[derive(serde::Deserialize)]
-    struct HistoryVisibility {
-        history_visibility: Option<String>,
-    }
-
-    let visibility: Option<HistoryVisibility> = response.take(0)?;
-    let history_visibility = visibility
-        .and_then(|v| v.history_visibility)
-        .unwrap_or_else(|| "shared".to_string());
-
-    Ok(history_visibility == "world_readable")
-}
-
-/// Get room state at a specific event
+/// Get room state at a specific event using repository
 async fn get_room_state_at_event(
     state: &AppState,
     room_id: &str,
     event_id: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    // Get the target event's depth for state resolution
-    let depth_query = "
-        SELECT depth
-        FROM event
-        WHERE event_id = $event_id
-    ";
-
-    let mut response = state
-        .db
-        .query(depth_query)
-        .bind(("event_id", event_id.to_string()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct EventDepth {
-        depth: i64,
-    }
-
-    let event_depth: Option<EventDepth> = response.take(0)?;
-    let target_depth = event_depth.map(|e| e.depth).ok_or("Event depth not found")?;
-
-    // Get state events at or before the target event depth
-    let state_query = "
-        SELECT *
-        FROM event
-        WHERE room_id = $room_id
-        AND state_key IS NOT NULL
-        AND depth <= $target_depth
-        AND (
-            SELECT COUNT()
-            FROM event e2
-            WHERE e2.room_id = $room_id
-            AND e2.type = event.type
-            AND e2.state_key = event.state_key
-            AND e2.depth <= $target_depth
-            AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
-        ) = 0
-        ORDER BY type, state_key
-    ";
-
-    let mut response = state
-        .db
-        .query(state_query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("target_depth", target_depth))
-        .await?;
-
-    let events: Vec<Event> = response.take(0)?;
-
-    // Convert events to JSON format for response
-    let state_events: Vec<Value> = events
-        .into_iter()
-        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
-        .collect();
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let state_events = event_repo
+        .get_room_state_at_event(room_id, event_id)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(state_events)
 }
 
-/// Get auth chain for a set of state events
+/// Get auth chain for a set of state events using repository
 async fn get_auth_chain_for_state(
     state: &AppState,
     state_events: &[Value],
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut auth_event_ids = HashSet::new();
-    let mut to_process = HashSet::new();
-
-    // Collect initial auth events
-    for state_event in state_events {
-        if let Some(auth_events) = state_event.get("auth_events").and_then(|v| v.as_array()) {
-            for auth_event in auth_events {
-                if let Some(auth_event_id) = auth_event.as_str() {
-                    if auth_event_ids.insert(auth_event_id.to_string()) {
-                        to_process.insert(auth_event_id.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Recursively fetch auth events
-    while !to_process.is_empty() {
-        let current_batch: Vec<String> = to_process.drain().collect();
-
-        let query = "
-            SELECT *
-            FROM event
-            WHERE event_id IN $auth_event_ids
-        ";
-
-        let mut response = state.db.query(query).bind(("auth_event_ids", current_batch)).await?;
-
-        let events: Vec<Event> = response.take(0)?;
-
-        // Process auth events of the fetched events
-        for event in &events {
-            if let Some(auth_events) = &event.auth_events {
-                for auth_event_id in auth_events {
-                    if auth_event_ids.insert(auth_event_id.clone()) {
-                        to_process.insert(auth_event_id.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    if auth_event_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Fetch all auth events
-    let auth_ids: Vec<String> = auth_event_ids.into_iter().collect();
-
-    let query = "
-        SELECT *
-        FROM event
-        WHERE event_id IN $auth_event_ids
-        ORDER BY depth, origin_server_ts
-    ";
-
-    let mut response = state.db.query(query).bind(("auth_event_ids", auth_ids)).await?;
-
-    let events: Vec<Event> = response.take(0)?;
-
-    // Convert events to JSON format for response
-    let auth_chain: Vec<Value> = events
-        .into_iter()
-        .map(|event| serde_json::to_value(event).unwrap_or(json!({})))
-        .collect();
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let auth_chain = event_repo
+        .get_auth_chain_for_state(state_events)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(auth_chain)
 }

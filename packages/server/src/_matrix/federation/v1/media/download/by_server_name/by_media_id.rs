@@ -1,8 +1,11 @@
 use crate::AppState;
 use crate::auth::verify_x_matrix_auth;
+
+use crate::utils::request_helpers::extract_request_uri;
+use crate::utils::response_helpers::{build_multipart_media_response, MultipartMediaResponse, MediaContent};
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode},
     response::Response,
 };
@@ -20,17 +23,22 @@ pub async fn get(
     State(state): State<AppState>,
     Path((server_name, media_id)): Path<(String, String)>,
     headers: HeaderMap,
+    request: Request,
 ) -> Result<Response<Body>, StatusCode> {
-    // Verify X-Matrix authentication
+    // Verify X-Matrix authentication using actual request URI (including query parameters)
+    let uri = extract_request_uri(&request);
     let auth_result = verify_x_matrix_auth(
         &headers,
         &state.homeserver_name,
-        state.event_signer.get_default_key_id(),
+        "GET",
+        uri,
+        None, // No body for GET requests
+        state.event_signer.get_signing_engine(),
     )
     .await;
     let _x_matrix_auth = auth_result.map_err(|e| {
         warn!("X-Matrix authentication failed for media download: {}", e);
-        StatusCode::UNAUTHORIZED
+        StatusCode::from(e)
     })?;
 
     debug!("Federation media download request for server: {}, media_id: {}", server_name, media_id);
@@ -47,7 +55,7 @@ pub async fn get(
         .handle_federation_media_request(
             &media_id,
             &server_name,
-            _x_matrix_auth.server_name().unwrap_or(&server_name),
+            &_x_matrix_auth.origin,
         )
         .await
         .map_err(|e| {
@@ -55,17 +63,17 @@ pub async fn get(
             StatusCode::NOT_FOUND
         })?;
 
-    // Create response body from content
-    let body = Body::from(media_response.content);
+    // ✅ COMPLIANT: Multipart/mixed response
+    let multipart_response = MultipartMediaResponse {
+        metadata: serde_json::json!({}), // Empty object per spec
+        content: MediaContent::Bytes {
+            data: media_response.content,
+            content_type: media_response.content_type,
+            filename: None,
+        },
+    };
 
-    // Build response with appropriate headers
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", media_response.content_type)
-        .header("Content-Length", media_response.content_length.to_string())
-        .header("Cache-Control", "public, max-age=31536000, immutable")
-        .header("Cross-Origin-Resource-Policy", "cross-origin")
-        .body(body)
+    let response = build_multipart_media_response(multipart_response)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(response)

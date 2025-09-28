@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::{Connection, Surreal};
+use matryx_entity::types::Event;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushRule {
@@ -21,6 +22,8 @@ pub enum PushCondition {
     ContainsDisplayName,
     RoomMemberCount { is: String },
     SenderNotificationPermission { key: String },
+    EventPropertyContains { key: String, value: String },
+    EventPropertyIs { key: String, value: serde_json::Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,7 +50,7 @@ pub struct RoomContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Event {
+pub struct PushEvent {
     pub event_id: String,
     pub event_type: String,
     pub sender: String,
@@ -62,6 +65,17 @@ pub struct PushRuleRecord {
     pub rule_data: PushRule,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PusherConfig<'a> {
+    pub kind: &'a str,
+    pub app_id: &'a str,
+    pub app_display_name: &'a str,
+    pub device_display_name: &'a str,
+    pub profile_tag: Option<&'a str>,
+    pub lang: &'a str,
+    pub data: &'a serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -159,7 +173,7 @@ impl<C: Connection> PushRepository<C> {
     pub async fn evaluate_push_rules(
         &self,
         user_id: &str,
-        event: &Event,
+        event: &PushEvent,
         room_context: &RoomContext,
     ) -> Result<PushRuleEvaluation, RepositoryError> {
         let rules = self.get_user_push_rules(user_id).await?;
@@ -265,7 +279,7 @@ impl<C: Connection> PushRepository<C> {
     fn evaluate_conditions(
         &self,
         conditions: &[PushCondition],
-        event: &Event,
+        event: &PushEvent,
         context: &RoomContext,
     ) -> bool {
         for condition in conditions {
@@ -279,7 +293,7 @@ impl<C: Connection> PushRepository<C> {
     fn evaluate_condition(
         &self,
         condition: &PushCondition,
-        event: &Event,
+        event: &PushEvent,
         context: &RoomContext,
     ) -> bool {
         match condition {
@@ -293,10 +307,16 @@ impl<C: Connection> PushRepository<C> {
             PushCondition::SenderNotificationPermission { key } => {
                 self.evaluate_sender_notification_permission(key, event, context)
             },
+            PushCondition::EventPropertyContains { key, value } => {
+                self.evaluate_event_property_contains(key, value, event)
+            },
+            PushCondition::EventPropertyIs { key, value } => {
+                self.evaluate_event_property_is(key, value, event)
+            },
         }
     }
 
-    fn evaluate_event_match(&self, key: &str, pattern: &str, event: &Event) -> bool {
+    fn evaluate_event_match(&self, key: &str, pattern: &str, event: &PushEvent) -> bool {
         match key {
             "type" => event.event_type.contains(pattern),
             "content.msgtype" => {
@@ -317,30 +337,25 @@ impl<C: Connection> PushRepository<C> {
         }
     }
 
-    fn evaluate_contains_display_name(&self, event: &Event, context: &RoomContext) -> bool {
-        if let Some(display_name) = &context.user_display_name {
-            if let Some(body) = event.content.get("body") {
-                if let Some(body_str) = body.as_str() {
-                    return body_str.contains(display_name);
-                }
-            }
+    fn evaluate_contains_display_name(&self, event: &PushEvent, context: &RoomContext) -> bool {
+        if let Some(display_name) = &context.user_display_name
+            && let Some(body) = event.content.get("body")
+            && let Some(body_str) = body.as_str() {
+            return body_str.contains(display_name);
         }
         false
     }
 
     fn evaluate_room_member_count(&self, is_condition: &str, context: &RoomContext) -> bool {
-        if let Some(num_str) = is_condition.strip_prefix("==") {
-            if let Ok(num) = num_str.parse::<u64>() {
-                return context.member_count == num;
-            }
-        } else if let Some(num_str) = is_condition.strip_prefix(">") {
-            if let Ok(num) = num_str.parse::<u64>() {
-                return context.member_count > num;
-            }
-        } else if let Some(num_str) = is_condition.strip_prefix("<") {
-            if let Ok(num) = num_str.parse::<u64>() {
-                return context.member_count < num;
-            }
+        if let Some(num_str) = is_condition.strip_prefix("==")
+            && let Ok(num) = num_str.parse::<u64>() {
+            return context.member_count == num;
+        } else if let Some(num_str) = is_condition.strip_prefix(">")
+            && let Ok(num) = num_str.parse::<u64>() {
+            return context.member_count > num;
+        } else if let Some(num_str) = is_condition.strip_prefix("<")
+            && let Ok(num) = num_str.parse::<u64>() {
+            return context.member_count < num;
         }
         false
     }
@@ -348,7 +363,7 @@ impl<C: Connection> PushRepository<C> {
     fn evaluate_sender_notification_permission(
         &self,
         key: &str,
-        event: &Event,
+        event: &PushEvent,
         context: &RoomContext,
     ) -> bool {
         if let Some(sender_power) = context.power_levels.get(&event.sender) {
@@ -360,6 +375,34 @@ impl<C: Connection> PushRepository<C> {
         } else {
             false
         }
+    }
+
+    fn evaluate_event_property_contains(&self, key: &str, value: &str, event: &PushEvent) -> bool {
+        // For Matrix v1.7 user mentions: "content.m\\.mentions.user_ids"
+        if key == "content.m\\.mentions.user_ids" {
+            if let Some(mentions) = event.content.get("m.mentions") {
+                if let Some(user_ids) = mentions.get("user_ids") {
+                    if let Some(user_ids_array) = user_ids.as_array() {
+                        return user_ids_array.iter().any(|id| {
+                            id.as_str().map_or(false, |id_str| id_str.contains(value))
+                        });
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn evaluate_event_property_is(&self, key: &str, value: &serde_json::Value, event: &PushEvent) -> bool {
+        // For Matrix v1.7 room mentions: "content.m\\.mentions.room"
+        if key == "content.m\\.mentions.room" {
+            if let Some(mentions) = event.content.get("m.mentions") {
+                if let Some(room_mention) = mentions.get("room") {
+                    return room_mention == value;
+                }
+            }
+        }
+        false
     }
 
     pub async fn get_user_push_rule_count(&self, user_id: &str) -> Result<u64, RepositoryError> {
@@ -398,6 +441,116 @@ impl<C: Connection> PushRepository<C> {
                 id: rule_id.to_string(),
             });
         }
+        Ok(())
+    }
+
+    /// Delete a pusher for a user
+    pub async fn delete_pusher(
+        &self,
+        user_id: &str,
+        pusher_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "DELETE FROM pushers WHERE user_id = $user_id AND pusher_id = $pusher_id";
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("pusher_id", pusher_id.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete all pushers for a user's specific app_id (used for append=false behavior)
+    pub async fn delete_pushers_by_app_id(
+        &self,
+        user_id: &str,
+        app_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "DELETE FROM pushers WHERE user_id = $user_id AND app_id = $app_id";
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("app_id", app_id.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Create or update a pusher for a user
+    pub async fn upsert_pusher(
+        &self,
+        user_id: &str,
+        pusher_id: &str,
+        config: PusherConfig<'_>,
+    ) -> Result<(), RepositoryError> {
+        let id = format!("pusher_{}", uuid::Uuid::new_v4());
+        
+        let query = r#"
+            UPSERT pushers SET
+                id = $id,
+                user_id = $user_id,
+                pusher_id = $pusher_id,
+                kind = $kind,
+                app_id = $app_id,
+                app_display_name = $app_display_name,
+                device_display_name = $device_display_name,
+                profile_tag = $profile_tag,
+                lang = $lang,
+                data = $data,
+                created_at = time::now()
+            WHERE user_id = $user_id AND pusher_id = $pusher_id
+        "#;
+
+        self.db
+            .query(query)
+            .bind(("id", id))
+            .bind(("user_id", user_id.to_string()))
+            .bind(("pusher_id", pusher_id.to_string()))
+            .bind(("kind", config.kind.to_string()))
+            .bind(("app_id", config.app_id.to_string()))
+            .bind(("app_display_name", config.app_display_name.to_string()))
+            .bind(("device_display_name", config.device_display_name.to_string()))
+            .bind(("profile_tag", config.profile_tag.map(|s| s.to_string())))
+            .bind(("lang", config.lang.to_string()))
+            .bind(("data", config.data.clone()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Process an event for push notifications
+    ///
+    /// This method evaluates an event against push rules and triggers
+    /// appropriate push notifications for users in the room.
+    pub async fn process_event(
+        &self,
+        event: &Event,
+        room_id: &str,
+    ) -> Result<(), RepositoryError> {
+        use tracing::debug;
+
+        debug!("Processing event {} for push notifications in room {}", event.event_id, room_id);
+
+        // For now, this is a basic implementation that logs the event processing
+        // In a full implementation, this would:
+        // 1. Get all users in the room
+        // 2. For each user, evaluate their push rules against the event
+        // 3. Send push notifications to relevant pushers
+        // 4. Track notification state
+
+        // Basic event processing - just log for now
+        match event.event_type.as_str() {
+            "m.room.message" => {
+                debug!("Processing message event for push notifications");
+            },
+            "m.room.member" => {
+                debug!("Processing membership event for push notifications");
+            },
+            _ => {
+                debug!("Processing {} event for push notifications", event.event_type);
+            }
+        }
+
         Ok(())
     }
 }

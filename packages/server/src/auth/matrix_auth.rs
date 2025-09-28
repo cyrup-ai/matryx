@@ -77,11 +77,11 @@ impl MatrixAuth {
         match self {
             MatrixAuth::User(token) => {
                 // User authentication - check token validity
-                token.expires_at.map_or(true, |exp| exp > chrono::Utc::now().timestamp())
+                token.expires_at.is_none_or(|exp| exp > chrono::Utc::now().timestamp())
             },
             MatrixAuth::Server(server) => {
                 // Server authentication - check certificate validity
-                server.expires_at.map_or(true, |exp| exp > chrono::Utc::now().timestamp())
+                server.expires_at.is_none_or(|exp| exp > chrono::Utc::now().timestamp())
             },
             MatrixAuth::Anonymous => false,
         }
@@ -91,12 +91,12 @@ impl MatrixAuth {
     pub fn is_expired(&self) -> bool {
         match self {
             MatrixAuth::User(token) => {
-                token.expires_at.map_or(false, |exp| exp <= chrono::Utc::now().timestamp())
+                token.expires_at.is_some_and(|exp| exp <= chrono::Utc::now().timestamp())
             },
             MatrixAuth::Server(server) => {
                 server
                     .expires_at
-                    .map_or(false, |exp| exp <= chrono::Utc::now().timestamp())
+                    .is_some_and(|exp| exp <= chrono::Utc::now().timestamp())
             },
             MatrixAuth::Anonymous => false,
         }

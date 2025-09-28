@@ -6,19 +6,18 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
+
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use serde_json::Value;
+
 use tracing::{error, info, warn};
-use uuid::Uuid;
+
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
-    utils::matrix_events::{calculate_content_hashes, sign_event},
 };
-use matryx_entity::types::{Event, EventContent, Membership, MembershipState, Room};
+use matryx_entity::types::{Membership, MembershipState, Room};
 use matryx_surrealdb::repository::{
     event::EventRepository,
     membership::MembershipRepository,
@@ -34,6 +33,7 @@ pub struct JoinRequest {
 
     /// Optional third-party signed token for invite validation
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // Matrix protocol field - will be implemented for third-party invites
     pub third_party_signed: Option<Value>,
 }
 
@@ -140,12 +140,12 @@ pub async fn post(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let event_depth = event_repo
+    let _event_depth = event_repo
         .calculate_event_depth(&prev_events)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let auth_events = event_repo
+    let _auth_events = event_repo
         .get_auth_events_for_join(&room_id, &user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -230,11 +230,9 @@ async fn can_user_join_via_repositories(
             // First check for pending invite
             if let Ok(Some(membership)) =
                 membership_repo.get_by_room_user(&room.room_id, user_id).await
-            {
-                if membership.membership == MembershipState::Invite {
+                && membership.membership == MembershipState::Invite {
                     return Ok(true);
                 }
-            }
 
             // Check allow conditions from room's join_rules state event
             let allow_conditions = room_repo
@@ -250,25 +248,21 @@ async fn can_user_join_via_repositories(
 
             // Check if user is a member of any of the allowed rooms/spaces
             for condition in allow_conditions {
-                if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership") {
-                    if let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str())
-                    {
-                        if let Ok(Some(membership)) =
+                if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership")
+                    && let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str())
+                    && let Ok(Some(membership)) =
                             membership_repo.get_by_room_user(allowed_room_id, user_id).await
-                        {
-                            if membership.membership == MembershipState::Join {
+                    && membership.membership == MembershipState::Join {
                                 info!(
                                     "User {} allowed to join restricted room {} via membership in room {}",
                                     user_id, room.room_id, allowed_room_id
                                 );
                                 return Ok(true);
                             }
-                        }
-                    }
-                }
             }
             Ok(false)
         },
-        Some("private") | _ => Ok(false), // Private or unknown join rule
+        Some("private") => Ok(false), // Private join rule
+        _ => Ok(false), // Unknown join rule
     }
 }

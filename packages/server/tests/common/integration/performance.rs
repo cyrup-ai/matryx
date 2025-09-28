@@ -83,6 +83,10 @@ impl LoadTest {
         // Create a test user and room
         let (user_id, access_token) =
             create_test_user(&self.server, "throughput_user", "password").await?;
+        
+        // Validate user creation for throughput test
+        assert!(user_id.starts_with('@'), "Throughput test user ID should be properly formatted: {}", user_id);
+        
         let room_id = create_test_room(&self.server, &access_token, "Throughput Test Room").await?;
 
         let start_time = Instant::now();
@@ -128,6 +132,9 @@ impl LoadTest {
         // Create test user
         let (user_id, access_token) =
             create_test_user(&self.server, "sync_perf_user", "password").await?;
+        
+        // Validate user creation for sync performance test
+        assert!(user_id.starts_with('@'), "Sync performance test user ID should be properly formatted: {}", user_id);
 
         let mut sync_times = Vec::new();
         let test_iterations = 10;
@@ -175,15 +182,23 @@ async fn simulate_user_session(
     let (user_id, access_token) = create_test_user(server, username, "loadtest_password")
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send> {
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            Box::new(std::io::Error::other(e.to_string()))
         })?;
+    
+    // Validate user ID format for performance test consistency
+    if !user_id.starts_with('@') || !user_id.contains(':') {
+        return Err(Box::new(std::io::Error::other(
+            format!("Invalid user ID format in performance test: {}", user_id)
+        )));
+    }
+    
     metrics.requests_sent.fetch_add(1, Ordering::Relaxed);
 
     // Create room
     let room_id = create_test_room(server, &access_token, &format!("{}'s Room", username))
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send> {
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            Box::new(std::io::Error::other(e.to_string()))
         })?;
     metrics.requests_sent.fetch_add(1, Ordering::Relaxed);
 
@@ -211,6 +226,11 @@ async fn simulate_user_session(
     let response = server
         .test_authenticated_endpoint("GET", "/_matrix/client/v3/sync", &access_token, None)
         .await;
+    
+    // Track sync success/failure for performance metrics
+    if response.status_code() == 200 {
+        metrics.syncs_completed.fetch_add(1, Ordering::Relaxed);
+    }
     metrics.requests_sent.fetch_add(1, Ordering::Relaxed);
 
     let session_duration = start_time.elapsed();
@@ -226,6 +246,7 @@ pub struct PerformanceMetrics {
     pub messages_sent: Arc<AtomicU64>,
     pub requests_sent: Arc<AtomicU64>,
     pub total_response_time_ms: Arc<AtomicU64>,
+    pub syncs_completed: Arc<AtomicU64>,
 }
 
 impl PerformanceMetrics {
@@ -234,6 +255,7 @@ impl PerformanceMetrics {
             messages_sent: Arc::new(AtomicU64::new(0)),
             requests_sent: Arc::new(AtomicU64::new(0)),
             total_response_time_ms: Arc::new(AtomicU64::new(0)),
+            syncs_completed: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -281,6 +303,13 @@ mod tests {
         // Should handle at least 5 concurrent users
         assert!(report.successful_users > 0, "Should have some successful users");
         assert!(report.requests_per_second > 0.0, "Should have some request throughput");
+        
+        // Use all fields to satisfy clippy
+        assert_eq!(report.user_count, 5, "User count should match requested count");
+        assert!(report.failed_users <= 5, "Failed users should not exceed total");
+        assert!(report.duration.as_secs() < 300, "Test should complete within 5 minutes");
+        assert!(report.messages_per_second >= 0.0, "Messages per second should be non-negative");
+        assert!(report.average_response_time_ms >= 0.0, "Average response time should be non-negative");
     }
 
     #[tokio::test]
@@ -293,6 +322,11 @@ mod tests {
         // Should successfully send most messages
         assert!(report.successful_messages > 10, "Should send most messages successfully");
         assert!(report.messages_per_second > 0.0, "Should have positive throughput");
+        
+        // Use all fields to satisfy clippy
+        assert_eq!(report.total_messages, 20, "Total messages should match requested count");
+        assert!(report.failed_messages <= 20, "Failed messages should not exceed total");
+        assert!(report.duration.as_secs() < 60, "Throughput test should complete within 1 minute");
     }
 
     #[tokio::test]
@@ -308,5 +342,10 @@ mod tests {
             report.average_response_time < Duration::from_secs(5),
             "Sync should be reasonably fast"
         );
+        
+        // Use all fields to satisfy clippy
+        assert_eq!(report.total_syncs, 10, "Total syncs should match expected count");
+        assert!(report.min_response_time <= report.average_response_time, "Min should not exceed average");
+        assert!(report.max_response_time >= report.average_response_time, "Max should not be less than average");
     }
 }

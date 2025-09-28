@@ -6,9 +6,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use futures::TryFutureExt;
+
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -19,6 +19,8 @@ use crate::{
     utils::matrix_events::{calculate_content_hashes, sign_event},
 };
 use matryx_entity::types::{Event, EventContent, Membership, MembershipState, Room};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct UnbanRequest {
@@ -99,13 +101,12 @@ pub async fn post(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Check if room exists
-    let room: Option<Room> = state.db.select(("room", &room_id)).await.map_err(|e| {
+    // Check if room exists using repository
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
+    let room = room_repo.get_by_id(&room_id).await.map_err(|e| {
         error!("Failed to query room {}: {}", room_id, e);
         StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let room = room.ok_or_else(|| {
+    })?.ok_or_else(|| {
         warn!("Room unban failed - room not found: {}", room_id);
         StatusCode::NOT_FOUND
     })?;
@@ -191,17 +192,17 @@ pub async fn post(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Create leave membership event for the unbanned user
-    let unban_event_id = create_membership_event(
-        &state,
-        &room_id,
-        &unbanner_id,           // The unbanner is the sender
-        &request.user_id,       // The unbanned user is the target
-        MembershipState::Leave, // Unban results in leave membership
-        request.reason.as_deref(),
-        event_depth,
-        &prev_events,
-        &auth_events,
-    )
+    let unban_event_id = create_membership_event(MembershipEventParams {
+        state: &state,
+        room_id: &room_id,
+        sender: &unbanner_id,           // The unbanner is the sender
+        target: &request.user_id,       // The unbanned user is the target
+        membership: MembershipState::Leave, // Unban results in leave membership
+        reason: request.reason.as_deref(),
+        depth: event_depth,
+        prev_events: &prev_events,
+        auth_events: &auth_events,
+    })
     .await
     .map_err(|e| {
         error!(
@@ -224,14 +225,14 @@ async fn get_user_membership(
     room_id: &str,
     user_id: &str,
 ) -> Result<Membership, Box<dyn std::error::Error + Send + Sync>> {
-    let membership_id = format!("{}:{}", user_id, room_id);
-    let membership: Option<Membership> = state.db.select(("membership", membership_id)).await?;
+    let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
+    let membership = membership_repo.get_membership(room_id, user_id).await?;
 
     membership.ok_or_else(|| "Membership not found".into())
 }
 
 async fn can_user_unban(
-    state: &AppState,
+    _state: &AppState,
     room: &Room,
     unbanner_id: &str,
     target_id: &str,
@@ -277,22 +278,20 @@ async fn get_next_event_depth(
     state: &AppState,
     room_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "SELECT VALUE math::max(depth) FROM event WHERE room_id = $room_id";
-    let mut result = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    let max_depth: Option<i64> = result.take(0)?;
-    Ok(max_depth.unwrap_or(0) + 1)
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let depth = event_repo.get_next_event_depth(room_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(depth)
 }
 
 async fn get_latest_event_ids(
     state: &AppState,
     room_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let query = "SELECT event_id FROM event WHERE room_id = $room_id ORDER BY depth DESC LIMIT 3";
-    let mut result = state.db.query(query).bind(("room_id", room_id.to_string())).await?;
-
-    let events: Vec<String> = result.take(0)?;
-    Ok(events)
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let event_ids = event_repo.get_latest_event_ids(room_id, 3).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(event_ids)
 }
 
 async fn get_auth_events_for_unban(
@@ -300,46 +299,31 @@ async fn get_auth_events_for_unban(
     room_id: &str,
     unbanner_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    // Get the auth events needed for an unban event:
-    // - m.room.create event
-    // - m.room.power_levels event
-    // - Unbanning user's m.room.member event (join state)
-
-    let query = r#"
-        SELECT event_id FROM event 
-        WHERE room_id = $room_id 
-        AND ((event_type = 'm.room.create' AND state_key = '')
-             OR (event_type = 'm.room.power_levels' AND state_key = '')
-             OR (event_type = 'm.room.member' AND state_key = $unbanner_id))
-        ORDER BY origin_server_ts ASC
-    "#;
-
-    let mut result = state
-        .db
-        .query(query)
-        .bind(("room_id", room_id.to_string()))
-        .bind(("unbanner_id", unbanner_id.to_string()))
-        .await?;
-
-    let auth_events: Vec<String> = result.take(0)?;
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let auth_events = event_repo.get_auth_events_for_unban(room_id, unbanner_id).await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(auth_events)
 }
 
-async fn create_membership_event(
-    state: &AppState,
-    room_id: &str,
-    sender: &str,
-    target: &str,
+struct MembershipEventParams<'a> {
+    state: &'a AppState,
+    room_id: &'a str,
+    sender: &'a str,
+    target: &'a str,
     membership: MembershipState,
-    reason: Option<&str>,
+    reason: Option<&'a str>,
     depth: i64,
-    prev_events: &[String],
-    auth_events: &[String],
+    prev_events: &'a [String],
+    auth_events: &'a [String],
+}
+
+async fn create_membership_event(
+    params: MembershipEventParams<'_>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let event_id = format!("${}:{}", Uuid::new_v4(), state.homeserver_name);
+    let event_id = format!("${}:{}", Uuid::new_v4(), params.state.homeserver_name);
 
     let mut content = json!({
-        "membership": match membership {
+        "membership": match params.membership {
             MembershipState::Join => "join",
             MembershipState::Leave => "leave",
             MembershipState::Invite => "invite",
@@ -348,23 +332,23 @@ async fn create_membership_event(
         }
     });
 
-    if let Some(reason) = reason {
+    if let Some(reason) = params.reason {
         content["reason"] = json!(reason);
     }
 
     // Create the event
     let mut event = Event {
         event_id: event_id.clone(),
-        room_id: room_id.to_string(),
-        sender: sender.to_string(),
+        room_id: params.room_id.to_string(),
+        sender: params.sender.to_string(),
         event_type: "m.room.member".to_string(),
         content: EventContent::Unknown(content.clone()),
-        state_key: Some(target.to_string()),
+        state_key: Some(params.target.to_string()),
         origin_server_ts: Utc::now().timestamp_millis(),
         unsigned: None,
-        prev_events: Some(prev_events.to_vec()),
-        auth_events: Some(auth_events.to_vec()),
-        depth: Some(depth),
+        prev_events: Some(params.prev_events.to_vec()),
+        auth_events: Some(params.auth_events.to_vec()),
+        depth: Some(params.depth),
         hashes: serde_json::from_value(json!({})).ok(),
         signatures: serde_json::from_value(json!({})).ok(),
         redacts: None,
@@ -380,79 +364,46 @@ async fn create_membership_event(
     event.hashes = Some(hashes);
 
     // Sign event
-    let signatures_value = sign_event(state, &event).await?;
+    let signatures_value = sign_event(params.state, &event).await?;
     let signatures: HashMap<String, HashMap<String, String>> =
         serde_json::from_value(signatures_value)?;
     event.signatures = Some(signatures);
 
-    // Store the event
-    let _: Option<Event> = state.db.create(("event", &event_id)).content(event).await?;
+    // Store the event using repository
+    let event_repo = Arc::new(EventRepository::new(params.state.db.clone()));
+    let _created_event = event_repo.create_room_event(
+        params.room_id,
+        &event.event_type,
+        params.sender,
+        serde_json::to_value(&event.content)?,
+        event.state_key.clone(),
+    ).await?;
 
     // Get existing membership to preserve display name and avatar
-    let membership_id = format!("{}:{}", target, room_id);
-    let existing_membership: Option<Membership> =
-        state.db.select(("membership", &membership_id)).await.ok().flatten();
+    let membership_repo = Arc::new(MembershipRepository::new(params.state.db.clone()));
+    let existing_membership = membership_repo.get_membership(params.room_id, params.target).await.ok().flatten();
+
+    // Check if room is direct message using repository
+    let is_direct = event_repo.is_direct_message_room(params.room_id).await.unwrap_or(false);
 
     // Create/update membership record
     let membership_record = Membership {
-        user_id: target.to_string(),
-        room_id: room_id.to_string(),
-        membership: membership.clone(),
-        reason: reason.map(|r| r.to_string()),
+        user_id: params.target.to_string(),
+        room_id: params.room_id.to_string(),
+        membership: params.membership.clone(),
+        reason: params.reason.map(|r| r.to_string()),
         invited_by: None, // Not applicable for unban events
         updated_at: Some(Utc::now()),
         display_name: existing_membership.as_ref().and_then(|m| m.display_name.clone()),
         avatar_url: existing_membership.as_ref().and_then(|m| m.avatar_url.clone()),
-        is_direct: Some(is_direct_message_room(state, room_id).await.unwrap_or(false)),
+        is_direct: Some(is_direct),
         third_party_invite: None,
         join_authorised_via_users_server: None,
     };
 
-    let _: Option<Membership> = state
-        .db
-        .upsert(("membership", membership_id))
-        .content(membership_record)
-        .await?;
+    membership_repo.upsert_membership_record(membership_record).await?;
 
     Ok(event_id)
 }
 
-async fn is_direct_message_room(
-    state: &AppState,
-    room_id: &str,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let member_count_query = "
-        SELECT count() 
-        FROM membership 
-        WHERE room_id = $room_id 
-          AND membership = 'join'
-    ";
 
-    let mut response = state
-        .db
-        .query(member_count_query)
-        .bind(("room_id", room_id.to_string()))
-        .await?;
-
-    let member_count: Option<i64> = response.take(0)?;
-    let member_count = member_count.unwrap_or(0);
-
-    let room_state_query = "
-        SELECT count()
-        FROM event 
-        WHERE room_id = $room_id 
-          AND event_type IN ['m.room.name', 'm.room.topic']
-          AND state_key = ''
-    ";
-
-    let mut response = state
-        .db
-        .query(room_state_query)
-        .bind(("room_id", room_id.to_string()))
-        .await?;
-
-    let has_name_or_topic: Option<i64> = response.take(0)?;
-    let has_name_or_topic = has_name_or_topic.unwrap_or(0) > 0;
-
-    Ok(member_count == 2 && !has_name_or_topic)
-}

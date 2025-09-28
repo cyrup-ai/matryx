@@ -10,9 +10,11 @@ use surrealdb::engine::any::Any;
 use tracing::{debug, info, warn};
 
 use crate::auth::MatrixSessionService;
+use crate::auth::signing::FederationRequestSigner;
+use crate::federation::dns_resolver::MatrixDnsResolver;
 use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use matryx_entity::types::Event;
-use matryx_surrealdb::repository::{KeyServerRepository, error::RepositoryError};
+use matryx_surrealdb::repository::KeyServerRepository;
 
 /// High-level event signing service for outgoing Matrix events
 ///
@@ -30,19 +32,20 @@ impl EventSigner {
     pub fn new(
         session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dns_resolver: Arc<MatrixDnsResolver>,
         homeserver_name: String,
         default_key_id: String,
-    ) -> Self {
+    ) -> Result<Self, EventSigningError> {
         let signing_engine =
-            EventSigningEngine::new(session_service, db.clone(), homeserver_name.clone());
+            EventSigningEngine::new(session_service, db.clone(), dns_resolver, homeserver_name.clone())?;
         let key_server_repo = Arc::new(KeyServerRepository::new(db));
 
-        Self {
+        Ok(Self {
             signing_engine,
             key_server_repo,
             default_key_id,
             homeserver_name,
-        }
+        })
     }
 
     /// Sign an outgoing event for federation
@@ -113,8 +116,8 @@ impl EventSigner {
     /// Calculate reference hash for room versions that require it
     ///
     /// Some room versions use reference hashes for event IDs or validation.
-    pub fn calculate_reference_hash(&self, event: &Event) -> Result<String, EventSigningError> {
-        self.signing_engine.calculate_reference_hash(event)
+    pub fn calculate_reference_hash(&self, event: &Event, room_version: &str) -> Result<String, EventSigningError> {
+        self.signing_engine.calculate_reference_hash(event, room_version)
     }
 
     /// Validate an event is ready for signing
@@ -167,17 +170,14 @@ impl EventSigner {
         }
 
         // Ensure event doesn't already have signatures from our server
-        if let Some(signatures) = &event.signatures {
-            if let Ok(sigs_value) = serde_json::to_value(signatures) {
-                if let Some(obj) = sigs_value.as_object() {
-                    if obj.contains_key(&self.homeserver_name) {
+        if let Some(signatures) = &event.signatures
+            && let Ok(sigs_value) = serde_json::to_value(signatures)
+                && let Some(obj) = sigs_value.as_object()
+                && obj.contains_key(&self.homeserver_name) {
                         return Err(EventSigningError::InvalidFormat(
                             "Event already has signature from this server".to_string(),
                         ));
                     }
-                }
-            }
-        }
 
         debug!("Event {} validated for signing", event.event_id);
         Ok(())
@@ -190,6 +190,13 @@ impl EventSigner {
         &self.default_key_id
     }
 
+    /// Get the underlying event signing engine
+    ///
+    /// Returns a reference to the EventSigningEngine for cryptographic operations.
+    pub fn get_signing_engine(&self) -> &EventSigningEngine {
+        &self.signing_engine
+    }
+
     /// Get available signing keys for this server
     ///
     /// Returns list of key IDs that can be used for signing events.
@@ -199,7 +206,7 @@ impl EventSigner {
             .key_server_repo
             .get_active_signing_key_ids(&self.homeserver_name)
             .await
-            .map_err(|e| EventSigningError::DatabaseError(e))?;
+            .map_err(EventSigningError::DatabaseError)?;
 
         debug!("Found {} active signing keys", key_ids.len());
         Ok(key_ids)
@@ -216,12 +223,21 @@ impl EventSigner {
     ) -> Result<String, EventSigningError> {
         use base64::{Engine as _, engine::general_purpose};
         use ed25519_dalek::{SigningKey, VerifyingKey};
-        use rand::rngs::OsRng;
+        
 
         let db = &self.signing_engine.db;
+        
+        // Validate database connection before key generation
+        let version_info = match db.version().await {
+            Ok(version) => version.to_string(),
+            Err(_) => "unknown".to_string(),
+        };
+        debug!("Generating signing key with database connection to: {}", version_info);
 
         // Generate Ed25519 key pair using cryptographically secure random number generator
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let mut secret_bytes = [0u8; 32];
+        getrandom::getrandom(&mut secret_bytes).expect("Failed to generate random bytes");
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
         let verifying_key: VerifyingKey = (&signing_key).into();
 
         // Create key ID with base64-encoded key prefix for uniqueness
@@ -251,7 +267,7 @@ impl EventSigner {
         self.key_server_repo
             .store_signing_key(&self.homeserver_name, &key_id, &signing_key_entity)
             .await
-            .map_err(|e| EventSigningError::DatabaseError(e))?;
+            .map_err(EventSigningError::DatabaseError)?;
 
         info!(
             "Generated and stored new signing key: {} for server {} (expires: {})",
@@ -265,8 +281,8 @@ impl EventSigner {
     ///
     /// Useful for debugging or creating canonical representations
     /// of events according to the Matrix redaction algorithm.
-    pub fn redact_event(&self, event: &Event) -> Result<serde_json::Value, EventSigningError> {
-        self.signing_engine.redact_event(event)
+    pub fn redact_event(&self, event: &Event, room_version: &str) -> Result<serde_json::Value, EventSigningError> {
+        self.signing_engine.redact_event(event, room_version)
     }
 
     /// Sign a federation HTTP request with X-Matrix authentication
@@ -286,22 +302,24 @@ impl EventSigner {
         request_builder: reqwest::RequestBuilder,
         destination: &str,
     ) -> Result<reqwest::RequestBuilder, EventSigningError> {
-        use chrono::Utc;
-        use serde_json::json;
+        // Log the federation request signing attempt
+        debug!("Attempting to sign federation request to destination: {}", destination);
 
-        // For now, return the request builder without signing
-        // TODO: Implement proper X-Matrix signature generation
-        warn!("Federation request signing not yet implemented - proceeding without signature");
+        // Validate destination server name format
+        if destination.is_empty() || !destination.contains('.') {
+            return Err(EventSigningError::InvalidDestination(destination.to_string()));
+        }
 
-        // Add basic Matrix headers
-        let signed_request = request_builder.header(
-            "Authorization",
-            format!(
-                "X-Matrix origin={},key=\"{}\",sig=\"placeholder\"",
-                self.homeserver_name, self.default_key_id
-            ),
+        // Create federation request signer with complete Matrix specification implementation
+        let signer = FederationRequestSigner::new(
+            self.signing_engine.clone(),
+            self.homeserver_name.clone(),
         );
 
+        // Sign the request using complete Matrix JSON signing algorithm
+        let signed_request = signer.sign_request_builder(request_builder, destination).await?;
+
+        info!("Successfully signed federation request to destination: {}", destination);
         Ok(signed_request)
     }
 }
@@ -311,11 +329,12 @@ impl EventSigner {
     pub fn from_app_state(
         session_service: Arc<MatrixSessionService<Any>>,
         db: surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dns_resolver: Arc<MatrixDnsResolver>,
         homeserver_name: String,
-    ) -> Self {
+    ) -> Result<Self, EventSigningError> {
         let default_key_id = "ed25519:auto".to_string();
 
-        Self::new(session_service, db, homeserver_name, default_key_id)
+        Self::new(session_service, db, dns_resolver, homeserver_name, default_key_id)
     }
 }
 
@@ -326,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_validation() {
-        let signer = create_test_signer();
+        let signer = create_test_signer().expect("Failed to create test signer");
 
         let mut event = Event {
             event_id: "$test:example.org".to_string(),
@@ -348,7 +367,7 @@ mod tests {
         assert!(signer.validate_event_for_signing(&event).is_err());
     }
 
-    fn create_test_signer() -> EventSigner {
+    fn create_test_signer() -> Result<EventSigner, EventSigningError> {
         use matryx_surrealdb::test_utils::create_test_db;
         use std::sync::Arc;
 
@@ -364,9 +383,15 @@ mod tests {
             key_server_repo,
         ));
 
+        // Create test DNS resolver
+        let http_client = Arc::new(reqwest::Client::new());
+        let well_known_client = Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
+        let dns_resolver = Arc::new(crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
+
         EventSigner::new(
             session_service,
             test_db,
+            dns_resolver,
             "test.example.org".to_string(),
             "ed25519:test".to_string(),
         )

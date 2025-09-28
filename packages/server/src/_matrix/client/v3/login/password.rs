@@ -3,16 +3,18 @@ use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode};
 use bcrypt::verify;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use crate::utils::session_helpers::create_secure_session_cookie;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
+use tower_cookies::Cookies;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::LoginResponse;
 use crate::auth::MatrixSessionService;
 use crate::state::AppState;
-use matryx_entity::types::{CryptoDevice, Device, Session, User};
+use matryx_entity::types::{Device, Session, User};
 use matryx_surrealdb::repository::{DeviceRepository, SessionRepository, UserRepository};
 
 #[derive(Deserialize)]
@@ -67,6 +69,7 @@ pub async fn post_password_login(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    cookies: Cookies,
     Json(request): Json<PasswordLoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     info!("Password login attempt for user: {}", request.user);
@@ -94,7 +97,7 @@ pub async fn post_password_login(
 
     // Authenticate user with database repositories
     let user_repo = UserRepository::new(state.db.clone());
-    let user = authenticate_user(&user_repo, &user_id, &request.password).await?;
+    let _user = authenticate_user(&user_repo, &user_id, &request.password).await?;
 
     // Generate or validate device ID using secure random generation
     let device_id = generate_device_id(&request.device_id)?;
@@ -117,7 +120,7 @@ pub async fn post_password_login(
 
     // Create authenticated session with atomic database operations
     let session_repo = SessionRepository::new(state.db.clone());
-    let session = create_user_session(
+    let _session = create_user_session(
         &session_repo,
         &user_id,
         &device_id,
@@ -136,6 +139,10 @@ pub async fn post_password_login(
         &access_token,
     )
     .await?;
+
+    // Set secure session cookie for OAuth2 integration
+    let session_cookie = create_secure_session_cookie("matrix_session", &jwt_token);
+    cookies.add(session_cookie);
 
     // Build well-known discovery information
     let well_known = build_well_known_config(&state.homeserver_name);
@@ -368,7 +375,7 @@ async fn register_session_with_auth_service(
     access_token: &str,
 ) -> Result<String, LoginError> {
     // Create user session in auth service
-    let matrix_access_token = session_service
+    let _matrix_access_token = session_service
         .create_user_session(user_id, device_id, access_token, None)
         .await
         .map_err(|auth_error| {

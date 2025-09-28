@@ -313,6 +313,63 @@ impl SessionRepository {
         let tokens: Vec<UserAccessToken> = result.take(0)?;
         Ok(tokens)
     }
+
+    /// Clean up LiveQuery subscriptions for a user/device
+    pub async fn cleanup_livequery_subscriptions(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            DELETE FROM livequery_subscriptions 
+            WHERE user_id = $user_id AND device_id = $device_id
+        ";
+
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Revoke device refresh tokens
+    pub async fn revoke_device_refresh_tokens(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPDATE refresh_tokens 
+            SET revoked = true, revoked_at = datetime::now()
+            WHERE user_id = $user_id AND device_id = $device_id AND revoked = false
+        ";
+
+        self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get user access tokens for admin whois
+    pub async fn get_user_access_tokens_for_admin(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(String, Option<String>, Option<i64>)>, RepositoryError> {
+        let query = "
+            SELECT device_id, last_used_ip, last_used_ts
+            FROM user_access_tokens
+            WHERE user_id = $user_id AND expires_at > time::now()
+        ";
+
+        let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
+        let tokens: Vec<(String, Option<String>, Option<i64>)> = result.take(0)?;
+        Ok(tokens)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

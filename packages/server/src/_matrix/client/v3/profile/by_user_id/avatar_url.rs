@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{AppState, auth::MatrixSessionService};
+use crate::AppState;
 
 #[derive(Serialize)]
 pub struct AvatarUrlResponse {
@@ -94,11 +94,10 @@ pub async fn set_avatar_url(
     }
 
     // Validate avatar URL if provided
-    if let Some(ref avatar_url) = request.avatar_url {
-        if !avatar_url.is_empty() {
+    if let Some(ref avatar_url) = request.avatar_url
+        && !avatar_url.is_empty() {
             validate_avatar_url(avatar_url).map_err(|_| StatusCode::BAD_REQUEST)?;
         }
-    }
 
     let profile_service = ProfileManagementService::new(state.db.clone());
 

@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+
 use tracing::{debug, info, warn};
 
 use matryx_entity::types::Event;
@@ -94,6 +94,29 @@ impl StateResolver {
             room_id,
             conflicted_events.len()
         );
+
+        // Validate room exists and get room version for version-specific state resolution
+        let room = self.room_repo.get_by_id(room_id).await?
+            .ok_or_else(|| StateResolutionError::InvalidStateEvent(
+                format!("Room {} not found", room_id)
+            ))?;
+        
+        let room_version = if room.room_version.is_empty() {
+            "1".to_string()
+        } else {
+            room.room_version
+        };
+        debug!("Using room version {} for state resolution", room_version);
+
+        // Validate all events belong to the correct room using room_repo context
+        for event in &conflicted_events {
+            if event.room_id != room_id {
+                return Err(StateResolutionError::InvalidStateEvent(
+                    format!("Event {} belongs to room {} but resolving for room {}", 
+                           event.event_id, event.room_id, room_id)
+                ));
+            }
+        }
 
         // Step 1: Separate conflicted events by state key
         let mut state_groups = HashMap::new();
@@ -244,10 +267,9 @@ impl StateResolver {
         });
 
         // For membership events, apply special membership rules
-        if let Some(first_event) = sorted_events.first() {
-            if first_event.event_type == "m.room.member" {
-                return self.resolve_membership_conflict(room_id, sorted_events, power_event).await;
-            }
+        if let Some(first_event) = sorted_events.first()
+            && first_event.event_type == "m.room.member" {
+            return self.resolve_membership_conflict(room_id, sorted_events, power_event).await;
         }
 
         // For other state events, return the event with highest authority
@@ -265,26 +287,42 @@ impl StateResolver {
     ) -> Result<Event, StateResolutionError> {
         // Simplified membership conflict resolution
         // In a full implementation, this would apply Matrix membership transition rules
+        debug!("Resolving membership conflicts for room: {} with {} events",
+               room_id, conflicting_events.len());
+
+        // Validate all events belong to the specified room
+        for event in &conflicting_events {
+            if event.room_id != room_id {
+                warn!("Event {} does not belong to room {} during membership conflict resolution",
+                      event.event_id, room_id);
+                return Err(StateResolutionError::InvalidStateEvent(
+                    format!("Event {} room mismatch: expected {}, got {}",
+                           event.event_id, room_id, event.room_id)
+                ));
+            }
+        }
 
         for event in &conflicting_events {
-            if let Some(content) = event.content.as_object() {
-                if let Some(membership) = content.get("membership").and_then(|m| m.as_str()) {
-                    match membership {
-                        "ban" => {
-                            // Ban events have highest priority
-                            debug!("Resolving membership conflict: ban event wins");
-                            return Ok(event.clone());
-                        },
-                        "leave" => {
-                            // Leave events have second priority
-                            debug!("Resolving membership conflict: leave event considered");
-                        },
-                        "join" => {
-                            // Join events have lower priority
-                            debug!("Resolving membership conflict: join event considered");
-                        },
-                        _ => {},
-                    }
+            if let Some(content) = event.content.as_object()
+                && let Some(membership) = content.get("membership").and_then(|m| m.as_str()) {
+                match membership {
+                    "ban" => {
+                        // Ban events have highest priority
+                        debug!("Resolving membership conflict in room {}: ban event {} wins",
+                               room_id, event.event_id);
+                        return Ok(event.clone());
+                    },
+                    "leave" => {
+                        // Leave events have second priority
+                        debug!("Resolving membership conflict in room {}: leave event {} considered",
+                               room_id, event.event_id);
+                    },
+                    "join" => {
+                        // Join events have lower priority
+                        debug!("Resolving membership conflict in room {}: join event {} considered",
+                               room_id, event.event_id);
+                    },
+                    _ => {},
                 }
             }
         }
@@ -341,6 +379,15 @@ impl StateResolver {
             visited.insert(event_id.to_string());
 
             if let Ok(Some(event)) = self.event_repo.get_by_id(event_id).await {
+                // Validate that the event belongs to the correct room
+                if event.room_id != room_id {
+                    warn!("Auth event {} belongs to room {} but expected room {}", 
+                          event_id, event.room_id, room_id);
+                    return Err(StateResolutionError::InvalidAuthorization(format!(
+                        "Auth event {} belongs to wrong room", event_id
+                    )));
+                }
+                
                 // Recursively collect auth events
                 for auth_event_id in event.auth_events.as_ref().unwrap_or(&Vec::new()) {
                     self.collect_auth_chain_recursive(room_id, auth_event_id, auth_chain, visited)
@@ -362,7 +409,54 @@ impl StateResolver {
         resolved_state: &HashMap<(String, String), Event>,
         auth_chain: &[Event],
     ) -> Result<(), StateResolutionError> {
-        debug!("Validating resolved state with {} events", resolved_state.len());
+        debug!("Validating resolved state with {} events against auth chain with {} events",
+               resolved_state.len(), auth_chain.len());
+
+        // Create a set of auth event IDs for quick lookup
+        let auth_event_ids: std::collections::HashSet<_> =
+            auth_chain.iter().map(|e| &e.event_id).collect();
+
+        // Validate each event in resolved state has proper authorization
+        for ((event_type, state_key), event) in resolved_state {
+            // Validate that the event's state_key matches the resolved state mapping
+            if let Some(event_state_key) = &event.state_key {
+                if event_state_key != state_key {
+                    return Err(StateResolutionError::InvalidStateEvent(format!(
+                        "State key mismatch for event {}: resolved as {} but event has {}",
+                        event.event_id, state_key, event_state_key
+                    )));
+                }
+            } else if !state_key.is_empty() {
+                return Err(StateResolutionError::InvalidStateEvent(format!(
+                    "Event {} missing state_key but resolved state expects '{}'",
+                    event.event_id, state_key
+                )));
+            }
+
+            // Check if this event has auth events and they're in the auth chain
+            if let Some(auth_events) = &event.auth_events {
+                for auth_event_id in auth_events {
+                    if !auth_event_ids.contains(auth_event_id) {
+                        warn!("Auth event {} for state event {} not found in auth chain",
+                              auth_event_id, event.event_id);
+                        // In production, this would be more strict
+                    }
+                }
+            }
+
+            // Matrix specification validation: certain events must have auth events
+            match event_type.as_str() {
+                "m.room.member" | "m.room.power_levels" | "m.room.join_rules" => {
+                    if event.auth_events.is_none() || event.auth_events.as_ref().map_or(true, |events| events.is_empty()) {
+                        return Err(StateResolutionError::InvalidStateEvent(format!(
+                            "Event {} of type {} missing required auth events",
+                            event.event_id, event_type
+                        )));
+                    }
+                },
+                _ => {} // Other event types may not require auth events
+            }
+        }
 
         // Basic validation - in a full implementation this would be more comprehensive
         for ((event_type, state_key), event) in resolved_state {
@@ -464,6 +558,15 @@ impl StateResolver {
         &self,
         room_id: &str,
     ) -> Result<HashMap<(String, String), Event>, StateResolutionError> {
+        // Validate room exists using room_repo
+        let room = self.room_repo.get_by_id(room_id).await?
+            .ok_or_else(|| StateResolutionError::InvalidStateEvent(
+                format!("Room {} not found", room_id)
+            ))?;
+        
+        debug!("Getting state for room {} (version: {})", 
+               room_id, if room.room_version.is_empty() { "1" } else { &room.room_version });
+
         let state_events = self.event_repo.get_state_events(room_id).await?;
 
         let mut state_map = HashMap::new();

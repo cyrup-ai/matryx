@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::cache::lazy_loading_cache::LazyLoadingCache;
@@ -6,6 +6,7 @@ use crate::state::AppState;
 use matryx_entity::types::Event;
 
 /// Cache-aware lazy loading filter that reuses cached results for repeated requests
+#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 pub async fn apply_cache_aware_lazy_loading_filter(
     events: Vec<Event>,
     room_id: &str,
@@ -55,6 +56,7 @@ pub async fn apply_cache_aware_lazy_loading_filter(
 }
 
 /// Enhanced Matrix-compliant lazy loading with SurrealDB LiveQuery and cache optimization
+#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 async fn apply_lazy_loading_filter_enhanced(
     events: Vec<Event>,
     room_id: &str,
@@ -137,8 +139,8 @@ async fn apply_lazy_loading_filter_enhanced(
 
     // Record metrics for dashboard
     if let Some(metrics) = state.lazy_loading_metrics.as_ref() {
-        let cache_hit = essential_members.len() > 0; // Simplified cache hit detection
-        metrics.record_operation(processing_time, cache_hit, members_filtered_out as u64);
+        let cache_hit = !essential_members.is_empty(); // Simplified cache hit detection
+        let _ = metrics.record_operation(processing_time, cache_hit, members_filtered_out as u64).await;
     }
 
     Ok(filtered_events)
@@ -183,6 +185,7 @@ pub async fn apply_lazy_loading_filter(
 }
 
 /// Calculate hash for lazy loading cache key
+#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 fn calculate_lazy_loading_hash(
     room_id: &str,
     user_id: &str,

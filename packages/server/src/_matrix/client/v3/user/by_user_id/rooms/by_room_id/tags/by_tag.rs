@@ -4,10 +4,10 @@ use axum::{
     response::Json,
 };
 use matryx_surrealdb::repository::ProfileManagementService;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{AppState, auth::MatrixSessionService};
+use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct SetRoomTagRequest {
@@ -46,7 +46,7 @@ fn validate_tag_name(tag: &str) -> Result<(), &'static str> {
 fn validate_tag_order(order: Option<f64>) -> Result<(), &'static str> {
     if let Some(order_val) = order {
         // Matrix spec: order should be between 0 and 1 for proper sorting
-        if order_val < 0.0 || order_val > 1.0 {
+        if !(0.0..=1.0).contains(&order_val) {
             return Err("Tag order must be between 0.0 and 1.0");
         }
 

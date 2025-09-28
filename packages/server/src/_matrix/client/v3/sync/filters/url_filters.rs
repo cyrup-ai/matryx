@@ -17,7 +17,7 @@ pub async fn apply_contains_url_filter(
 }
 
 /// Detect URLs in event content across different event types
-fn detect_urls_in_event(event: &Event) -> bool {
+pub fn detect_urls_in_event(event: &Event) -> bool {
     // Check for URLs in various event content fields
     if let Ok(content_value) = serde_json::to_value(&event.content) {
         detect_urls_in_json(&content_value)
@@ -27,7 +27,7 @@ fn detect_urls_in_event(event: &Event) -> bool {
 }
 
 /// Recursively detect URLs in JSON content
-fn detect_urls_in_json(value: &serde_json::Value) -> bool {
+pub fn detect_urls_in_json(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(s) => {
             s.contains("http://") || s.contains("https://") || s.contains("mxc://")

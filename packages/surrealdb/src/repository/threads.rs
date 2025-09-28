@@ -38,9 +38,9 @@ pub struct ThreadUnsigned {
     pub thread: ThreadSummary,
 }
 
-/// Response for thread events query
+/// Response for thread list query
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadEventsResponse {
+pub struct ThreadsListResponse {
     pub chunk: Vec<Event>,
     pub start: Option<String>,
     pub end: Option<String>,
@@ -172,10 +172,23 @@ impl<C: Connection> ThreadsRepository<C> {
             }
         }
 
+        // Generate pagination tokens based on last thread's timestamp
+        let next_batch = if threads.len() as u32 >= limit_value {
+            threads.last().map(|t| format!("t_{}", t.latest_event.origin_server_ts))
+        } else {
+            None
+        };
+
+        let prev_batch = if since.is_some() {
+            threads.first().map(|t| format!("t_{}", t.latest_event.origin_server_ts))
+        } else {
+            None  // No prev_batch when at beginning
+        };
+
         Ok(ThreadRootsResponse {
             threads,
-            next_batch: None, // TODO: Implement pagination
-            prev_batch: None, // TODO: Implement pagination
+            next_batch,
+            prev_batch,
         })
     }
 
@@ -186,7 +199,7 @@ impl<C: Connection> ThreadsRepository<C> {
         thread_root_id: &str,
         since: Option<&str>,
         limit: Option<u32>,
-    ) -> Result<ThreadEventsResponse, RepositoryError> {
+    ) -> Result<ThreadsListResponse, RepositoryError> {
         let mut query = "
             SELECT event.* FROM thread_events
             INNER JOIN event ON thread_events.event_id = event.event_id
@@ -221,7 +234,7 @@ impl<C: Connection> ThreadsRepository<C> {
         let mut query_result = result.await?;
         let events: Vec<Event> = query_result.take(0)?;
 
-        Ok(ThreadEventsResponse {
+        Ok(ThreadsListResponse {
             chunk: events,
             start: None, // TODO: Implement pagination tokens
             end: None,   // TODO: Implement pagination tokens
@@ -622,13 +635,13 @@ impl<C: Connection> ThreadsRepository<C> {
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 updated_at: data
                     .get("updated_at")
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
             };
             Ok(Some(participation))
         } else {
@@ -682,13 +695,13 @@ impl<C: Connection> ThreadsRepository<C> {
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 updated_at: data
                     .get("updated_at")
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
             };
             participants.push(participation);
         }

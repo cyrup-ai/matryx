@@ -2,7 +2,7 @@ use crate::AppState;
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::Response,
 };
 use matryx_surrealdb::repository::{
@@ -18,12 +18,16 @@ pub async fn get(
     State(state): State<AppState>,
     Path((server_name, media_id)): Path<(String, String)>,
 ) -> Result<Response<Body>, StatusCode> {
-    // Create MediaService instance
+    // Create MediaService instance with federation support
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
 
-    let media_service = MediaService::new(media_repo, room_repo, membership_repo);
+    let media_service = MediaService::new(media_repo, room_repo, membership_repo)
+        .with_federation_client(
+            state.federation_media_client.clone(),
+            state.homeserver_name.clone(),
+        );
 
     // Download media using MediaService (v1 API - anonymous access for now)
     let download_result = media_service

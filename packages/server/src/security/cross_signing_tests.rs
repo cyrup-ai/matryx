@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::security::cross_signing::{CrossSigningVerifier, TestCryptoProvider};
     use matryx_surrealdb::repository::cross_signing::{
         CrossSigningKey,

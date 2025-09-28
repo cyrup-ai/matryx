@@ -208,11 +208,10 @@ impl<C: Connection> MonitoringRepository<C> {
         }
 
         // If still down at the end of the range, count the remaining time
-        if is_down {
-            if let Some(start) = downtime_start {
+        if is_down
+            && let Some(start) = downtime_start {
                 total_downtime += (time_range.end - start).num_seconds() as u64;
             }
-        }
 
         let uptime_percentage = if total_duration > 0 {
             ((total_duration - total_downtime) as f64 / total_duration as f64) * 100.0

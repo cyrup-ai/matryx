@@ -13,11 +13,9 @@ use crate::auth::{
 use matryx_surrealdb::repository::{
     KeyServerRepository,
     SessionRepository,
-    error::RepositoryError,
-    key_server::ServerSigningKeyRecord,
-    session::UserAccessToken,
+
 };
-use surrealdb::{Connection, Surreal};
+use surrealdb::Connection;
 
 /// Service for managing Matrix authentication sessions with SurrealDB 3.0
 #[derive(Clone)]
@@ -120,7 +118,23 @@ impl<C: Connection> MatrixSessionService<C> {
         key_id: &str,
         signature: &str,
     ) -> Result<MatrixServerAuth, MatrixAuthError> {
-        // Create JWT claims for the server
+        // Validate signature format before creating session
+        if signature.is_empty() || signature.len() < 32 {
+            tracing::warn!("Invalid signature format for server: {} key: {}", server_name, key_id);
+            return Err(MatrixAuthError::InvalidSignature);
+        }
+
+        // Validate key_id format (should be ed25519:base64)
+        if !key_id.starts_with("ed25519:") {
+            tracing::warn!("Invalid key_id format for server: {} key: {}", server_name, key_id);
+            return Err(MatrixAuthError::InvalidSignature);
+        }
+
+        // Log signature validation attempt
+        tracing::info!("Validating server signature for {} with key {} (signature len: {})",
+            server_name, key_id, signature.len());
+
+        // Create JWT claims for the server after validation
         let expires_in = 300; // 5 minutes for federation
         let claims = MatrixJwtClaims::for_server(server_name, key_id, expires_in);
 
@@ -155,10 +169,19 @@ impl<C: Connection> MatrixSessionService<C> {
                 .clone()
                 .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
 
+            // Validate user_id format (Matrix ID should start with @)
+            if !user_id.starts_with('@') {
+                tracing::warn!("Invalid user_id format in token: {}", user_id);
+                return Err(MatrixAuthError::InvalidXMatrixFormat);
+            }
+
             // Check if session is expired
-            if claims.exp.map_or(false, |exp| exp <= chrono::Utc::now().timestamp()) {
+            if claims.exp.is_some_and(|exp| exp <= chrono::Utc::now().timestamp()) {
+                tracing::warn!("Expired access token for user: {}", user_id);
                 return Err(MatrixAuthError::SessionExpired);
             }
+
+            tracing::debug!("Validating access token for user: {} device: {}", user_id, device_id);
 
             // Create Matrix authentication context from claims
             let matrix_auth = claims.to_matrix_auth()?;
@@ -215,7 +238,7 @@ impl<C: Connection> MatrixSessionService<C> {
         )?;
 
         // 3. Verify the ed25519 signature
-        self.verify_ed25519_signature(&signature, &canonical_json, &public_key)?;
+        self.verify_ed25519_signature(signature, &canonical_json, &public_key)?;
 
         // 4. Create validated server authentication
         Ok(MatrixServerAuth {
@@ -259,7 +282,7 @@ impl<C: Connection> MatrixSessionService<C> {
         destination: &str,
         content: &[u8],
     ) -> Result<String, MatrixAuthError> {
-        use serde_json::{Map, Value, json};
+        use serde_json::{Map, Value};
 
         let mut canonical_request = Map::new();
         canonical_request.insert("method".to_string(), Value::String(method.to_uppercase()));
@@ -275,7 +298,7 @@ impl<C: Connection> MatrixSessionService<C> {
         }
 
         // Convert to canonical JSON (sorted keys, no whitespace)
-        let canonical_json = self.to_canonical_json(&Value::Object(canonical_request))?;
+        let canonical_json = Self::to_canonical_json(&Value::Object(canonical_request))?;
 
         Ok(canonical_json)
     }
@@ -512,7 +535,7 @@ impl<C: Connection> MatrixSessionService<C> {
             obj.remove("signatures");
         }
 
-        let canonical_json = self.to_canonical_json(&key_for_signing)?;
+        let canonical_json = Self::to_canonical_json(&key_for_signing)?;
 
         // Verify at least one signature from the server
         let mut verified = false;
@@ -522,8 +545,8 @@ impl<C: Connection> MatrixSessionService<C> {
             })?;
 
             // Get the public key for this signature
-            if let Some(key_data) = verify_keys.get(signature_key_id) {
-                if let Some(public_key) = key_data.get("key").and_then(|k| k.as_str()) {
+            if let Some(key_data) = verify_keys.get(signature_key_id)
+                && let Some(public_key) = key_data.get("key").and_then(|k| k.as_str()) {
                     match self.verify_ed25519_signature(signature_str, &canonical_json, public_key)
                     {
                         Ok(_) => {
@@ -541,7 +564,6 @@ impl<C: Connection> MatrixSessionService<C> {
                             );
                         },
                     }
-                }
             }
         }
 
@@ -691,7 +713,7 @@ impl<C: Connection> MatrixSessionService<C> {
     /// - Numbers in shortest form
     ///
     /// This is critical for signature verification to work correctly with other Matrix homeservers.
-    fn to_canonical_json(&self, value: &serde_json::Value) -> Result<String, MatrixAuthError> {
+    fn to_canonical_json(value: &serde_json::Value) -> Result<String, MatrixAuthError> {
         match value {
             serde_json::Value::Null => Ok("null".to_string()),
             serde_json::Value::Bool(b) => Ok(b.to_string()),
@@ -702,7 +724,7 @@ impl<C: Connection> MatrixSessionService<C> {
             },
             serde_json::Value::Array(arr) => {
                 let elements: Result<Vec<String>, MatrixAuthError> =
-                    arr.iter().map(|v| self.to_canonical_json(v)).collect();
+                    arr.iter().map(|v| Self::to_canonical_json(v)).collect();
                 Ok(format!("[{}]", elements?.join(",")))
             },
             serde_json::Value::Object(obj) => {
@@ -715,13 +737,13 @@ impl<C: Connection> MatrixSessionService<C> {
                     .map(|key| {
                         let key_json = serde_json::to_string(key)
                             .map_err(|_| MatrixAuthError::InvalidSignature)?;
-                        let value_json = self.to_canonical_json(&obj[key])?;
+                        let value_json = Self::to_canonical_json(&obj[key])?;
                         Ok(format!("{}:{}", key_json, value_json))
                     })
                     .collect();
 
                 Ok(format!("{{{}}}", pairs?.join(",")))
-            },
+            }
         }
     }
 }

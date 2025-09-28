@@ -5,26 +5,21 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::MatrixAuthError;
+
 use crate::state::AppState;
-use matryx_surrealdb::repository::client_api_service::{
-    RoomEventsCriteria,
-    SearchCategories as RequestSearchCategories,
-};
+use matryx_surrealdb::repository::client_api_service::SearchCategories as RequestSearchCategories;
 use matryx_surrealdb::repository::search::{
     EventContext,
     GroupBy,
     RoomEventFilter,
-    RoomEventsResults,
     SearchCategories as ResponseSearchCategories,
     SearchGroupings,
-    SearchResult,
 };
-use matryx_surrealdb::repository::search::{SearchCriteria, SearchRepository, SearchResults};
+use matryx_surrealdb::repository::search::{SearchCriteria, SearchRepository};
 
 #[derive(Deserialize)]
 pub struct SearchRequest {

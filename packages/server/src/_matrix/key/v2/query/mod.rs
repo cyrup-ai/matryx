@@ -8,6 +8,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
+use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
 use matryx_entity::utils::canonical_json;
 use matryx_surrealdb::repository::InfrastructureService;
 
@@ -39,12 +40,16 @@ pub async fn post(
     // Create InfrastructureService instance
     let infrastructure_service = create_infrastructure_service(&state).await;
 
+    // Create ServerDiscoveryOrchestrator for Matrix DNS resolution
+    let server_discovery = ServerDiscoveryOrchestrator::new(state.dns_resolver.clone());
+
     // Process each server's key requests
     for (server_name, key_requests) in server_keys_request {
         debug!("Querying keys for server: {}", server_name);
 
         match fetch_and_sign_server_keys(
             &infrastructure_service,
+            &server_discovery,
             &client,
             server_name,
             key_requests,
@@ -94,18 +99,21 @@ async fn create_infrastructure_service(
 /// Fetch server keys from a remote server and sign them as a notary using repository
 async fn fetch_and_sign_server_keys(
     infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
+    server_discovery: &ServerDiscoveryOrchestrator,
     client: &Client,
     server_name: &str,
     _key_requests: &Value,
     homeserver_name: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    // Fetch keys from the remote server's /_matrix/key/v2/server endpoint
-    let url = format!("https://{}/_matrix/key/v2/server", server_name);
+    // Resolve server using Matrix DNS resolution
+    let connection = server_discovery.discover_server(server_name).await?;
+    let url = format!("{}/_matrix/key/v2/server", connection.base_url);
     debug!("Fetching server keys from: {}", url);
 
     let response = client
         .get(&url)
         .header("User-Agent", "matryx-homeserver/1.0")
+        .header("Host", connection.host_header)
         .send()
         .await?;
 
@@ -141,10 +149,9 @@ async fn fetch_and_sign_server_keys(
 
     // Add our notary signature to the response
     let mut signed_response = server_key_response;
-    if let Some(signatures) = signed_response.get_mut("signatures") {
-        if let Some(signatures_obj) = signatures.as_object_mut() {
-            signatures_obj.insert(homeserver_name.to_string(), notary_signature);
-        }
+    if let Some(signatures) = signed_response.get_mut("signatures")
+        && let Some(signatures_obj) = signatures.as_object_mut() {
+        signatures_obj.insert(homeserver_name.to_string(), notary_signature);
     }
 
     debug!("Successfully fetched and signed keys for server: {}", server_name);

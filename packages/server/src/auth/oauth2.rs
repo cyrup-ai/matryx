@@ -4,16 +4,18 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect},
 };
-use chrono::{DateTime, Duration, Utc};
+
 use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use surrealdb::Connection;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::auth::{MatrixAuthError, MatrixSessionService};
-use matryx_surrealdb::repository::oauth2::{AuthorizationCode, OAuth2Client, OAuth2Repository};
+use matryx_surrealdb::repository::oauth2::{OAuth2Client, OAuth2Repository};
 
 /// OAuth 2.0 authorization request parameters
 #[derive(Debug, Deserialize)]
@@ -62,6 +64,8 @@ pub struct OAuth2Service<C: Connection> {
     oauth2_repo: OAuth2Repository<C>,
     session_service: Arc<MatrixSessionService<C>>,
     homeserver_name: String,
+    // Add CSRF token storage
+    csrf_tokens: Arc<RwLock<HashMap<String, (String, i64)>>>, // token -> (user_id, expires_at)
 }
 
 impl<C: Connection> OAuth2Service<C> {
@@ -70,7 +74,37 @@ impl<C: Connection> OAuth2Service<C> {
         session_service: Arc<MatrixSessionService<C>>,
         homeserver_name: String,
     ) -> Self {
-        Self { oauth2_repo, session_service, homeserver_name }
+        Self { 
+            oauth2_repo, 
+            session_service, 
+            homeserver_name,
+            csrf_tokens: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    // Generate CSRF token for authenticated user
+    pub async fn generate_csrf_token(&self, user_id: &str) -> String {
+        let csrf_token = Uuid::new_v4().to_string();
+        let expires_at = chrono::Utc::now().timestamp() + 3600; // 1 hour expiry
+        
+        let mut tokens = self.csrf_tokens.write().await;
+        tokens.insert(csrf_token.clone(), (user_id.to_string(), expires_at));
+        
+        // Cleanup expired tokens
+        tokens.retain(|_, (_, exp)| *exp > chrono::Utc::now().timestamp());
+        
+        csrf_token
+    }
+
+    // Validate CSRF token in authorize method
+    pub async fn validate_csrf_token(&self, state: &str, user_id: &str) -> bool {
+        let mut tokens = self.csrf_tokens.write().await;
+        
+        if let Some((stored_user_id, expires_at)) = tokens.remove(state) {
+            stored_user_id == user_id && expires_at > chrono::Utc::now().timestamp()
+        } else {
+            false
+        }
     }
 
     /// Handle OAuth 2.0 authorization request
@@ -121,6 +155,12 @@ impl<C: Connection> OAuth2Service<C> {
             });
         }
 
+        // Additional security: validate redirect URI is not to our own homeserver to prevent loops
+        if params.redirect_uri.contains(&self.homeserver_name) {
+            warn!("OAuth2 redirect URI contains homeserver name - potential security issue: {}", params.redirect_uri);
+            // Allow but log for security monitoring
+        }
+
         // Validate PKCE parameters if present
         if let Some(ref challenge) = params.code_challenge {
             let method = params.code_challenge_method.as_deref().unwrap_or("plain");
@@ -130,6 +170,39 @@ impl<C: Connection> OAuth2Service<C> {
                     error_description: Some("Invalid code_challenge_method".to_string()),
                     error_uri: None,
                     state: params.state.clone(),
+                });
+            }
+            
+            // Validate challenge length according to RFC 7636
+            if challenge.len() < 43 || challenge.len() > 128 {
+                return Err(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("Code challenge must be between 43-128 characters".to_string()),
+                    error_uri: None,
+                    state: params.state.clone(),
+                });
+            }
+            
+            debug!("PKCE challenge validated: method={}, challenge_len={}", method, challenge.len());
+        }
+
+        // CSRF Protection: Validate state parameter if user is authenticated
+        if let Some(user_id) = &authenticated_user_id {
+            if let Some(state) = &params.state {
+                if !self.validate_csrf_token(state, user_id).await {
+                    return Err(ErrorResponse {
+                        error: "invalid_request".to_string(),
+                        error_description: Some("Invalid CSRF token".to_string()),
+                        error_uri: None,
+                        state: params.state,
+                    });
+                }
+            } else {
+                return Err(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("Missing CSRF token".to_string()),
+                    error_uri: None,
+                    state: None,
                 });
             }
         }
@@ -325,7 +398,8 @@ impl<C: Connection> OAuth2Service<C> {
             .await
         {
             Ok(_) => {
-                info!("OAuth2 token exchange successful for user: {}", auth_code.user_id);
+                info!("OAuth2 token exchange successful for user: {} on homeserver: {}",
+                     auth_code.user_id, self.homeserver_name);
 
                 Ok(TokenResponse {
                     access_token,
@@ -357,7 +431,7 @@ impl<C: Connection> OAuth2Service<C> {
                 let mut hasher = Sha256::new();
                 hasher.update(verifier.as_bytes());
                 let hash = hasher.finalize();
-                let encoded = general_purpose::URL_SAFE_NO_PAD.encode(&hash);
+                let encoded = general_purpose::URL_SAFE_NO_PAD.encode(hash);
                 challenge == encoded
             },
             _ => false,

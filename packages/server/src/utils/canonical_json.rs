@@ -21,8 +21,23 @@ pub fn to_canonical_json(value: &Value) -> Result<String, CanonicalJsonError> {
     Ok(serde_json::to_string(&canonical_value)?)
 }
 
-/// Legacy function for backward compatibility
-fn canonicalize_value(value: &Value) -> Result<Value, CanonicalJsonError> {
+/// Canonicalize a JSON value to Matrix canonical form
+///
+/// This function provides a public API for canonicalizing JSON values
+/// according to Matrix specification requirements. It's used internally
+/// by to_canonical_json() and can be used directly when you need the
+/// canonicalized Value rather than a String.
+///
+/// # Arguments
+/// * `value` - The JSON value to canonicalize
+///
+/// # Returns
+/// * `Result<Value, CanonicalJsonError>` - Canonicalized JSON value with sorted keys
+///
+/// # Errors
+/// * `CanonicalJsonError::RecursiveStructure` - If circular references detected
+/// * `CanonicalJsonError::JsonError` - If JSON processing fails
+pub fn canonicalize_value(value: &Value) -> Result<Value, CanonicalJsonError> {
     let mut visited = HashSet::new();
     canonicalize_value_with_cycle_detection(value, &mut visited, 0)
 }

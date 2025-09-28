@@ -3,9 +3,9 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+
 use tracing::{error, info};
 
 use crate::auth::extract_matrix_auth;
@@ -45,9 +45,9 @@ pub async fn get(
     // Create notification repository
     let notification_repo = NotificationRepository::new(state.db.clone());
 
-    // Get user notifications
+    // Get user notifications with optional filter
     let notifications_response = match notification_repo
-        .get_user_notifications(&user_id, query.from.as_deref(), query.limit)
+        .get_user_notifications(&user_id, query.from.as_deref(), query.limit, query.only.as_deref())
         .await
     {
         Ok(response) => response,

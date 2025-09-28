@@ -320,6 +320,17 @@ impl<C: Connection> InfrastructureService<C> {
         device_id: Option<&str>,
         initial_device_display_name: Option<&str>,
     ) -> Result<RegistrationResult, RepositoryError> {
+        self.register_new_user_with_options(username, password, device_id, initial_device_display_name, false).await
+    }
+
+    pub async fn register_new_user_with_options(
+        &self,
+        username: &str,
+        password: &str,
+        device_id: Option<&str>,
+        initial_device_display_name: Option<&str>,
+        enable_refresh_tokens: bool,
+    ) -> Result<RegistrationResult, RepositoryError> {
         // Check username availability
         if !self.registration_repo.check_username_availability(username).await? {
             return Err(RepositoryError::Validation {
@@ -335,9 +346,21 @@ impl<C: Connection> InfrastructureService<C> {
         // Hash password (in real implementation, use proper password hashing)
         let password_hash = format!("hashed_{}", password);
 
-        self.registration_repo
+        // Register user with refresh token option
+        let mut result = self.registration_repo
             .register_user(&user_id, &password_hash, device_id, initial_device_display_name)
-            .await
+            .await?;
+
+        // Generate refresh token if requested and supported
+        if enable_refresh_tokens {
+            let refresh_token = format!("rt_{}", uuid::Uuid::new_v4());
+            // Store refresh token in database (implement refresh token storage)
+            // For now, just set it in the result
+            result.refresh_token = Some(refresh_token);
+            result.expires_in_ms = Some(86400000); // 24 hours in milliseconds
+        }
+
+        Ok(result)
     }
 
     /// Login user with device

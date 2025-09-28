@@ -4,7 +4,7 @@
 //! Returns identity server discovery information for Matrix clients.
 //! Enables identity server integration for the Matrix ecosystem.
 
-use crate::config::ServerConfig;
+
 use axum::{http::StatusCode, response::Json};
 use reqwest::Client;
 use serde_json::{Value, json};

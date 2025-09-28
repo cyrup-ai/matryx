@@ -1,2 +1,2 @@
-pub mod by_event_type;
+pub mod handlers;
 pub mod by_state_key;

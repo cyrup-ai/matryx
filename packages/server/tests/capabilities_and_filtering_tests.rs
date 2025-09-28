@@ -5,27 +5,15 @@
 //! - Filter API CRUD operations with FilterRepository integration
 //! - Sync filtering functionality with room filtering and lazy loading
 
-use axum::{
-    Router,
-    body::Body,
-    http::{Method, Request, StatusCode},
-    routing::{get, post},
-};
+use axum::http::StatusCode;
 use axum_test::TestServer;
-use serde_json::{Value, json};
-use std::sync::Arc;
-use tower::ServiceExt;
+use serde_json::Value;
 use uuid::Uuid;
 
 // Import local crate modules
 use matryx_entity::{
     filter::{EventFilter, RoomEventFilter, RoomFilter},
     types::MatrixFilter,
-};
-use matryx_server::{
-    _matrix::client::v3::{capabilities, user::by_user_id::filter},
-    auth::AuthenticatedUser,
-    state::AppState,
 };
 use matryx_surrealdb::test_utils::TestDatabase;
 
@@ -70,11 +58,10 @@ async fn test_capabilities_endpoint_compliance() {
             .as_bool()
             .expect("Missing 3pid capability")
     );
-    assert_eq!(
-        caps["m.get_login_token"]["enabled"]
+    assert!(
+        !caps["m.get_login_token"]["enabled"]
             .as_bool()
-            .expect("Missing login token capability"),
-        false
+            .expect("Missing login token capability")
     );
 
     // Test Matrix extension capabilities
@@ -211,7 +198,7 @@ async fn test_sync_with_filter() {
 
     // Test URL encoding for sync parameter
     let encoded_filter = urlencoding::encode(&filter_json);
-    assert!(encoded_filter.len() > 0);
+    assert!(!encoded_filter.is_empty());
 
     // Verify filter can be used in sync URL format
     let sync_url = format!("/_matrix/client/v3/sync?filter={}", encoded_filter);

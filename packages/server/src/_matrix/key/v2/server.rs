@@ -3,6 +3,7 @@ use base64::{Engine, engine::general_purpose};
 use serde_json::{Value, json};
 use std::env;
 use tracing::{error, info};
+use getrandom::getrandom;
 
 use crate::AppState;
 use matryx_entity::utils::canonical_json;
@@ -32,7 +33,7 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
     let infrastructure_service = create_infrastructure_service(&state).await;
 
     // Get or generate Ed25519 signing keys using repository
-    let (verify_keys, old_verify_keys, signatures) =
+    let (verify_keys, old_verify_keys, signatures, key_record) =
         get_or_generate_signing_keys(&infrastructure_service, &server_name)
             .await
             .map_err(|e| {
@@ -40,8 +41,33 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
-    let current_time_ms = chrono::Utc::now().timestamp_millis();
-    let valid_until_ms = current_time_ms + (7 * 24 * 60 * 60 * 1000); // 7 days from now
+    // Log key age for Matrix federation key management
+    let key_age_days = (chrono::Utc::now() - key_record.created_at).num_days();
+    info!("Serving signing key {} created {} days ago", 
+          key_record.key_id, key_age_days);
+
+    // Log key age for monitoring and security auditing
+    let key_age_days = chrono::Utc::now()
+        .signed_duration_since(key_record.created_at)
+        .num_days();
+    
+    info!("Serving signing key {} created {} days ago", 
+          key_record.key_id, key_age_days);
+
+    // Use key expiry time if available, otherwise default to 7 days
+    // Ensure minimum 1-hour response lifetime per Matrix spec to avoid repeated requests
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let one_hour_from_now = now_ms + (60 * 60 * 1000); // 1 hour in milliseconds
+    let default_valid_until = now_ms + (7 * 24 * 60 * 60 * 1000); // 7 days from now
+
+    let proposed_valid_until = if let Some(expires_at) = key_record.expires_at {
+        expires_at.timestamp_millis()
+    } else {
+        default_valid_until
+    };
+
+    // Enforce minimum 1-hour response lifetime
+    let valid_until_ms = std::cmp::max(proposed_valid_until, one_hour_from_now);
 
     Ok(Json(json!({
         "server_name": server_name,
@@ -78,7 +104,7 @@ async fn create_infrastructure_service(
 async fn get_or_generate_signing_keys(
     infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     server_name: &str,
-) -> Result<(Value, Value, Value), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Value, Value, Value, SigningKeyRecord), Box<dyn std::error::Error + Send + Sync>> {
     // Try to get existing signing key using repository
     let key_id = "ed25519:auto";
 
@@ -91,14 +117,15 @@ async fn get_or_generate_signing_keys(
             if let Some(server_keys) = server_keys_response.server_keys.first() {
                 if let Some(verify_key) = server_keys.verify_keys.get(key_id) {
                     // Convert to our internal format
+                    let key_created_at = chrono::Utc::now(); // Placeholder as we don't store creation time in ServerKeys
                     SigningKeyRecord {
                         key_id: key_id.to_string(),
                         public_key: verify_key.key.clone(),
                         private_key: "".to_string(), // We don't store private keys in ServerKeys
-                        created_at: chrono::Utc::now(),
+                        created_at: key_created_at,
                         expires_at: Some(
                             chrono::DateTime::from_timestamp(server_keys.valid_until_ts, 0)
-                                .unwrap_or_else(chrono::Utc::now),
+                                .ok_or_else(|| format!("Invalid timestamp in server keys: {}", server_keys.valid_until_ts))?,
                         ),
                     }
                 } else {
@@ -142,7 +169,7 @@ async fn get_or_generate_signing_keys(
     let mut signatures = serde_json::Map::new();
     signatures.insert(server_name.to_string(), json!(server_signatures));
 
-    Ok((json!(verify_keys), old_verify_keys, json!(signatures)))
+    Ok((json!(verify_keys), old_verify_keys, json!(signatures), current_key))
 }
 
 /// Generate new Ed25519 keypair and store using repository
@@ -151,12 +178,10 @@ async fn generate_ed25519_keypair(
     server_name: &str,
 ) -> Result<SigningKeyRecord, Box<dyn std::error::Error + Send + Sync>> {
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
-    use rand::{RngCore, rngs::OsRng};
 
     // Generate proper Ed25519 keypair using cryptographically secure random number generator
-    let mut rng = OsRng;
     let mut secret_bytes = [0u8; 32];
-    rng.fill_bytes(&mut secret_bytes);
+    getrandom(&mut secret_bytes).expect("Failed to generate random bytes");
     let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
     let verifying_key = signing_key.verifying_key();
 
@@ -165,8 +190,8 @@ async fn generate_ed25519_keypair(
     let public_key_bytes = verifying_key.to_bytes();
 
     // Encode as base64
-    let private_key_b64 = general_purpose::STANDARD.encode(&private_key_bytes);
-    let public_key_b64 = general_purpose::STANDARD.encode(&public_key_bytes);
+    let private_key_b64 = general_purpose::STANDARD.encode(private_key_bytes);
+    let public_key_b64 = general_purpose::STANDARD.encode(public_key_bytes);
 
     let key_id = "ed25519:auto".to_string();
     let created_at = chrono::Utc::now();
@@ -188,7 +213,7 @@ async fn generate_ed25519_keypair(
         .await
         .map_err(|e| {
             error!("Failed to store signing key: {:?}", e);
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to store signing key"))
+            Box::new(std::io::Error::other("Failed to store signing key"))
                 as Box<dyn std::error::Error + Send + Sync>
         })?;
 
@@ -212,7 +237,11 @@ fn build_canonical_server_json(
     verify_keys: &serde_json::Map<String, Value>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let current_time_ms = chrono::Utc::now().timestamp_millis();
-    let valid_until_ms = current_time_ms + (7 * 24 * 60 * 60 * 1000);
+    let one_hour_from_now = current_time_ms + (60 * 60 * 1000); // 1 hour in milliseconds
+    let seven_days_from_now = current_time_ms + (7 * 24 * 60 * 60 * 1000); // 7 days from now
+
+    // Ensure minimum 1-hour response lifetime per Matrix spec
+    let valid_until_ms = std::cmp::max(seven_days_from_now, one_hour_from_now);
 
     let server_object = json!({
         "server_name": server_name,

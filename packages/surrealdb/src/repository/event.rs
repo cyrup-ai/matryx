@@ -1266,6 +1266,172 @@ impl EventRepository {
         Ok(Some(event))
     }
 
+    /// Check if a room is world-readable based on history visibility
+    pub async fn is_room_world_readable(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT content.history_visibility
+            FROM event
+            WHERE room_id = $room_id
+            AND event_type = 'm.room.history_visibility'
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct HistoryVisibility {
+            history_visibility: Option<String>,
+        }
+
+        let visibility: Option<HistoryVisibility> = response.take(0)?;
+        let history_visibility = visibility
+            .and_then(|v| v.history_visibility)
+            .unwrap_or_else(|| "shared".to_string());
+
+        Ok(history_visibility == "world_readable")
+    }
+
+    /// Get room state at a specific event depth
+    pub async fn get_room_state_at_event(&self, room_id: &str, event_id: &str) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        // Get the target event's depth for state resolution
+        let depth_query = "
+            SELECT depth
+            FROM event
+            WHERE event_id = $event_id
+        ";
+
+        let mut response = self.db.query(depth_query)
+            .bind(("event_id", event_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct EventDepth {
+            depth: Option<i64>,
+        }
+
+        let event_depth: Option<EventDepth> = response.take(0)?;
+        let target_depth = event_depth
+            .and_then(|e| e.depth)
+            .ok_or_else(|| RepositoryError::NotFound {
+                entity_type: "Event depth".to_string(),
+                id: event_id.to_string(),
+            })?;
+
+        // Get state events at or before the target event depth
+        let state_query = "
+            SELECT *
+            FROM event
+            WHERE room_id = $room_id
+            AND state_key IS NOT NULL
+            AND depth <= $target_depth
+            AND (
+                SELECT COUNT()
+                FROM event e2
+                WHERE e2.room_id = $room_id
+                AND e2.event_type = event.event_type
+                AND e2.state_key = event.state_key
+                AND e2.depth <= $target_depth
+                AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
+            ) = 0
+            ORDER BY event_type, state_key
+        ";
+
+        let mut response = self.db.query(state_query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("target_depth", target_depth))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+
+        // Convert events to JSON format for response
+        let state_events: Vec<serde_json::Value> = events
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({})))
+            .collect();
+
+        Ok(state_events)
+    }
+
+    /// Get auth chain for a set of state events
+    pub async fn get_auth_chain_for_state(&self, state_events: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        use std::collections::HashSet;
+
+        let mut auth_event_ids = HashSet::new();
+        let mut to_process = HashSet::new();
+
+        // Collect initial auth events
+        for state_event in state_events {
+            if let Some(auth_events) = state_event.get("auth_events").and_then(|v| v.as_array()) {
+                for auth_event in auth_events {
+                    if let Some(auth_event_id) = auth_event.as_str()
+                        && auth_event_ids.insert(auth_event_id.to_string()) {
+                            to_process.insert(auth_event_id.to_string());
+                        }
+                }
+            }
+        }
+
+        // Recursively fetch auth events
+        while !to_process.is_empty() {
+            let current_batch: Vec<String> = to_process.drain().collect();
+
+            let query = "
+                SELECT *
+                FROM event
+                WHERE event_id IN $auth_event_ids
+            ";
+
+            let mut response = self.db.query(query)
+                .bind(("auth_event_ids", current_batch))
+                .await?;
+
+            let events: Vec<Event> = response.take(0)?;
+
+            // Process auth events of the fetched events
+            for event in &events {
+                if let Some(auth_events) = &event.auth_events {
+                    for auth_event_id in auth_events {
+                        if auth_event_ids.insert(auth_event_id.clone()) {
+                            to_process.insert(auth_event_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if auth_event_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Fetch all auth events
+        let auth_ids: Vec<String> = auth_event_ids.into_iter().collect();
+
+        let query = "
+            SELECT *
+            FROM event
+            WHERE event_id IN $auth_event_ids
+            ORDER BY depth, origin_server_ts
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("auth_event_ids", auth_ids))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+
+        // Convert events to JSON format for response
+        let auth_chain: Vec<serde_json::Value> = events
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({})))
+            .collect();
+
+        Ok(auth_chain)
+    }
+
     /// Mark an event as read by a user
     pub async fn mark_event_as_read(
         &self,
@@ -1887,4 +2053,897 @@ impl EventRepository {
         let auth_events: Vec<String> = result.take(0)?;
         Ok(auth_events)
     }
+
+    /// Get room history visibility setting
+    pub async fn get_room_history_visibility(
+        &self,
+        room_id: &str,
+    ) -> Result<String, RepositoryError> {
+        let query = "
+            SELECT content.history_visibility
+            FROM event
+            WHERE room_id = $room_id
+            AND type = 'm.room.history_visibility'
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+
+        #[derive(serde::Deserialize)]
+        struct HistoryVisibility {
+            history_visibility: Option<String>,
+        }
+
+        let visibility: Option<HistoryVisibility> = response.take(0)?;
+        Ok(visibility
+            .and_then(|v| v.history_visibility)
+            .unwrap_or_else(|| "shared".to_string()))
+    }
+
+    /// Get room join rules setting
+    pub async fn get_room_join_rules(
+        &self,
+        room_id: &str,
+    ) -> Result<String, RepositoryError> {
+        let query = "
+            SELECT content.join_rule
+            FROM event
+            WHERE room_id = $room_id
+            AND type = 'm.room.join_rules'
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+
+        #[derive(serde::Deserialize)]
+        struct JoinRules {
+            join_rule: Option<String>,
+        }
+
+        let join_rules: Option<JoinRules> = response.take(0)?;
+        Ok(join_rules
+            .and_then(|j| j.join_rule)
+            .unwrap_or_else(|| "invite".to_string()))
+    }
+
+    /// Get space child events for a room
+    pub async fn get_space_child_events(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT state_key, content
+            FROM event
+            WHERE room_id = $room_id
+            AND type = 'm.space.child'
+            AND state_key != ''
+            ORDER BY depth DESC, origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get room state events by specific types
+    pub async fn get_room_state_by_types(
+        &self,
+        room_id: &str,
+        event_types: &[&str],
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT type, state_key, content
+            FROM event
+            WHERE room_id = $room_id
+            AND type IN $event_types
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_types", event_types.iter().map(|s| s.to_string()).collect::<Vec<String>>()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get room state events by specific event IDs for federation
+    pub async fn get_room_state_events_by_ids(&self, room_id: &str, event_ids: &[String]) -> Result<Vec<Event>, RepositoryError> {
+        if event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND event_id IN $event_ids 
+            AND state_key IS NOT NULL
+            ORDER BY origin_server_ts ASC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_ids", event_ids.iter().map(|s| s.to_string()).collect::<Vec<String>>()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get room state event IDs only for federation state_ids endpoint
+    pub async fn get_room_state_event_ids(&self, room_id: &str) -> Result<Vec<String>, RepositoryError> {
+        let query = "
+            SELECT event_id FROM event 
+            WHERE room_id = $room_id 
+            AND state_key IS NOT NULL
+            ORDER BY origin_server_ts ASC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let event_ids: Vec<String> = response.take(0)?;
+        Ok(event_ids)
+    }
+
+    /// Get auth event IDs in batches for federation
+    pub async fn get_auth_event_ids_batch(&self, auth_event_ids: &[String]) -> Result<Vec<String>, RepositoryError> {
+        if auth_event_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = "
+            SELECT event_id FROM event 
+            WHERE event_id IN $auth_event_ids
+            ORDER BY origin_server_ts ASC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("auth_event_ids", auth_event_ids.iter().map(|s| s.to_string()).collect::<Vec<String>>()))
+            .await?;
+
+        let event_ids: Vec<String> = response.take(0)?;
+        Ok(event_ids)
+    }
+
+    /// Get room backfill events with limit and direction for federation
+    pub async fn get_room_backfill_events(&self, room_id: &str, limit: u32, from_token: Option<&str>) -> Result<Vec<Event>, RepositoryError> {
+        let query = if let Some(_token) = from_token {
+            "
+                SELECT * FROM event 
+                WHERE room_id = $room_id 
+                AND origin_server_ts < $from_token
+                ORDER BY origin_server_ts DESC
+                LIMIT $limit
+            "
+        } else {
+            "
+                SELECT * FROM event 
+                WHERE room_id = $room_id 
+                ORDER BY origin_server_ts DESC
+                LIMIT $limit
+            "
+        };
+
+        let mut response = if let Some(token) = from_token {
+            self.db.query(query)
+                .bind(("room_id", room_id.to_string()))
+                .bind(("from_token", token.to_string()))
+                .bind(("limit", limit as i64))
+                .await?
+        } else {
+            self.db.query(query)
+                .bind(("room_id", room_id.to_string()))
+                .bind(("limit", limit as i64))
+                .await?
+        };
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get missing events batch for federation
+    pub async fn get_missing_events_batch(&self, room_id: &str, earliest_events: &[String], latest_events: &[String], limit: u32) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND event_id NOT IN $earliest_events
+            AND event_id NOT IN $latest_events
+            ORDER BY origin_server_ts ASC
+            LIMIT $limit
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("earliest_events", earliest_events.iter().map(|s| s.to_string()).collect::<Vec<String>>()))
+            .bind(("latest_events", latest_events.iter().map(|s| s.to_string()).collect::<Vec<String>>()))
+            .bind(("limit", limit as i64))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get event by ID with room validation for federation
+    pub async fn get_event_by_id_with_room(&self, event_id: &str, room_id: &str) -> Result<Option<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE event_id = $event_id 
+            AND room_id = $room_id
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("event_id", event_id.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events.into_iter().next())
+    }
+
+    /// Get room state by specific type and key for client endpoints
+    pub async fn get_room_state_by_type_and_key(&self, room_id: &str, event_type: &str, state_key: &str) -> Result<Option<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = $event_type 
+            AND state_key = $state_key
+            ORDER BY origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_type", event_type.to_string()))
+            .bind(("state_key", state_key.to_string()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events.into_iter().next())
+    }
+
+    /// Get room state by specific type for client endpoints
+    pub async fn get_room_state_by_type(&self, room_id: &str, event_type: &str) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = $event_type 
+            AND state_key IS NOT NULL
+            ORDER BY origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_type", event_type.to_string()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get all room state events for client endpoints
+    pub async fn get_room_state_events(&self, room_id: &str) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND state_key IS NOT NULL
+            ORDER BY origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Validate state access for client endpoints
+    pub async fn validate_state_access(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        // Check if user is a member of the room
+        let query = "
+            SELECT COUNT() as count FROM membership 
+            WHERE room_id = $room_id 
+            AND user_id = $user_id 
+            AND membership IN ['join', 'invite']
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+
+        let counts: Vec<serde_json::Value> = response.take(0)?;
+        if let Some(count_obj) = counts.first()
+            && let Some(count) = count_obj.get("count").and_then(|v| v.as_u64()) {
+                return Ok(count > 0);
+            }
+        
+        Ok(false)
+    }
+
+    /// Update room state event for client endpoints
+    pub async fn update_room_state_event(&self, room_id: &str, event_type: &str, state_key: &str, content: serde_json::Value, sender: &str) -> Result<Event, RepositoryError> {
+        let event_id = format!("${}:{}", uuid::Uuid::new_v4(), "localhost"); // TODO: Use proper server name
+        let now = chrono::Utc::now();
+
+        let event = Event {
+            event_id: event_id.clone(),
+            room_id: room_id.to_string(),
+            sender: sender.to_string(),
+            event_type: event_type.to_string(),
+            content: matryx_entity::EventContent::Unknown(content),
+            state_key: Some(state_key.to_string()),
+            origin_server_ts: now.timestamp_millis(),
+            unsigned: None,
+            prev_events: Some(Vec::new()),
+            auth_events: Some(Vec::new()),
+            depth: Some(1),
+            hashes: Some(std::collections::HashMap::new()),
+            signatures: Some(std::collections::HashMap::new()),
+            redacts: None,
+            outlier: Some(false),
+            received_ts: Some(now.timestamp_millis()),
+            rejected_reason: None,
+            soft_failed: None,
+        };
+
+        let created_event: Option<Event> = self.db.create(("event", &event_id)).content(event).await?;
+        created_event.ok_or_else(|| RepositoryError::NotFound { 
+            entity_type: "event".to_string(), 
+            id: event_id 
+        })
+    }
+
+    /// Get next event depth for a room
+    pub async fn get_next_event_depth(&self, room_id: &str) -> Result<i64, RepositoryError> {
+        let query = "SELECT VALUE math::max(depth) FROM event WHERE room_id = $room_id";
+        let mut result = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let max_depth: Option<i64> = result.take(0)?;
+        Ok(max_depth.unwrap_or(0) + 1)
+    }
+
+    /// Get latest event IDs for a room
+    pub async fn get_latest_event_ids(&self, room_id: &str, limit: u32) -> Result<Vec<String>, RepositoryError> {
+        let query = format!(
+            "SELECT event_id FROM event WHERE room_id = $room_id ORDER BY depth DESC LIMIT {}",
+            limit
+        );
+        let mut result = self.db.query(&query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let events: Vec<serde_json::Value> = result.take(0)?;
+        let event_ids: Vec<String> = events
+            .into_iter()
+            .filter_map(|v| v.get("event_id").and_then(|id| id.as_str().map(|s| s.to_string())))
+            .collect();
+
+        Ok(event_ids)
+    }
+
+    /// Get auth events for unban operation
+    pub async fn get_auth_events_for_unban(&self, room_id: &str, unbanner_id: &str) -> Result<Vec<String>, RepositoryError> {
+        let query = "
+            SELECT event_id FROM event 
+            WHERE room_id = $room_id 
+            AND ((event_type = 'm.room.create' AND state_key = '')
+                 OR (event_type = 'm.room.power_levels' AND state_key = '')
+                 OR (event_type = 'm.room.member' AND state_key = $unbanner_id))
+            ORDER BY origin_server_ts ASC
+        ";
+
+        let mut result = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("unbanner_id", unbanner_id.to_string()))
+            .await?;
+
+        let events: Vec<serde_json::Value> = result.take(0)?;
+        let auth_event_ids: Vec<String> = events
+            .into_iter()
+            .filter_map(|v| v.get("event_id").and_then(|id| id.as_str().map(|s| s.to_string())))
+            .collect();
+
+        Ok(auth_event_ids)
+    }
+
+    /// Check if a room is a direct message room
+    pub async fn is_direct_message_room(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        // Check member count
+        let member_count_query = "
+            SELECT count() as count
+            FROM membership 
+            WHERE room_id = $room_id 
+              AND membership = 'join'
+        ";
+
+        let mut response = self.db.query(member_count_query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let member_count_result: Option<CountResult> = response.take(0)?;
+        let member_count = member_count_result.map(|c| c.count).unwrap_or(0);
+
+        // Check for room name or topic
+        let room_state_query = "
+            SELECT count() as count
+            FROM event 
+            WHERE room_id = $room_id 
+              AND event_type IN ['m.room.name', 'm.room.topic']
+              AND state_key = ''
+        ";
+
+        let mut response = self.db.query(room_state_query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let has_name_or_topic_result: Option<CountResult> = response.take(0)?;
+        let has_name_or_topic = has_name_or_topic_result.map(|c| c.count > 0).unwrap_or(false);
+
+        Ok(member_count == 2 && !has_name_or_topic)
+    }
+
+    /// Check authorization rules for knock event
+    pub async fn check_knock_authorization(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+        // For knock events, the main authorization check is that the room allows knocking
+        // and the user is not banned or already in the room (checked earlier)
+
+        // Check if user has any power level restrictions
+        let query = "
+            SELECT content.users
+            FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.power_levels' 
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct PowerLevelsContent {
+            users: Option<serde_json::Map<String, serde_json::Value>>,
+        }
+
+        let power_levels: Option<PowerLevelsContent> = response.take(0)?;
+
+        if let Some(levels) = power_levels
+            && let Some(users) = levels.users {
+                // Check if user has negative power level (effectively banned from actions)
+                if let Some(user_level) = users.get(user_id).and_then(|v| v.as_i64())
+                    && user_level < 0 {
+                        return Ok(false);
+                    }
+            }
+
+        Ok(true)
+    }
+
+    /// Get room state events to include in knock response
+    pub async fn get_room_state_for_knock(&self, room_id: &str) -> Result<Vec<serde_json::Value>, RepositoryError> {
+        // Return essential room state events for the knocking user
+        let query = "
+            SELECT *
+            FROM event 
+            WHERE room_id = $room_id 
+            AND state_key IS NOT NULL
+            AND event_type IN [
+                'm.room.create',
+                'm.room.join_rules', 
+                'm.room.power_levels',
+                'm.room.name',
+                'm.room.topic',
+                'm.room.avatar',
+                'm.room.canonical_alias'
+            ]
+            ORDER BY depth DESC, origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+
+        // Convert events to JSON format for response
+        let state_events: Vec<serde_json::Value> = events
+            .into_iter()
+            .map(|event| serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({})))
+            .collect();
+
+        Ok(state_events)
+    }
+
+    /// Get current state event by type and state_key
+    pub async fn get_current_state_event(&self, room_id: &str, event_type: &str, state_key: &str) -> Result<Option<Event>, RepositoryError> {
+        let query = "
+            SELECT *
+            FROM event
+            WHERE room_id = $room_id
+            AND event_type = $event_type
+            AND state_key = $state_key
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_type", event_type.to_string()))
+            .bind(("state_key", state_key.to_string()))
+            .await?;
+
+        let event: Option<Event> = response.take(0)?;
+        Ok(event)
+    }
+
+    /// Get room power levels content
+    pub async fn get_room_power_levels(&self, room_id: &str) -> Result<serde_json::Value, RepositoryError> {
+        let query = "
+            SELECT content
+            FROM event
+            WHERE room_id = $room_id
+            AND event_type = 'm.room.power_levels'
+            AND state_key = ''
+            ORDER BY depth DESC, origin_server_ts DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct PowerLevelsEvent {
+            content: serde_json::Value,
+        }
+
+        let power_levels: Option<PowerLevelsEvent> = response.take(0)?;
+        Ok(power_levels.map(|p| p.content).unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    /// Get current depth for a room
+    pub async fn get_room_current_depth(&self, room_id: &str) -> Result<i64, RepositoryError> {
+        let query = "
+            SELECT depth
+            FROM event
+            WHERE room_id = $room_id
+            ORDER BY depth DESC
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct DepthResult {
+            depth: i64,
+        }
+
+        let depth: Option<DepthResult> = response.take(0)?;
+        Ok(depth.map(|d| d.depth).unwrap_or(0))
+    }
+
+    /// Get room state event IDs at a specific event
+    pub async fn get_room_state_ids_at_event(&self, room_id: &str, event_id: &str) -> Result<Vec<String>, RepositoryError> {
+        // Get the target event's depth for state resolution
+        let depth_query = "
+            SELECT depth
+            FROM event
+            WHERE event_id = $event_id
+        ";
+
+        let mut response = self.db.query(depth_query)
+            .bind(("event_id", event_id.to_string()))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct EventDepth {
+            depth: i64,
+        }
+
+        let event_depth: Option<EventDepth> = response.take(0)?;
+        let target_depth = event_depth.map(|e| e.depth).ok_or_else(|| RepositoryError::NotFound {
+            entity_type: "event_depth".to_string(),
+            id: event_id.to_string(),
+        })?;
+
+        // Get state event IDs at or before the target event depth
+        let state_query = "
+            SELECT event_id
+            FROM event
+            WHERE room_id = $room_id
+            AND state_key IS NOT NULL
+            AND depth <= $target_depth
+            AND (
+                SELECT COUNT()
+                FROM event e2
+                WHERE e2.room_id = $room_id
+                AND e2.event_type = event.event_type
+                AND e2.state_key = event.state_key
+                AND e2.depth <= $target_depth
+                AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
+            ) = 0
+            ORDER BY event_type, state_key
+        ";
+
+        let mut response = self.db.query(state_query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("target_depth", target_depth))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct EventId {
+            event_id: String,
+        }
+
+        let events: Vec<EventId> = response.take(0)?;
+        let state_event_ids: Vec<String> = events.into_iter().map(|e| e.event_id).collect();
+
+        Ok(state_event_ids)
+    }
+
+    /// Get auth chain IDs for a set of state event IDs
+    pub async fn get_auth_chain_ids_for_state(&self, state_event_ids: &[String]) -> Result<Vec<String>, RepositoryError> {
+        if state_event_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut auth_event_ids = std::collections::HashSet::new();
+        let mut to_process = std::collections::HashSet::new();
+
+        // Clone the state_event_ids to avoid lifetime issues
+        let state_event_ids_owned: Vec<String> = state_event_ids.to_vec();
+
+        // Get initial auth events from state events
+        let query = "
+            SELECT auth_events
+            FROM event
+            WHERE event_id IN $state_event_ids
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("state_event_ids", state_event_ids_owned))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct AuthEvents {
+            auth_events: Option<Vec<String>>,
+        }
+
+        let events: Vec<AuthEvents> = response.take(0)?;
+
+        // Collect initial auth event IDs
+        for event in events {
+            if let Some(auth_events) = event.auth_events {
+                for auth_event_id in auth_events {
+                    if auth_event_ids.insert(auth_event_id.clone()) {
+                        to_process.insert(auth_event_id);
+                    }
+                }
+            }
+        }
+
+        // Recursively fetch auth events
+        while !to_process.is_empty() {
+            let current_batch: Vec<String> = to_process.drain().collect();
+
+            let query = "
+                SELECT auth_events
+                FROM event
+                WHERE event_id IN $auth_event_ids
+            ";
+
+            let mut response = self.db.query(query)
+                .bind(("auth_event_ids", current_batch))
+                .await?;
+
+            let events: Vec<AuthEvents> = response.take(0)?;
+
+            // Process auth events of the fetched events
+            for event in events {
+                if let Some(auth_events) = event.auth_events {
+                    for auth_event_id in auth_events {
+                        if auth_event_ids.insert(auth_event_id.clone()) {
+                            to_process.insert(auth_event_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        let auth_chain_ids: Vec<String> = auth_event_ids.into_iter().collect();
+        Ok(auth_chain_ids)
+    }
+
+    /// Get the current state of a room with optional event exclusion
+    pub async fn get_room_current_state(&self, room_id: &str, exclude_event_id: Option<&str>) -> Result<Vec<Event>, RepositoryError> {
+        let mut query = "
+            SELECT *
+            FROM event
+            WHERE room_id = $room_id
+            AND state_key IS NOT NULL
+            AND (
+                SELECT COUNT() 
+                FROM event e2 
+                WHERE e2.room_id = $room_id 
+                AND e2.event_type = event.event_type 
+                AND e2.state_key = event.state_key 
+                AND (e2.depth > event.depth OR (e2.depth = event.depth AND e2.origin_server_ts > event.origin_server_ts))
+            ) = 0
+            ORDER BY event_type, state_key
+        ".to_string();
+
+        let mut response = if let Some(exclude_id) = exclude_event_id {
+            query = format!("{} AND event_id != $exclude_event_id", query);
+            self.db.query(&query)
+                .bind(("room_id", room_id.to_string()))
+                .bind(("exclude_event_id", exclude_id.to_string()))
+                .await?
+        } else {
+            self.db.query(&query)
+                .bind(("room_id", room_id.to_string()))
+                .await?
+        };
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get the auth chain for a set of events
+    pub async fn get_auth_chain_for_events(&self, events: &[Event]) -> Result<Vec<Event>, RepositoryError> {
+        let mut auth_event_ids = std::collections::HashSet::new();
+
+        // Collect all auth_events from the provided events
+        for event in events {
+            if let Some(auth_events) = &event.auth_events {
+                for auth_event_id in auth_events {
+                    auth_event_ids.insert(auth_event_id.clone());
+                }
+            }
+        }
+
+        if auth_event_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert HashSet to Vec for query binding
+        let auth_ids: Vec<String> = auth_event_ids.into_iter().collect();
+
+        let query = "
+            SELECT *
+            FROM event
+            WHERE event_id IN $auth_event_ids
+            ORDER BY depth, origin_server_ts
+        ";
+
+        let mut response = self.db.query(query)
+            .bind(("auth_event_ids", auth_ids))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+
+    /// Get server signing key for event signing
+    pub async fn get_server_signing_key(
+        &self,
+        server_name: &str,
+    ) -> Result<Option<ServerSigningKey>, RepositoryError> {
+        let query = "
+            SELECT private_key, key_id 
+            FROM server_signing_keys 
+            WHERE server_name = $server_name 
+              AND is_active = true 
+            ORDER BY created_at DESC 
+            LIMIT 1
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+
+        let key_records: Vec<ServerSigningKey> = response.take(0)?;
+        Ok(key_records.into_iter().next())
+    }
+
+    /// Get events by IDs for backfill
+    pub async fn get_events_by_ids_for_backfill(
+        &self,
+        event_ids: &[String],
+        room_id: &str,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+        SELECT *
+        FROM event
+        WHERE event_id IN $event_ids
+        AND room_id = $room_id
+        ORDER BY depth DESC, origin_server_ts DESC
+    ";
+
+    let mut response = self.db
+        .query(query)
+        .bind(("event_ids", event_ids.to_vec()))
+        .bind(("room_id", room_id.to_string()))
+        .await?;
+
+    let events: Vec<Event> = response.take(0)?;
+    Ok(events)
+    }
+
+    /// Get server ACL event for a room
+    pub async fn get_server_acl_event(
+        &self,
+        room_id: &str,
+    ) -> Result<Option<Event>, RepositoryError> {
+        let query = "
+        SELECT * FROM event
+        WHERE room_id = $room_id
+        AND event_type = 'm.room.server_acl'
+        AND state_key = ''
+        ORDER BY depth DESC, origin_server_ts DESC
+        LIMIT 1
+    ";
+
+    let mut response = self.db
+        .query(query)
+        .bind(("room_id", room_id.to_string()))
+        .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events.into_iter().next())
+    }
+
+    /// Get events by IDs with minimum depth for missing events
+    pub async fn get_events_by_ids_with_min_depth(
+        &self,
+        event_ids: &[String],
+        room_id: &str,
+        min_depth: i64,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let query = "
+            SELECT *
+            FROM event
+            WHERE event_id IN $event_ids
+            AND room_id = $room_id
+            AND depth >= $min_depth
+            ORDER BY depth DESC, origin_server_ts DESC
+        ";
+
+        let mut response = self.db
+            .query(query)
+            .bind(("event_ids", event_ids.to_vec()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("min_depth", min_depth))
+            .await?;
+
+        let events: Vec<Event> = response.take(0)?;
+        Ok(events)
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ServerSigningKey {
+    pub private_key: String,
+    pub key_id: String,
 }

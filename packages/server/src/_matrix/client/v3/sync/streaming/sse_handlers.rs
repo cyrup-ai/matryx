@@ -64,15 +64,16 @@ async fn handle_live_sync_streams(
     // Create enhanced membership stream
     let membership_stream = Some(create_enhanced_membership_stream(state, user_id).await?);
 
-    // Merge all streams using select_all
-    let mut combined_streams: Vec<
-        Pin<
-            Box<
-                dyn Stream<Item = Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>>>
-                    + Send,
-            >,
+    // Type alias for complex stream type to improve readability
+    type SyncUpdateStream = Pin<
+        Box<
+            dyn Stream<Item = Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>>>
+                + Send,
         >,
-    > = vec![
+    >;
+
+    // Merge all streams using select_all
+    let mut combined_streams: Vec<SyncUpdateStream> = vec![
         Box::pin(event_stream),
         Box::pin(account_data_stream),
         Box::pin(presence_stream),

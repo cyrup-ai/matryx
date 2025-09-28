@@ -6,6 +6,7 @@
 use crate::state::AppState;
 use base64::{Engine, engine::general_purpose};
 use matryx_entity::types::Event;
+use matryx_surrealdb::repository::EventRepository;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -38,7 +39,7 @@ pub fn calculate_content_hashes(
     let hash = hasher.finalize();
 
     // Encode as base64
-    let hash_b64 = general_purpose::STANDARD.encode(&hash);
+    let hash_b64 = general_purpose::STANDARD.encode(hash);
 
     Ok(json!({
         "sha256": hash_b64
@@ -55,30 +56,12 @@ pub async fn sign_event(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     use ed25519_dalek::{Signer, SigningKey};
 
-    // Get server signing key from database
-    let query = "
-        SELECT private_key, key_id 
-        FROM server_signing_keys 
-        WHERE server_name = $server_name 
-          AND is_active = true 
-        ORDER BY created_at DESC 
-        LIMIT 1
-    ";
-
-    let mut response = state
-        .db
-        .query(query)
-        .bind(("server_name", state.homeserver_name.clone()))
-        .await?;
-
-    #[derive(serde::Deserialize)]
-    struct SigningKeyRecord {
-        private_key: String,
-        key_id: String,
-    }
-
-    let key_record: Option<SigningKeyRecord> = response.take(0)?;
-    let key_record = key_record.ok_or("No active signing key found for server")?;
+    // Get server signing key from repository
+    let event_repo = EventRepository::new(state.db.clone());
+    let key_record = event_repo
+        .get_server_signing_key(&state.homeserver_name)
+        .await?
+        .ok_or("No active signing key found for server")?;
 
     // Create canonical JSON for signing per Matrix specification
     let canonical_event = json!({
