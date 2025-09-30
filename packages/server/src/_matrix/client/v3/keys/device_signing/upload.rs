@@ -4,13 +4,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
+    federation::device_management::CrossSigningKey,
 };
 
 #[derive(Deserialize)]
@@ -19,14 +20,6 @@ pub struct DeviceSigningUploadRequest {
     pub self_signing_key: Option<CrossSigningKey>,
     pub user_signing_key: Option<CrossSigningKey>,
     pub auth: Option<Value>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CrossSigningKey {
-    pub user_id: String,
-    pub usage: Vec<String>,
-    pub keys: std::collections::HashMap<String, String>,
-    pub signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 fn validate_cross_signing_key(
@@ -53,8 +46,13 @@ fn validate_cross_signing_key(
     }
 
     // Validate signature exists
-    if !key.signatures.contains_key(user_id) {
-        error!("Cross-signing key missing user signature");
+    if let Some(signatures) = &key.signatures {
+        if !signatures.contains_key(user_id) {
+            error!("Cross-signing key missing user signature");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    } else {
+        error!("Cross-signing key missing signatures");
         return Err(StatusCode::BAD_REQUEST);
     }
 

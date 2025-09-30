@@ -248,6 +248,7 @@ impl From<crate::auth::errors::MatrixAuthError> for MatrixError {
             crate::auth::errors::MatrixAuthError::JwtError(_) => {
                 MatrixError::UnknownToken { soft_logout: false }
             },
+            crate::auth::errors::MatrixAuthError::InvalidCredentials => MatrixError::Forbidden,
         }
     }
 }

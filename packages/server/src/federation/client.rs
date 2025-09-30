@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Federation client for Matrix server-to-server communication
 //!
 //! Handles HTTP requests to remote Matrix servers for federation queries
@@ -103,9 +106,11 @@ impl FederationClient {
 
         // Sign the federation request with X-Matrix authentication
         // Include our homeserver name in the signing process for proper federation authorization
+        let uri = format!("/_matrix/federation/v1/make_join/{}/{}?event_type=m.room.member&state_key={}", 
+                         urlencoding::encode(room_id), urlencoding::encode(user_id), urlencoding::encode(user_id));
         let signed_request = self
             .event_signer
-            .sign_federation_request(request_builder, server_name)
+            .sign_federation_request(request_builder, "GET", &uri, server_name, None)
             .await
             .map_err(|_e| FederationClientError::InvalidResponse)?;
 

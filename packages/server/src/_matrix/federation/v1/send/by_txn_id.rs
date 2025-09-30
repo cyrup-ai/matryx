@@ -981,56 +981,30 @@ async fn process_device_list_edu(
     origin_server: &str,
     content: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let user_id = content
-        .get("user_id")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing user_id in device list EDU")?;
-
+    use crate::federation::device_edu_handler::DeviceListUpdateEDU;
+    use crate::federation::device_management::DeviceListUpdate;
+    
+    // Parse EDU content into DeviceListUpdate
+    let device_update: DeviceListUpdate = serde_json::from_value(content.clone())
+        .map_err(|e| format!("Failed to parse device list EDU: {}", e))?;
+    
     // Validate user is from origin server
-    if !user_id.ends_with(&format!(":{}", origin_server)) {
-        warn!("Device list EDU user {} not from origin server {}", user_id, origin_server);
-        return Err(format!("Invalid user origin for device list EDU: {}", user_id).into());
+    if !device_update.user_id.ends_with(&format!(":{}", origin_server)) {
+        warn!("Device list EDU user {} not from origin server {}", 
+              device_update.user_id, origin_server);
+        return Err(format!("Invalid user origin for device list EDU").into());
     }
-
-    let device_id = content
-        .get("device_id")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing device_id in device list EDU")?;
-
-    let stream_id = content.get("stream_id").and_then(|v| v.as_i64()).unwrap_or(0);
-
-    let prev_id = content
-        .get("prev_id")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect::<Vec<i64>>());
-
-    let deleted = content.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    let device_display_name = content
-        .get("device_display_name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let keys = content.get("keys").cloned();
-
-    let federation_repo = FederationRepository::new(state.db.clone());
-    federation_repo
-        .process_device_list_edu(matryx_surrealdb::repository::federation::ProcessDeviceListEduParams {
-            user_id: user_id.to_string(),
-            device_id: device_id.to_string(),
-            stream_id,
-            deleted,
-            prev_id,
-            device_display_name,
-            keys,
-        })
+    
+    // Create EDU wrapper
+    let edu = DeviceListUpdateEDU {
+        edu_type: "m.device_list_update".to_string(),
+        content: device_update,
+    };
+    
+    // Process through DeviceEDUHandler
+    state.device_edu_handler.handle_device_list_update(edu)
         .await
-        .map_err(|e| format!("Failed to store device list EDU: {}", e))?;
-
-    debug!(
-        "Stored device list EDU for user {} device {} (deleted: {})",
-        user_id, device_id, deleted
-    );
+        .map_err(|e| format!("Failed to handle device list update: {}", e))?;
 
     info!("Processed device list EDU from server {}", origin_server);
     Ok(())
@@ -1045,42 +1019,38 @@ async fn process_signing_key_update_edu(
     origin_server: &str,
     content: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let user_id = content
-        .get("user_id")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing user_id in signing key update EDU")?;
-
+    use crate::federation::device_edu_handler::{SigningKeyUpdateEDU, SigningKeyUpdateContent};
+    
+    // Parse EDU content into SigningKeyUpdateContent
+    let signing_update: SigningKeyUpdateContent = serde_json::from_value(content.clone())
+        .map_err(|e| format!("Failed to parse signing key EDU: {}", e))?;
+    
     // Validate user is from origin server
-    if !user_id.ends_with(&format!(":{}", origin_server)) {
+    if !signing_update.user_id.ends_with(&format!(":{}", origin_server)) {
         return Err(format!(
             "Signing key update EDU user {} not from origin server {}",
-            user_id, origin_server
+            signing_update.user_id, origin_server
         )
         .into());
     }
+    
+    // Create EDU wrapper
+    let edu = SigningKeyUpdateEDU {
+        edu_type: "m.signing_key_update".to_string(),
+        content: signing_update,
+    };
+    
+    // Process through DeviceEDUHandler
+    state.device_edu_handler.handle_signing_key_update(edu)
+        .await
+        .map_err(|e| format!("Failed to handle signing key update: {}", e))?;
 
-    let master_key = content.get("master_key");
-    let self_signing_key = content.get("self_signing_key");
-    let user_signing_key = content.get("user_signing_key");
-
-    // Process each key type that's present
-    if let Some(master_key_data) = master_key {
-        process_cross_signing_key(state, user_id, "master", master_key_data).await?;
-    }
-
-    if let Some(self_signing_key_data) = self_signing_key {
-        process_cross_signing_key(state, user_id, "self_signing", self_signing_key_data).await?;
-    }
-
-    if let Some(user_signing_key_data) = user_signing_key {
-        process_cross_signing_key(state, user_id, "user_signing", user_signing_key_data).await?;
-    }
-
-    info!("Processed signing key update EDU for user {} from server {}", user_id, origin_server);
+    info!("Processed signing key update EDU from server {}", origin_server);
     Ok(())
 }
 
 /// Process and store a single cross-signing key
+#[allow(dead_code)]
 async fn process_cross_signing_key(
     state: &AppState,
     user_id: &str,

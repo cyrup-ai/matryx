@@ -11,6 +11,7 @@ use matryx_surrealdb::repository::{FilterLiveUpdate, FilterRepository};
 use super::super::types::SyncQuery;
 
 /// Handle real-time filter updates for Matrix sync
+#[allow(dead_code)]
 pub async fn handle_filter_live_updates(
     state: &AppState,
     user_id: &str,
@@ -39,6 +40,7 @@ pub async fn handle_filter_live_updates(
 }
 
 /// Enhanced sync endpoint with live filter integration
+#[allow(dead_code)]
 pub async fn get_with_live_filters(
     State(state): State<AppState>,
     headers: HeaderMap,

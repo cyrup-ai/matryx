@@ -625,7 +625,7 @@ impl DeviceRepository {
         &self,
         user_id: &str,
         device_id: &str,
-    ) -> Result<HashMap<String, u32>, RepositoryError> {
+    ) -> Result<HashMap<String, i64>, RepositoryError> {
         let query = "
             SELECT algorithm, count() as count FROM one_time_keys 
             WHERE user_id = $user_id AND device_id = $device_id
@@ -643,10 +643,15 @@ impl DeviceRepository {
         for count_data in counts_data {
             if let (Some(algorithm), Some(count)) = (
                 count_data.get("algorithm").and_then(|v| v.as_str()),
-                count_data.get("count").and_then(|v| v.as_u64()),
+                count_data.get("count").and_then(|v| v.as_i64()),
             ) {
-                counts.insert(algorithm.to_string(), count as u32);
+                counts.insert(algorithm.to_string(), count);
             }
+        }
+
+        // Ensure we always have a count for signed_curve25519 (Matrix requirement)
+        if !counts.contains_key("signed_curve25519") {
+            counts.insert("signed_curve25519".to_string(), 0);
         }
 
         Ok(counts)
@@ -778,4 +783,90 @@ impl DeviceRepository {
 
         self.create(&device).await
     }
+
+    /// Get pending to-device events for a specific device
+    pub async fn get_pending_to_device_events(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<serde_json::Value, crate::repository::error::RepositoryError> {
+        // Query to-device events table for pending events
+        let events: Vec<serde_json::Value> = self.db
+            .query("SELECT * FROM to_device_events WHERE user_id = $user_id AND device_id = $device_id AND delivered = false ORDER BY created_at ASC")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?
+            .take(0)?;
+
+        // Mark events as delivered after fetching
+        let _: Vec<serde_json::Value> = self.db
+            .query("UPDATE to_device_events SET delivered = true WHERE user_id = $user_id AND device_id = $device_id AND delivered = false")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?
+            .take(0)?;
+
+        Ok(serde_json::json!({
+            "events": events
+        }))
+    }
+
+    /// Get to-device events since a specific timestamp
+    pub async fn get_to_device_events_since(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        since_timestamp: i64,
+    ) -> Result<serde_json::Value, crate::repository::error::RepositoryError> {
+        // Query to-device events since timestamp
+        let events: Vec<serde_json::Value> = self.db
+            .query("SELECT * FROM to_device_events WHERE user_id = $user_id AND device_id = $device_id AND created_at > $since ORDER BY created_at ASC")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .bind(("since", since_timestamp))
+            .await?
+            .take(0)?;
+
+        // Mark events as delivered after fetching
+        let _: Vec<serde_json::Value> = self.db
+            .query("UPDATE to_device_events SET delivered = true WHERE user_id = $user_id AND device_id = $device_id AND created_at > $since")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .bind(("since", since_timestamp))
+            .await?
+            .take(0)?;
+
+        Ok(serde_json::json!({
+            "events": events
+        }))
+    }
+
+    /// Get device list changes since a specific timestamp
+    pub async fn get_device_list_changes_since(
+        &self,
+        user_id: &str,
+        since_timestamp: i64,
+    ) -> Result<serde_json::Value, crate::repository::error::RepositoryError> {
+        // Query device list changes since timestamp
+        let changed_devices: Vec<serde_json::Value> = self.db
+            .query("SELECT user_id, device_id FROM device_list_updates WHERE user_id = $user_id AND updated_at > $since ORDER BY updated_at ASC")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("since", since_timestamp))
+            .await?
+            .take(0)?;
+
+        // Get list of users whose devices have changed
+        let left_devices: Vec<serde_json::Value> = self.db
+            .query("SELECT user_id, device_id FROM device_list_updates WHERE user_id = $user_id AND updated_at > $since AND action = 'left' ORDER BY updated_at ASC")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("since", since_timestamp))
+            .await?
+            .take(0)?;
+
+        Ok(serde_json::json!({
+            "changed": changed_devices,
+            "left": left_devices
+        }))
+    }
 }
+

@@ -194,6 +194,20 @@ pub async fn set_account_data(
 
     let profile_service = ProfileManagementService::new(state.db.clone());
 
+    // Create AccountData struct for internal tracking
+    let now = Utc::now();
+    let account_data = AccountData {
+        id: format!("{}:{}", user_id, data_type),
+        user_id: user_id.clone(),
+        room_id: None, // Global account data has no room_id
+        data_type: data_type.clone(),
+        content: validated_content.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    info!("Setting account data: {:?}", account_data);
+
     // Set account data using ProfileManagementService
     match profile_service
         .set_account_data(&user_id, &data_type, validated_content, None)

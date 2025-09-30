@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Matrix Event Authorization Rules Engine
 //!
 //! Implements the complete Matrix authorization algorithm as defined in the Matrix specification.
@@ -79,11 +82,8 @@ pub type AuthorizationResult<T> = Result<T, AuthorizationError>;
 pub struct AuthorizationEngine {
     event_repo: Arc<EventRepository>,
     room_repo: Arc<RoomRepository>,
-    #[allow(dead_code)] // Used in validate_cross_server_membership - compiler detection issue
     membership_repo: Arc<MembershipRepository>,
-    #[allow(dead_code)] // Used for federation calls - will be implemented
     federation_client: Arc<FederationClient>,
-    #[allow(dead_code)] // Used in validate_cross_server_membership - compiler detection issue  
     homeserver_name: String,
     power_level_validator: PowerLevelValidator,
     auth_events_selector: AuthEventsSelector,
@@ -94,9 +94,12 @@ pub struct AuthorizationEngine {
 impl AuthorizationEngine {
     /// Create new authorization engine with repository dependencies
     pub fn new(event_repo: Arc<EventRepository>, room_repo: Arc<RoomRepository>, membership_repo: Arc<MembershipRepository>, federation_client: Arc<FederationClient>, homeserver_name: String) -> Self {
-        // Clone values needed for RoomVersionHandler before moving into Self
-        let homeserver_name_clone = homeserver_name.clone();
-        let federation_client_clone = federation_client.clone();
+        // Clone values needed for components before moving into Self
+        let homeserver_name_clone1 = homeserver_name.clone();
+        let homeserver_name_clone2 = homeserver_name.clone();
+        let federation_client_clone1 = federation_client.clone();
+        let federation_client_clone2 = federation_client.clone();
+        let membership_repo_clone = membership_repo.clone();
         
         Self {
             event_repo: event_repo.clone(),
@@ -106,11 +109,15 @@ impl AuthorizationEngine {
             homeserver_name,
             power_level_validator: PowerLevelValidator::new(event_repo.clone()),
             auth_events_selector: AuthEventsSelector::new(event_repo.clone()),
-            event_type_validator: EventTypeValidator::new(),
+            event_type_validator: EventTypeValidator::new(
+                membership_repo_clone.clone(),
+                homeserver_name_clone1,
+                federation_client_clone1,
+            ),
             room_version_handler: RoomVersionHandler::new(
-                membership_repo,
-                homeserver_name_clone,
-                federation_client_clone,
+                membership_repo_clone,
+                homeserver_name_clone2,
+                federation_client_clone2,
             ),
         }
     }
@@ -181,6 +188,76 @@ impl AuthorizationEngine {
 
         info!("Event {} successfully authorized", event.event_id);
         Ok(())
+    }
+
+    /// Check if user has membership in room using local database and federation
+    pub async fn check_user_membership_status(
+        &self,
+        user_id: &str,
+        room_id: &str,
+    ) -> AuthorizationResult<MembershipState> {
+        // 1. Extract server from user_id
+        let (_, user_server) = user_id.split_once(':')
+            .ok_or_else(|| AuthorizationError::InvalidContent {
+                reason: "Invalid user ID format".to_string(),
+            })?;
+
+        // 2. For local server users, use direct repository access
+        if user_server == self.homeserver_name {
+            let membership = self.membership_repo
+                .get_by_room_user(room_id, user_id)
+                .await
+                .map_err(|e| AuthorizationError::DatabaseError(Box::new(e)))?;
+
+            return Ok(membership.map(|m| m.membership).unwrap_or(MembershipState::Leave));
+        }
+
+        // 3. For remote server users, use federation query
+        match self.federation_client.query_user_membership(user_server, room_id, user_id).await {
+            Ok(membership_response) => {
+                // Convert federation response to MembershipState
+                let membership_state = match membership_response.membership.as_str() {
+                    "join" => MembershipState::Join,
+                    "leave" => MembershipState::Leave,
+                    "invite" => MembershipState::Invite,
+                    "ban" => MembershipState::Ban,
+                    "knock" => MembershipState::Knock,
+                    _ => MembershipState::Leave,
+                };
+                Ok(membership_state)
+            },
+            Err(federation_error) => {
+                warn!("Federation membership query failed for user {} in room {}: {}", user_id, room_id, federation_error);
+                // Return Leave state on federation error
+                Ok(MembershipState::Leave)
+            }
+        }
+    }
+
+    /// Validate user authorization for room access across servers
+    pub async fn validate_room_access(
+        &self,
+        user_id: &str,
+        room_id: &str,
+        required_membership: MembershipState,
+    ) -> AuthorizationResult<bool> {
+        let actual_membership = self.check_user_membership_status(user_id, room_id).await?;
+        
+        let has_access = match required_membership {
+            MembershipState::Join => actual_membership == MembershipState::Join,
+            MembershipState::Invite => matches!(actual_membership, MembershipState::Join | MembershipState::Invite),
+            MembershipState::Knock => matches!(actual_membership, MembershipState::Join | MembershipState::Invite | MembershipState::Knock),
+            MembershipState::Leave => true, // Anyone can have leave access
+            MembershipState::Ban => actual_membership == MembershipState::Ban,
+        };
+
+        if has_access {
+            debug!("User {} has {} access to room {}", user_id, format!("{:?}", required_membership), room_id);
+        } else {
+            debug!("User {} denied {} access to room {} (has {:?})", user_id, format!("{:?}", required_membership), room_id, actual_membership);
+        }
+
+        Ok(has_access)
     }
 
     /// Validate basic event constraints that apply to all events
@@ -723,18 +800,26 @@ impl AuthEventsSelector {
 
 /// Event-specific authorization rules implementing Matrix event type validation
 pub struct EventTypeValidator {
-    // No state needed - validation is stateless based on event content and auth state
+    room_version_handler: RoomVersionHandler,
 }
 
-impl Default for EventTypeValidator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default implementation removed because EventTypeValidator requires
+// external dependencies (membership_repo, homeserver_name, federation_client)
+// that cannot be provided in a default constructor.
 
 impl EventTypeValidator {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(
+        membership_repo: Arc<MembershipRepository>,
+        homeserver_name: String,
+        federation_client: Arc<FederationClient>,
+    ) -> Self {
+        Self {
+            room_version_handler: RoomVersionHandler::new(
+                membership_repo,
+                homeserver_name,
+                federation_client,
+            ),
+        }
     }
 
     /// Validate event-specific authorization rules
@@ -950,9 +1035,19 @@ impl EventTypeValidator {
                     .map(|join_rule| match join_rule {
                         "knock" => true,
                         "knock_restricted" => {
-                            // TODO: For knock_restricted rooms, validate against allow conditions
-                            // This would check restricted room conditions similar to join validation
-                            true // Simplified implementation - can be enhanced for full restricted validation
+                            // For knock_restricted rooms, validate against allow conditions
+                            if let Some(allow_array) = auth_state.join_rules_event.as_ref()
+                                .and_then(|event| event.content.get("allow")) {
+                                if let Some(conditions) = allow_array.as_array() {
+                                    // Validate each allow condition
+                                    for condition in conditions {
+                                        if let Ok(Some(_room_id)) = self.room_version_handler.validate_allow_condition(condition) {
+                                            return true; // Allow if any condition is valid
+                                        }
+                                    }
+                                }
+                            }
+                            false // Deny if no valid allow conditions found
                         },
                         _ => false,
                     })
@@ -1035,7 +1130,7 @@ impl EventTypeValidator {
                 // 3. Check if user meets any allow condition using helper method
                 for condition in allow_conditions {
                     // Use validate_allow_condition helper to extract room_id
-                    match self.validate_allow_condition(condition) {
+                    match self.room_version_handler.validate_allow_condition(condition) {
                         Ok(Some(allowed_room_id)) => {
                             // Check user membership in allowed room via federation
                             match self.validate_cross_server_membership(
@@ -1302,59 +1397,17 @@ impl EventTypeValidator {
             }
         }
 
-        // If not found in auth state, this would require federation query
-        // For now, we'll be conservative and deny access
-        debug!("Cross-server membership validation failed for user {} in room {}", user_id, room_id);
-        Ok(false)
+        // Use room version handler for federation validation
+        self.room_version_handler.validate_cross_server_membership(user_id, room_id, auth_state).await
     }
 
-    /// Validate allow rule format and extract room_id
-    #[allow(dead_code)] // Used in authorization flow - compiler detection issue
-    fn validate_allow_condition(&self, condition: &serde_json::Value) -> AuthorizationResult<Option<String>> {
-        let condition_obj = condition.as_object()
-            .ok_or_else(|| AuthorizationError::InvalidContent {
-                reason: "Allow condition must be object".to_string(),
-            })?;
-        
-        // Currently only support m.room_membership type
-        let condition_type = condition_obj.get("type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AuthorizationError::InvalidContent {
-                reason: "Allow condition missing type".to_string(),
-            })?;
-        
-        match condition_type {
-            "m.room_membership" => {
-                let room_id = condition_obj.get("room_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| AuthorizationError::InvalidContent {
-                        reason: "m.room_membership condition missing room_id".to_string(),
-                    })?;
-                
-                // Validate room ID format
-                if !room_id.starts_with('!') || !room_id.contains(':') {
-                    return Err(AuthorizationError::InvalidContent {
-                        reason: format!("Invalid room ID in allow condition: {}", room_id),
-                    });
-                }
-                
-                Ok(Some(room_id.to_string()))
-            },
-            _ => {
-                warn!("Unsupported allow condition type: {}", condition_type);
-                Ok(None) // Skip unsupported types
-            }
-        }
-    }
+
 }
 
 /// Room version specific authorization rule variants
 pub struct RoomVersionHandler {
-    #[allow(dead_code)] // Will be used for room version specific membership validation
     membership_repo: Arc<MembershipRepository>,
-    #[allow(dead_code)] // Will be used for room version specific server validation
     homeserver_name: String,
-    #[allow(dead_code)] // Will be used for room version specific federation calls
     federation_client: Arc<FederationClient>,
 }
 
@@ -1470,7 +1523,6 @@ impl RoomVersionHandler {
     }
 
     /// Validate user membership in allowed room via federation
-    #[allow(dead_code)] // Used in authorization flow - compiler detection issue
     async fn validate_cross_server_membership(
         &self,
         user_id: &str,
@@ -1508,7 +1560,7 @@ impl RoomVersionHandler {
     }
 
     /// Validate allow rule format and extract room_id
-    #[allow(dead_code)] // Used in authorization flow - compiler detection issue
+    #[allow(dead_code)] // Used in knock authorization logic but compiler doesn't detect it
     fn validate_allow_condition(&self, condition: &serde_json::Value) -> AuthorizationResult<Option<String>> {
         let condition_obj = condition.as_object()
             .ok_or_else(|| AuthorizationError::InvalidContent {

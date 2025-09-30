@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Matrix State Resolution Algorithm v2
 //!
 //! Implements the Matrix state resolution algorithm v2 as defined in the Matrix

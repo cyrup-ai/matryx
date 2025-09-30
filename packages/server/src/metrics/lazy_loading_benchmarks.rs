@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+// Benchmarking infrastructure - intentional library code not yet fully integrated
+
 use rand;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -50,6 +53,8 @@ pub struct LazyLoadingBenchmarkResult {
 }
 
 /// Thread-safe benchmarking data aggregator
+// Module contains intentional library code not yet fully integrated
+#[allow(dead_code)]
 pub struct LazyLoadingBenchmarks {
     config: LazyLoadingBenchmarkConfig,
     results: std::sync::Mutex<Vec<LazyLoadingBenchmarkResult>>,
@@ -57,7 +62,10 @@ pub struct LazyLoadingBenchmarks {
 
 impl LazyLoadingBenchmarks {
     pub fn new(config: LazyLoadingBenchmarkConfig) -> Self {
-        Self { config, results: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            config,
+            results: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     pub fn with_default_config() -> Self {

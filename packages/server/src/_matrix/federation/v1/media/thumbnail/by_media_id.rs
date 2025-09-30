@@ -24,8 +24,10 @@ use matryx_surrealdb::repository::{
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Query parameters for thumbnail download
+/// Federation-specific query parameters for thumbnail download
+/// Different from client API ThumbnailQuery due to federation protocol requirements
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Used by Axum Query extractor
 pub struct ThumbnailQuery {
     width: u32,
     height: u32,

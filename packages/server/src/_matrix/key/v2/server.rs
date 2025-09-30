@@ -3,7 +3,6 @@ use base64::{Engine, engine::general_purpose};
 use serde_json::{Value, json};
 use std::env;
 use tracing::{error, info};
-use getrandom::getrandom;
 
 use crate::AppState;
 use matryx_entity::utils::canonical_json;
@@ -43,15 +42,7 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
 
     // Log key age for Matrix federation key management
     let key_age_days = (chrono::Utc::now() - key_record.created_at).num_days();
-    info!("Serving signing key {} created {} days ago", 
-          key_record.key_id, key_age_days);
-
-    // Log key age for monitoring and security auditing
-    let key_age_days = chrono::Utc::now()
-        .signed_duration_since(key_record.created_at)
-        .num_days();
-    
-    info!("Serving signing key {} created {} days ago", 
+    info!("Serving signing key {} created {} days ago",
           key_record.key_id, key_age_days);
 
     // Use key expiry time if available, otherwise default to 7 days
@@ -105,42 +96,29 @@ async fn get_or_generate_signing_keys(
     infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
     server_name: &str,
 ) -> Result<(Value, Value, Value, SigningKeyRecord), Box<dyn std::error::Error + Send + Sync>> {
-    // Try to get existing signing key using repository
+    // Start by trying to get the private signing key directly (correct approach)
     let key_id = "ed25519:auto";
 
     let current_key = match infrastructure_service
-        .get_server_keys(server_name, Some(&[key_id.to_string()]))
+        .get_signing_key(server_name, key_id)
         .await
     {
-        Ok(server_keys_response) => {
-            // If we have server keys, extract the current key
-            if let Some(server_keys) = server_keys_response.server_keys.first() {
-                if let Some(verify_key) = server_keys.verify_keys.get(key_id) {
-                    // Convert to our internal format
-                    let key_created_at = chrono::Utc::now(); // Placeholder as we don't store creation time in ServerKeys
-                    SigningKeyRecord {
-                        key_id: key_id.to_string(),
-                        public_key: verify_key.key.clone(),
-                        private_key: "".to_string(), // We don't store private keys in ServerKeys
-                        created_at: key_created_at,
-                        expires_at: Some(
-                            chrono::DateTime::from_timestamp(server_keys.valid_until_ts, 0)
-                                .ok_or_else(|| format!("Invalid timestamp in server keys: {}", server_keys.valid_until_ts))?,
-                        ),
-                    }
-                } else {
-                    // No key found, generate new one
-                    generate_ed25519_keypair(infrastructure_service, server_name).await?
-                }
-            } else {
-                // No server keys, generate new one
-                generate_ed25519_keypair(infrastructure_service, server_name).await?
+        Ok(Some(signing_key_data)) => {
+            // We have a stored signing key - use it to build the response
+            info!("Found existing signing key {} for server {}", key_id, server_name);
+
+            SigningKeyRecord {
+                key_id: key_id.to_string(),
+                public_key: signing_key_data.verify_key.clone(),
+                private_key: signing_key_data.signing_key,
+                created_at: signing_key_data.created_at,
+                expires_at: signing_key_data.expires_at,
             }
         },
-        Err(_) => {
-            // No keys exist, generate new ones
+        Ok(None) | Err(_) => {
+            // No signing key found, generate new one
             info!(
-                "No signing keys found for server {}, generating new Ed25519 key pair",
+                "No signing key found for server {}, generating new Ed25519 key pair",
                 server_name
             );
             generate_ed25519_keypair(infrastructure_service, server_name).await?
@@ -181,7 +159,7 @@ async fn generate_ed25519_keypair(
 
     // Generate proper Ed25519 keypair using cryptographically secure random number generator
     let mut secret_bytes = [0u8; 32];
-    getrandom(&mut secret_bytes).expect("Failed to generate random bytes");
+    getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
     let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
     let verifying_key = signing_key.verifying_key();
 

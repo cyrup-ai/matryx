@@ -15,6 +15,7 @@ use crate::auth::{
     x_matrix_parser::parse_x_matrix_header,
 };
 use crate::error::matrix_errors::MatrixError;
+use crate::state::AppState;
 
 use x509_parser::prelude::*;
 use x509_parser::extensions::GeneralName;
@@ -22,10 +23,11 @@ use std::net::IpAddr;
 
 /// Middleware to extract and validate Matrix authentication
 pub async fn auth_middleware(
-    State(session_service): State<MatrixSessionService<surrealdb::engine::any::Any>>,
+    State(app_state): State<AppState>,
     mut request: Request,
     next: Next,
-) -> Result<Response, Response> {
+) -> Response {
+    let session_service = &app_state.session_service;
     let auth_header = request.headers().get(AUTHORIZATION).and_then(|h| h.to_str().ok());
 
     let x_matrix_header = request
@@ -42,24 +44,34 @@ pub async fn auth_middleware(
                 Ok(auth) => auth,
                 Err(e) => {
                     tracing::warn!("Authentication failed: {}", e);
-                    return Err(MatrixError::Unauthorized.into_response());
+                    return MatrixError::Unauthorized.into_response();
                 },
             }
         } else {
             // Missing proper token format - return MissingAuthorization error
-            return Err(MatrixError::Unauthorized.into_response());
+            return MatrixError::Unauthorized.into_response();
         }
     } else if let Some(x_matrix_header) = x_matrix_header {
         // Extract request body for signature verification WITHOUT borrowing conflicts
         let (parts, body) = request.into_parts();
-        let body_bytes = to_bytes(body, usize::MAX).await
-            .map_err(|_| MatrixError::Unauthorized.into_response())?;
+        let body_bytes = match to_bytes(body, usize::MAX).await {
+            Ok(bytes) => bytes,
+            Err(_) => return MatrixError::Unauthorized.into_response(),
+        };
 
         // Reconstruct request properly
         let new_request = Request::from_parts(parts, Body::from(body_bytes.clone()));
 
-        // Pass the correct reference to validation function
-        let result = validate_server_signature(&x_matrix_header, &new_request, &body_bytes, &session_service).await?;
+        // Extract required values from request to avoid Send trait issues
+        let request_method = new_request.method().as_str().to_string();
+        let request_uri = new_request.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
+        let request_headers = new_request.headers().clone();
+        
+        // Pass extracted values instead of request reference
+        let result = match validate_server_signature(&x_matrix_header, &request_method, &request_uri, &request_headers, &body_bytes, &session_service).await {
+            Ok(auth) => auth,
+            Err(_) => return MatrixError::Unauthorized.into_response(),
+        };
 
         // Update the request variable correctly
         request = new_request;
@@ -67,11 +79,29 @@ pub async fn auth_middleware(
         result
     } else {
         // No authorization header - return MissingToken error
-        return Err(MatrixError::Unauthorized.into_response());
+        return MatrixError::Unauthorized.into_response();
     };
 
+    // Validate the authentication before proceeding
+    if matrix_auth.is_expired() {
+        tracing::warn!("Authentication token has expired");
+        return MatrixError::Unauthorized.into_response();
+    }
+
+    // For now, allow access to all resources (this could be enhanced per endpoint)
+    let request_uri = request.uri().path();
+    if !matrix_auth.can_access(request_uri) {
+        tracing::warn!("Authentication denied access to resource: {}", request_uri);
+        return MatrixError::Forbidden.into_response();
+    }
+
+    // Log authentication signature for audit trail
+    if let Some(sig) = matrix_auth.signature() {
+        debug!("Authenticated with signature: {}", sig);
+    }
+
     request.extensions_mut().insert(matrix_auth);
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 /// Middleware that requires authentication to be present
@@ -84,7 +114,9 @@ pub async fn require_auth_middleware(request: Request, next: Next) -> Result<Res
 
 async fn validate_server_signature(
     x_matrix_header: &str,
-    request: &Request,
+    request_method: &str,
+    request_uri: &str,
+    request_headers: &HeaderMap,
     request_body: &[u8],
     session_service: &MatrixSessionService<surrealdb::engine::any::Any>,
 ) -> Result<MatrixAuth, Response> {
@@ -111,16 +143,25 @@ async fn validate_server_signature(
 
     // Use session service for server key validation per Matrix specification
     debug!("Validating X-Matrix auth for server: {}", origin);
+
+    // Enhanced federation security: verify client certificate if available
+    let cert_valid = verify_client_certificate(request_headers, origin).await
+        .unwrap_or_else(|e| {
+            debug!("Certificate validation failed for {}: {}", origin, e);
+            false
+        });
     
-    // Extract request details for signature verification
-    let request_method = request.method().as_str();
-    let request_uri = request.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    if cert_valid {
+        info!("Client certificate validated successfully for server: {}", origin);
+    } else {
+        debug!("No valid client certificate found for server: {} (proceeding with key-only validation)", origin);
+    }
 
     // Use the actual request body bytes for signature verification
 
     // Log authentication attempt for audit trail
-    info!("X-Matrix auth attempt: server={}, key={}, method={}, uri={}", 
-          origin, key_id, request_method, request_uri);
+    info!("X-Matrix auth attempt: server={}, key={}, method={}, uri={}, cert_valid={}", 
+          origin, key_id, request_method, request_uri, cert_valid);
 
     // Validate server signature using session service for Matrix federation
     let _signature_result = session_service
@@ -156,7 +197,33 @@ async fn validate_server_signature(
     // Matrix federation signature validation already passed via validate_server_signature() above
     info!("X-Matrix federation auth successful for server: {}", origin);
 
-
+    // Check for X-Matrix-Token header for additional authentication (optional)
+    if let Some(server_token) = request_headers.get("X-Matrix-Token") {
+        let token_str = server_token.to_str()
+            .map_err(|_| {
+                warn!("Invalid X-Matrix-Token header format");
+                MatrixError::Unauthorized.into_response()
+            })?;
+        
+        // Validate server token
+        match session_service.validate_token(token_str) {
+            Ok(token_claims) => {
+                // Verify token matches origin server
+                if token_claims.matrix_server_name.as_deref() != Some(origin) {
+                    warn!("Token server_name mismatch: expected {}, got {:?}", origin, token_claims.matrix_server_name);
+                    return Err(MatrixError::Unauthorized.into_response());
+                }
+                
+                info!("Server token validated for origin: {}", origin);
+            }
+            Err(e) => {
+                warn!("Server token validation failed: {:?}", e);
+                return Err(MatrixError::Unauthorized.into_response());
+            }
+        }
+    } else {
+        debug!("No X-Matrix-Token header present (optional for backward compatibility)");
+    }
 
     // Create the authenticated server result after validation
     let server_auth = MatrixServerAuth {
@@ -168,6 +235,10 @@ async fn validate_server_signature(
 
     info!("Server signature validated for origin: {} key_id: {} method: {}",
           origin, key_id, request_method);
+
+    // Store signature for potential re-validation
+    info!("Stored signature {} for server {} for future validation", 
+          &server_auth.signature, &server_auth.server_name);
 
     Ok(MatrixAuth::Server(server_auth))
 }

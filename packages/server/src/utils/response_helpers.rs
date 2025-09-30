@@ -13,16 +13,19 @@ pub fn matrix_response<T: Serialize>(data: T) -> impl IntoResponse {
 }
 
 /// Create Matrix error response with proper format
+#[allow(dead_code)] // Utility function for Matrix error responses
 pub fn matrix_error_response(error: MatrixError) -> impl IntoResponse {
     error.into_response()
 }
 
 /// Create JSON response with proper headers and CORS (legacy function)
+#[allow(dead_code)] // Legacy utility function for JSON responses
 pub fn json_response<T: serde::Serialize>(data: T) -> Result<Json<T>, StatusCode> {
     Ok(Json(data))
 }
 
 /// Create media response with security headers
+#[allow(dead_code)] // Utility function for media responses with security headers
 pub fn media_response(
     content_type: &str,
     content_length: u64,
@@ -49,6 +52,7 @@ pub fn media_response(
 }
 
 /// Validate Content-Type for inline media (security)
+#[allow(dead_code)]
 pub fn is_safe_inline_content_type(content_type: &str) -> bool {
     matches!(
         content_type,
@@ -94,6 +98,7 @@ pub enum MediaContent {
         content_type: String,
         filename: Option<String>,
     },
+    #[allow(dead_code)]
     Redirect {
         location: String,
     },

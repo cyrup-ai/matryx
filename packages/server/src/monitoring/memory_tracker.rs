@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use matryx_surrealdb::repository::{HealthStatus, MonitoringRepository, PerformanceRepository};
 use std::sync::Arc;
 use std::sync::Mutex;

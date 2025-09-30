@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use crate::state::AppState;
 use matryx_surrealdb::repository::{
     monitoring::MonitoringRepository,

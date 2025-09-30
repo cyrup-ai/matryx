@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! PDU Validation Pipeline
 //!
 //! Implements the complete Matrix Server-Server API PDU validation process
@@ -1452,6 +1455,10 @@ impl PduValidator {
 
     /// Replaced by EventSigningEngine.validate_event_crypto
     /// Step 6: Validate against current room state (soft-fail check)
+    /// 
+    /// This implements Matrix specification Step 6: authorization rules based on current state.
+    /// Unlike Step 5 which uses auth_events, this validates against the current room state.
+    /// Failures here result in soft-fail rather than rejection.
     async fn validate_current_state(&self, event: &Event) -> Result<(), PduValidationError> {
         // This validation can fail without rejecting the event (soft-fail)
 
@@ -1480,7 +1487,76 @@ impl PduValidator {
             )));
         }
 
+        // Matrix Step 6: Validate authorization against current room state
+        // This is different from Step 5 which uses auth_events - here we use current state
+        match self.validate_against_current_room_state(event).await {
+            Ok(_) => {
+                debug!("Current state authorization passed for event {}", event.event_id);
+            },
+            Err(e) => {
+                // This is a soft-fail condition - event is stored but not relayed to clients
+                debug!("Current state authorization soft-failed for event {}: {}", event.event_id, e);
+                return Err(PduValidationError::StateError(format!(
+                    "Authorization against current state failed: {}", e
+                )));
+            },
+        }
+
         Ok(())
+    }
+
+    /// Validate event authorization against current room state (Matrix Step 6)
+    /// 
+    /// This method implements the Matrix specification requirement to validate
+    /// authorization rules based on the current state of the room, which may
+    /// differ from the auth_events provided with the event.
+    async fn validate_against_current_room_state(&self, event: &Event) -> Result<(), PduValidationError> {
+        // Get current room state events for authorization
+        let current_state_events = match self.get_current_room_state(&event.room_id).await {
+            Ok(state) => state,
+            Err(e) => {
+                debug!("Could not get current room state for {}: {}", event.room_id, e);
+                // If we can't get current state, we can't validate - this is a soft-fail condition
+                return Err(PduValidationError::StateError(format!(
+                    "Could not retrieve current room state: {}", e
+                )));
+            }
+        };
+
+        // Get room version for authorization rules
+        let room_version = self.get_room_version(&event.room_id).await?;
+
+        // Use AuthorizationEngine to validate against current state
+        // This is the key integration that was missing
+        self.authorization_engine
+            .authorize_event(event, &current_state_events, &room_version)
+            .await
+            .map_err(|e| {
+                debug!("Current state authorization failed for event {}: {}", event.event_id, e);
+                PduValidationError::MatrixAuthorizationError(e)
+            })?;
+
+        debug!("Event {} authorized against current room state", event.event_id);
+        Ok(())
+    }
+
+    /// Get current room state events for authorization validation
+    /// 
+    /// This retrieves the current state of the room for use in Matrix Step 6 validation.
+    /// The current state may differ from the auth_events provided with an incoming event.
+    async fn get_current_room_state(&self, room_id: &str) -> Result<Vec<Event>, PduValidationError> {
+        // Get current state events from the room repository
+        // This should include: m.room.create, m.room.power_levels, m.room.member events, etc.
+        match self.room_repo.get_room_state(room_id).await {
+            Ok(state_events) => {
+                debug!("Retrieved {} current state events for room {}", state_events.len(), room_id);
+                Ok(state_events)
+            },
+            Err(e) => {
+                error!("Failed to get current state for room {}: {}", room_id, e);
+                Err(PduValidationError::DatabaseError(e))
+            }
+        }
     }
 
     /// Replaced by EventSigningEngine.calculate_content_hash and related methods

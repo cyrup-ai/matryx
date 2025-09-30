@@ -169,25 +169,11 @@ pub async fn get_room_ephemeral_events(
     Ok(json_events)
 }
 
-/// Convert events to Matrix JSON format
-pub fn convert_events_to_matrix_format(events: Vec<Event>) -> Vec<Value> {
-    events
-        .into_iter()
-        .map(|event| {
-            json!({
-                "event_id": event.event_id,
-                "sender": event.sender,
-                "origin_server_ts": event.origin_server_ts,
-                "type": event.event_type,
-                "content": event.content,
-                "state_key": event.state_key,
-                "unsigned": event.unsigned
-            })
-        })
-        .collect()
-}
+// Use the centralized utility function
+pub use super::utils::convert_events_to_matrix_format;
 
 /// Apply presence filtering to sync response
+#[allow(dead_code)]
 pub async fn apply_presence_filter(
     presence_events: Vec<Value>,
     filter: &EventFilter,
@@ -208,6 +194,7 @@ pub async fn apply_presence_filter(
 }
 
 /// Apply account data filtering to sync response
+#[allow(dead_code)]
 pub async fn apply_account_data_filter(
     account_data: Vec<Value>,
     filter: &EventFilter,

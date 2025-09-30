@@ -13,15 +13,17 @@ use uuid::Uuid;
 
 use super::LoginResponse;
 use crate::auth::MatrixSessionService;
+use crate::auth::uia::UserIdentifier;
 use crate::state::AppState;
 use matryx_entity::types::{Device, Session, User};
-use matryx_surrealdb::repository::{DeviceRepository, SessionRepository, UserRepository};
+use matryx_surrealdb::repository::{DeviceRepository, SessionRepository, UserRepository, third_party::ThirdPartyRepository};
 
 #[derive(Deserialize)]
 pub struct PasswordLoginRequest {
     #[serde(rename = "type")]
     pub login_type: String,
-    pub user: String,
+    pub user: Option<String>, // Keep for backward compatibility
+    pub identifier: Option<UserIdentifier>, // Matrix spec UserIdentifier support
     pub password: String,
     pub device_id: Option<String>,
     pub initial_device_display_name: Option<String>,
@@ -72,7 +74,49 @@ pub async fn post_password_login(
     cookies: Cookies,
     Json(request): Json<PasswordLoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    info!("Password login attempt for user: {}", request.user);
+    // Extract user identifier from request (Matrix spec UserIdentifier support)
+    let user_string = if let Some(identifier) = &request.identifier {
+        match identifier.id_type.as_str() {
+            "m.id.user" => {
+                match &identifier.user {
+                    Some(user) if !user.is_empty() => user.clone(),
+                    _ => {
+                        warn!("Invalid user field in m.id.user identifier");
+                        return Err(LoginError::InvalidRequest.into());
+                    }
+                }
+            },
+            "m.id.thirdparty" => {
+                // Handle email/phone login
+                if let (Some(medium), Some(address)) = (&identifier.medium, &identifier.address) {
+                    let third_party_repo = ThirdPartyRepository::new(state.db.clone());
+                    match third_party_repo.find_user_by_third_party(medium, address).await {
+                        Ok(Some(user_id)) => user_id,
+                        Ok(None) => {
+                            warn!("No user found for {}:{}", medium, address);
+                            return Err(LoginError::UserNotFound.into());
+                        },
+                        Err(_) => return Err(LoginError::DatabaseError.into()),
+                    }
+                } else {
+                    warn!("Missing medium or address for thirdparty identifier");
+                    return Err(LoginError::InvalidRequest.into());
+                }
+            },
+            _ => {
+                warn!("Unsupported identifier type: {}", identifier.id_type);
+                return Err(LoginError::InvalidRequest.into());
+            }
+        }
+    } else if let Some(user) = &request.user {
+        // Backward compatibility with legacy user field
+        user.clone()
+    } else {
+        warn!("No user identifier provided");
+        return Err(LoginError::InvalidRequest.into());
+    };
+
+    info!("Password login attempt for user: {}", user_string);
 
     // Validate request format
     if request.login_type != "m.login.password" {
@@ -80,13 +124,13 @@ pub async fn post_password_login(
         return Err(LoginError::InvalidRequest.into());
     }
 
-    if request.user.is_empty() || request.password.is_empty() {
+    if user_string.is_empty() || request.password.is_empty() {
         warn!("Empty username or password");
         return Err(LoginError::InvalidRequest.into());
     }
 
     // Normalize user ID - handle both @user:domain and bare username formats
-    let user_id = normalize_user_id(&request.user, &state.homeserver_name);
+    let user_id = normalize_user_id(&user_string, &state.homeserver_name);
 
     // Extract client metadata for device and session tracking
     let client_ip = addr.ip().to_string();

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
+use crate::federation::membership_federation::validate_room_knock_allowed;
 use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 
@@ -223,6 +224,18 @@ pub async fn get(
             "errcode": "M_FORBIDDEN",
             "error": "Your server is not permitted to knock on this room"
         })));
+    }
+
+    // Validate room allows knocking per Matrix specification
+    if !validate_room_knock_allowed(&room, &x_matrix_auth.origin).await.map_err(|e| {
+        error!("Failed to validate knock permissions for room {}: {}", room_id, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })? {
+        warn!(
+            "Knock denied for server {} in room {} - knock not allowed by room rules",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
     }
 
     // Generate knock event template

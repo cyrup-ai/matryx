@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;

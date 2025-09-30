@@ -1,8 +1,13 @@
-use crate::auth::{MatrixSessionService, oauth2::OAuth2Service, uia::UiaService};
+use crate::auth::{MatrixSessionService, oauth2::OAuth2Service, uia::{UiaService, UiaConfig}};
 use crate::config::ServerConfig;
 use crate::federation::dns_resolver::MatrixDnsResolver;
 use crate::federation::media_client::FederationMediaClient;
+use crate::federation::membership_federation::{FederationRetryManager, RetryConfig};
+use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
+use crate::federation::device_management::DeviceManager;
+use crate::federation::device_edu_handler::DeviceEDUHandler;
 use crate::cache::lazy_loading_cache::LazyLoadingCache;
+use crate::cache::filter_cache::FilterCache;
 use crate::federation::event_signer::EventSigner;
 use crate::metrics::lazy_loading_benchmarks::{LazyLoadingBenchmarks, LazyLoadingBenchmarkConfig};
 use crate::metrics::lazy_loading_metrics::LazyLoadingMetrics;
@@ -10,6 +15,7 @@ use crate::monitoring::lazy_loading_alerts::{LazyLoadingAlerts, AlertingConfig, 
 use crate::monitoring::memory_tracker::LazyLoadingMemoryTracker;
 use matryx_surrealdb::repository::push::PushRepository;
 use matryx_surrealdb::repository::{
+    AuthRepository,
     MentionRepository,
     ServerNoticeRepository,
     ThreadRepository,
@@ -25,6 +31,8 @@ use matryx_surrealdb::repository::{
     room_operations::RoomOperationsService,
     threads::ThreadsRepository,
     uia::UiaRepository,
+    device::DeviceRepository,
+    edu::EDURepository,
 };
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
@@ -40,10 +48,17 @@ pub struct AppState {
     pub http_client: Arc<reqwest::Client>,
     pub event_signer: Arc<EventSigner>,
     pub dns_resolver: Arc<MatrixDnsResolver>,
+    #[allow(dead_code)]
+    pub federation_retry_manager: Arc<FederationRetryManager>,
+    pub device_manager: Arc<DeviceManager>,
+    pub device_edu_handler: Arc<DeviceEDUHandler>,
     pub federation_media_client: Arc<FederationMediaClient>,
+    #[allow(dead_code)]
     pub push_engine: Arc<PushRepository<Any>>,
+    #[allow(dead_code)]
     pub thread_repository: Arc<ThreadRepository<Any>>,
     pub mention_repository: Arc<MentionRepository>,
+    #[allow(dead_code)]
     pub server_notice_repository: Arc<ServerNoticeRepository<Any>>,
     /// Room operations service that coordinates between room-related repositories
     pub room_operations: Arc<RoomOperationsService<Any>>,
@@ -51,11 +66,15 @@ pub struct AppState {
     pub lazy_loading_cache: Option<Arc<LazyLoadingCache>>,
     /// Performance metrics for lazy loading monitoring
     pub lazy_loading_metrics: Option<Arc<LazyLoadingMetrics>>,
+    /// Filter compilation and result cache for sync performance
+    pub filter_cache: Arc<FilterCache>,
     /// Memory usage tracker for cache lifecycle management
     pub memory_tracker: Option<Arc<LazyLoadingMemoryTracker>>,
     /// Performance alerting system for lazy loading degradation detection
+    #[allow(dead_code)]
     pub lazy_loading_alerts: Option<Arc<LazyLoadingAlerts>>,
     /// Performance benchmarking system for lazy loading optimization
+    #[allow(dead_code)]
     pub lazy_loading_benchmarks: Option<Arc<LazyLoadingBenchmarks>>,
     /// Database health monitoring repository
     pub database_health_repo: Arc<DatabaseHealthRepository<Any>>,
@@ -80,8 +99,10 @@ impl AppState {
         ));
         
         // Initialize UIA service
+        let uia_config = UiaConfig::from_env();
         let uia_repo = UiaRepository::new(db.clone());
-        let uia_service = Arc::new(UiaService::new(uia_repo));
+        let auth_repo = AuthRepository::new(db.clone());
+        let uia_service = Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
         
         let thread_repository = Arc::new(ThreadRepository::new(db.clone()));
         let mention_repository = Arc::new(MentionRepository::new(db.clone()));
@@ -103,6 +124,37 @@ impl AppState {
             threads_repo,
         ));
 
+        // Initialize server discovery orchestrator
+        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(
+            dns_resolver.clone()
+        ));
+        
+        // Initialize retry configuration from environment
+        let retry_config = RetryConfig::from_env();
+        
+        // Initialize federation retry manager with circuit breaker
+        let federation_retry_manager = Arc::new(FederationRetryManager::new(
+            Some(retry_config),
+            event_signer.clone(),
+            session_service.clone(),
+            server_discovery,
+            homeserver_name.clone(),
+        ));
+
+        // Initialize device management
+        let device_repo = Arc::new(DeviceRepository::new(db.clone()));
+        let edu_repo = Arc::new(EDURepository::new(db.clone()));
+
+        let device_manager = Arc::new(DeviceManager::new(
+            device_repo.clone(),
+            edu_repo.clone(),
+        ));
+
+        let device_edu_handler = Arc::new(DeviceEDUHandler::new(
+            edu_repo,
+            device_repo,
+        ));
+
         // Initialize federation media client
         let federation_media_client = Arc::new(FederationMediaClient::new(
             http_client.clone(),
@@ -116,6 +168,9 @@ impl AppState {
         // Initialize database health repository
         let database_health_repo = Arc::new(DatabaseHealthRepository::new(db.clone()));
 
+        // Initialize filter cache for sync optimization
+        let filter_cache = Arc::new(FilterCache::new());
+
         Ok(Self {
             db,
             session_service,
@@ -126,6 +181,9 @@ impl AppState {
             http_client,
             event_signer,
             dns_resolver,
+            federation_retry_manager,
+            device_manager,
+            device_edu_handler,
             federation_media_client,
             push_engine,
             thread_repository,
@@ -134,6 +192,7 @@ impl AppState {
             room_operations,
             lazy_loading_cache: None,
             lazy_loading_metrics: None,
+            filter_cache,
             memory_tracker: None,
             lazy_loading_alerts: None,
             lazy_loading_benchmarks: None,
@@ -142,6 +201,7 @@ impl AppState {
     }
 
     /// Create AppState with enhanced lazy loading optimization enabled
+    #[allow(dead_code)]
     pub fn with_lazy_loading_optimization(
         db: Surreal<Any>,
         session_service: Arc<MatrixSessionService<Any>>,
@@ -160,11 +220,16 @@ impl AppState {
         ));
         
         // Initialize UIA service
+        let uia_config = UiaConfig::from_env();
         let uia_repo = UiaRepository::new(db.clone());
-        let uia_service = Arc::new(UiaService::new(uia_repo));
+        let auth_repo = AuthRepository::new(db.clone());
+        let uia_service = Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
         
         // Initialize lazy loading components
         let lazy_cache = Arc::new(LazyLoadingCache::new());
+
+        // Initialize filter cache for sync optimization
+        let filter_cache = Arc::new(FilterCache::new());
 
         // Create repositories for metrics and monitoring
         let performance_repo = Arc::new(PerformanceRepository::new(db.clone()));
@@ -210,6 +275,37 @@ impl AppState {
             threads_repo,
         ));
 
+        // Initialize server discovery orchestrator
+        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(
+            dns_resolver.clone()
+        ));
+        
+        // Initialize retry configuration from environment
+        let retry_config = RetryConfig::from_env();
+        
+        // Initialize federation retry manager with circuit breaker
+        let federation_retry_manager = Arc::new(FederationRetryManager::new(
+            Some(retry_config),
+            event_signer.clone(),
+            session_service.clone(),
+            server_discovery,
+            homeserver_name.clone(),
+        ));
+
+        // Initialize device management
+        let device_repo = Arc::new(DeviceRepository::new(db.clone()));
+        let edu_repo = Arc::new(EDURepository::new(db.clone()));
+
+        let device_manager = Arc::new(DeviceManager::new(
+            device_repo.clone(),
+            edu_repo.clone(),
+        ));
+
+        let device_edu_handler = Arc::new(DeviceEDUHandler::new(
+            edu_repo,
+            device_repo,
+        ));
+
         // Initialize federation media client
         let federation_media_client = Arc::new(FederationMediaClient::new(
             http_client.clone(),
@@ -233,6 +329,9 @@ impl AppState {
             http_client,
             event_signer,
             dns_resolver,
+            federation_retry_manager,
+            device_manager,
+            device_edu_handler,
             federation_media_client,
             push_engine,
             thread_repository,
@@ -241,6 +340,7 @@ impl AppState {
             room_operations,
             lazy_loading_cache: Some(lazy_cache),
             lazy_loading_metrics: Some(metrics),
+            filter_cache,
             memory_tracker: Some(memory_tracker),
             lazy_loading_alerts: Some(lazy_loading_alerts),
             lazy_loading_benchmarks: Some(lazy_loading_benchmarks),
@@ -249,11 +349,13 @@ impl AppState {
     }
 
     /// Check if lazy loading optimization is enabled
+    #[allow(dead_code)]
     pub fn is_lazy_loading_enabled(&self) -> bool {
         self.lazy_loading_cache.is_some()
     }
 
     /// Graceful shutdown of all components including lazy loading
+    #[allow(dead_code)]
     pub async fn shutdown(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Initiating graceful shutdown of AppState");
 

@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -71,6 +74,48 @@ impl Default for RetryConfig {
             request_timeout_ms: 10000,
             circuit_breaker_threshold: 5,
             circuit_breaker_recovery_ms: 60000,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Load retry configuration from environment variables with production defaults
+    pub fn from_env() -> Self {
+        Self {
+            max_retries: std::env::var("MATRIX_FEDERATION_MAX_RETRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+                
+            base_delay_ms: std::env::var("MATRIX_FEDERATION_BASE_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+                
+            max_delay_ms: std::env::var("MATRIX_FEDERATION_MAX_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30000),
+                
+            jitter_factor: std::env::var("MATRIX_FEDERATION_JITTER_FACTOR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.1),
+                
+            request_timeout_ms: std::env::var("MATRIX_FEDERATION_REQUEST_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10000),
+                
+            circuit_breaker_threshold: std::env::var("MATRIX_FEDERATION_CIRCUIT_BREAKER_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+                
+            circuit_breaker_recovery_ms: std::env::var("MATRIX_FEDERATION_CIRCUIT_BREAKER_RECOVERY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60000),
         }
     }
 }

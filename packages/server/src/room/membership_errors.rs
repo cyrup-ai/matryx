@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::fmt;

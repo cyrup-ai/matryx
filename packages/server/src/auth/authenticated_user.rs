@@ -34,33 +34,72 @@ impl AuthenticatedUser {
         auth_repo.check_user_membership(&self.user_id, &room_id).await.unwrap_or_default()
     }
 
-    /// Check if this user is an admin
-    pub async fn is_admin(&self, state: &AppState) -> bool {
+    /// Check if this user can access a specific resource
+    pub async fn can_access_resource(&self, state: &AppState, resource_type: &str, resource_id: &str) -> Result<bool, crate::auth::MatrixAuthError> {
+        match resource_type {
+            "room" => {
+                let auth_repo = AuthRepository::new(state.db.clone());
+                auth_repo.check_user_membership(&self.user_id, resource_id)
+                    .await
+                    .map_err(|e| crate::auth::MatrixAuthError::DatabaseError(e.to_string()))
+            },
+            "profile" => {
+                // Users can access their own profile, admins can access any profile
+                if resource_id == self.user_id {
+                    Ok(true)
+                } else {
+                    self.is_admin(state).await
+                        .map_err(|e| e)
+                }
+            },
+            _ => {
+                // Default: deny access to unknown resource types
+                Ok(false)
+            }
+        }
+    }
+
+    /// Check if this user has admin privileges
+    pub async fn is_admin(&self, state: &AppState) -> Result<bool, crate::auth::MatrixAuthError> {
         let auth_repo = AuthRepository::new(state.db.clone());
         
-        auth_repo.is_user_admin(&self.user_id).await.unwrap_or_default()
+        // Check if user has admin role in the database
+        auth_repo.is_user_admin(&self.user_id)
+            .await
+            .map_err(|e| crate::auth::MatrixAuthError::DatabaseError(e.to_string()))
     }
 
-    /// Get the Matrix user ID in proper format
-    pub fn matrix_id(&self) -> String {
-        if self.user_id.starts_with('@') {
-            self.user_id.clone()
-        } else {
-            format!("@{}:{}", self.user_id, self.homeserver_name)
-        }
+    /// Get the device ID for this authenticated user
+    pub fn get_device_id(&self) -> &str {
+        &self.device_id
     }
 
-    /// Get the localpart of the user ID
-    pub fn localpart(&self) -> &str {
-        if let Some(localpart) = self.user_id.strip_prefix('@') {
-            if let Some(colon_pos) = localpart.find(':') {
-                &localpart[..colon_pos]
-            } else {
-                localpart
+    /// Extract the localpart from the Matrix user ID (part before the colon)
+    /// Returns None if the user ID is malformed
+    pub fn localpart(&self) -> Option<&str> {
+        // Matrix user IDs are in format @localpart:homeserver
+        // Extract everything after @ and before :
+        if let Some(stripped) = self.user_id.strip_prefix('@') {
+            if let Some(colon_pos) = stripped.find(':') {
+                let localpart = &stripped[..colon_pos];
+                // Validate that localpart is not empty
+                if !localpart.is_empty() {
+                    return Some(localpart);
+                }
             }
-        } else {
-            &self.user_id
         }
+        // Return None for malformed user IDs
+        None
+    }
+
+    /// Get the full Matrix user ID
+    pub fn matrix_id(&self) -> &str {
+        &self.user_id
+    }
+
+    /// Get the access token for this authenticated user
+    pub fn get_access_token(&self) -> &str {
+        &self.access_token
     }
 }
 
@@ -90,6 +129,20 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             Ok(claims) => {
                 let user_id = claims.matrix_user_id.ok_or(StatusCode::UNAUTHORIZED)?;
                 let device_id = claims.matrix_device_id.ok_or(StatusCode::UNAUTHORIZED)?;
+
+                // Create MatrixAuth for validation
+                let matrix_token = crate::auth::MatrixAccessToken {
+                    token: access_token.clone(),
+                    user_id: user_id.clone(),
+                    device_id: device_id.clone(),
+                    expires_at: claims.exp.map(|exp| exp as i64),
+                };
+                let matrix_auth = crate::auth::MatrixAuth::User(matrix_token);
+
+                // Use MatrixAuth methods for validation
+                if matrix_auth.is_expired() {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
 
                 // Verify user exists in database using homeserver validation
                 let expected_homeserver = state.session_service.get_homeserver_name();

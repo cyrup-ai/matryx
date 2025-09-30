@@ -5,29 +5,40 @@ use matryx_entity::filter::EventFilter;
 use matryx_entity::types::{Event, MatrixFilter, Membership, MembershipState};
 use matryx_surrealdb::repository::FilterRepository;
 
-/// Resolve a filter parameter to a MatrixFilter object
+/// Resolve a filter parameter to a MatrixFilter object with caching
 pub async fn resolve_filter(
     state: &AppState,
     filter_param: &str,
     _user_id: &str,
 ) -> Result<Option<MatrixFilter>, StatusCode> {
-    if filter_param.starts_with('{') {
+    use crate::metrics::filter_metrics::FilterTimer;
+    
+    let _timer = FilterTimer::new("resolve_filter");
+    
+    let filter = if filter_param.starts_with('{') {
         // Inline filter definition
         serde_json::from_str(filter_param)
             .map(Some)
-            .map_err(|_| StatusCode::BAD_REQUEST)
+            .map_err(|_| StatusCode::BAD_REQUEST)?
     } else {
         // Filter ID reference - use existing repository
         let filter_repo = FilterRepository::new(state.db.clone());
         filter_repo
             .get_by_id(filter_param)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    
+    // Compile and cache the filter if present
+    if let Some(ref f) = filter {
+        let _compiled = state.filter_cache.get_or_compile_filter(f).await;
+        // Compiled filter cached for future use
     }
+    
+    Ok(filter)
 }
 
 /// Apply room filter to memberships
-#[allow(dead_code)] // Matrix sync filtering - will be integrated with sync endpoint
 pub fn apply_room_filter(memberships: Vec<Membership>, filter: &MatrixFilter) -> Vec<Membership> {
     if let Some(room_filter) = &filter.room {
         let mut filtered = memberships;

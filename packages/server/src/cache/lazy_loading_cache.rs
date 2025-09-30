@@ -7,6 +7,7 @@ use tracing::debug;
 
 /// Configuration for LazyLoadingCache instances
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LazyLoadingCacheConfig {
     pub essential_members_ttl: Duration,
     pub essential_members_capacity: u64,
@@ -55,11 +56,13 @@ impl LazyLoadingCache {
     }
 
     /// Get essential members from cache (simplified interface for migration code)
+    #[allow(dead_code)]
     pub async fn get_essential_members(&self, cache_key: &str) -> Option<HashSet<String>> {
         self.essential_members.get(cache_key).await
     }
 
     /// Store essential members in cache (simplified interface for migration code)
+    #[allow(dead_code)]
     pub async fn store_essential_members(&self, cache_key: &str, members: &HashSet<String>) {
         self.essential_members.insert(cache_key.to_string(), members.clone()).await;
         tracing::debug!("Stored {} essential members in cache with key: {}",
@@ -93,6 +96,7 @@ impl LazyLoadingCache {
     }
 
     /// Get power hierarchy with caching
+    #[allow(dead_code)]
     pub async fn get_power_hierarchy_cached(
         &self,
         room_id: &str,
@@ -109,6 +113,7 @@ impl LazyLoadingCache {
     }
 
     /// Get room creator with caching
+    #[allow(dead_code)]
     pub async fn get_room_creator_cached(
         &self,
         room_id: &str,
@@ -204,6 +209,7 @@ impl LazyLoadingCache {
     }
 
     /// Warm cache for frequently accessed rooms
+    #[allow(dead_code)]
     pub async fn warm_cache_for_room(
         &self,
         room_id: &str,
@@ -226,6 +232,7 @@ impl LazyLoadingCache {
     }
 
     /// Batch invalidate multiple rooms (for efficient bulk operations)
+    #[allow(dead_code)]
     pub async fn batch_invalidate_rooms(&self, room_ids: &[String]) {
         for room_id in room_ids {
             self.invalidate_room_cache(room_id).await;
@@ -317,6 +324,7 @@ impl Default for LazyLoadingCache {
 
 /// Configuration-driven cache creation for production tuning
 impl LazyLoadingCache {
+    #[allow(dead_code)]
     pub fn with_config(config: LazyLoadingCacheConfig) -> Self {
         Self {
             essential_members: Cache::builder()
@@ -338,9 +346,9 @@ impl LazyLoadingCache {
         }
     }
 
-    /// Production configuration with conservative defaults
-    pub fn production_config() -> Self {
-        Self::with_config(LazyLoadingCacheConfig {
+    #[allow(dead_code)]
+    pub fn production_config() -> LazyLoadingCacheConfig {
+        LazyLoadingCacheConfig {
             essential_members_ttl: Duration::from_secs(180),
             essential_members_capacity: 10000,
             power_hierarchies_ttl: Duration::from_secs(600),
@@ -349,24 +357,25 @@ impl LazyLoadingCache {
             room_creators_capacity: 100000,
             membership_events_ttl: Duration::from_secs(60),
             membership_events_capacity: 5000,
-        })
+        }
     }
 
-    /// Development configuration with shorter TTLs for testing
-    pub fn development_config() -> Self {
-        Self::with_config(LazyLoadingCacheConfig {
-            essential_members_ttl: Duration::from_secs(30),
+    #[allow(dead_code)]
+    pub fn development_config() -> LazyLoadingCacheConfig {
+        LazyLoadingCacheConfig {
+            essential_members_ttl: Duration::from_secs(60),
             essential_members_capacity: 1000,
-            power_hierarchies_ttl: Duration::from_secs(60),
+            power_hierarchies_ttl: Duration::from_secs(120),
             power_hierarchies_capacity: 2000,
-            room_creators_ttl: Duration::from_secs(120),
-            room_creators_capacity: 5000,
-            membership_events_ttl: Duration::from_secs(15),
+            room_creators_ttl: Duration::from_secs(300),
+            room_creators_capacity: 10000,
+            membership_events_ttl: Duration::from_secs(30),
             membership_events_capacity: 500,
-        })
+        }
     }
 
     /// Graceful shutdown of cache components
+    #[allow(dead_code)]
     pub async fn shutdown(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Moka caches don't require explicit shutdown, but we can provide cleanup logging
         tracing::info!("Shutting down lazy loading cache system");

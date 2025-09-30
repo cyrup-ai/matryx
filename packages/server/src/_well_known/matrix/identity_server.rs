@@ -5,7 +5,7 @@
 //! Enables identity server integration for the Matrix ecosystem.
 
 
-use axum::{http::StatusCode, response::Json};
+use axum::http::StatusCode;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::env;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// Matrix identity server discovery information with validation
-pub async fn get() -> Result<Json<Value>, StatusCode> {
+pub async fn get() -> Result<impl axum::response::IntoResponse, StatusCode> {
     // Get identity server URL from environment configuration
     let identity_server_url = match env::var("MATRIX_IDENTITY_SERVER") {
         Ok(url) => {
@@ -59,7 +59,7 @@ pub async fn get() -> Result<Json<Value>, StatusCode> {
         }
     });
 
-    Ok(Json(discovery_info))
+    Ok(axum::response::Json(discovery_info))
 }
 
 /// Validates that an identity server is reachable by checking /_matrix/identity/v2 endpoint

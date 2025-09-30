@@ -37,6 +37,7 @@ pub fn to_canonical_json(value: &Value) -> Result<String, CanonicalJsonError> {
 /// # Errors
 /// * `CanonicalJsonError::RecursiveStructure` - If circular references detected
 /// * `CanonicalJsonError::JsonError` - If JSON processing fails
+#[allow(dead_code)]
 pub fn canonicalize_value(value: &Value) -> Result<Value, CanonicalJsonError> {
     let mut visited = HashSet::new();
     canonicalize_value_with_cycle_detection(value, &mut visited, 0)

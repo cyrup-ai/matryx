@@ -158,13 +158,18 @@ impl<C: Connection> InfrastructureService<C> {
         device_id: &str,
         since: Option<&str>,
     ) -> Result<SyncResponse, RepositoryError> {
-        // TODO: Implement proper incremental sync based on since parameter
-        // For now, since is used for logging and future implementation
-        if let Some(since_token) = since {
+        // Implement proper incremental sync based on since parameter
+        let is_initial_sync = since.is_none();
+        let sync_timestamp = if let Some(since_token) = since {
             tracing::debug!("Processing incremental sync for user {} device {} since {}", user_id, device_id, since_token);
+            // Parse timestamp from since token (format: s{timestamp})
+            since_token.strip_prefix('s')
+                .and_then(|ts| ts.parse::<i64>().ok())
+                .unwrap_or(0)
         } else {
             tracing::debug!("Processing initial sync for user {} device {}", user_id, device_id);
-        }
+            0 // Initial sync gets all data
+        };
 
         // Get user's room memberships
         let memberships = self.websocket_repo.get_user_memberships_for_sync(user_id).await?;
@@ -202,10 +207,29 @@ impl<C: Connection> InfrastructureService<C> {
 
         let next_batch = format!("s{}", Utc::now().timestamp_millis());
 
-        // TODO: Implement device-specific features:
-        // - Fetch to-device events for this specific device_id
-        // - Check for device list updates since the last sync
-        // - Get one-time key counts for this device
+        // Implement device-specific features for E2EE support
+        // Fetch to-device events for this specific device since last sync
+        let to_device_events = if is_initial_sync {
+            // For initial sync, get all pending to-device events
+            self.device_repo.get_pending_to_device_events(user_id, device_id).await
+                .map_err(|_| RepositoryError::Database(surrealdb::Error::msg("Failed to fetch to-device events")))?
+        } else {
+            // For incremental sync, get events since sync_timestamp
+            self.device_repo.get_to_device_events_since(user_id, device_id, sync_timestamp).await
+                .map_err(|_| RepositoryError::Database(surrealdb::Error::msg("Failed to fetch incremental to-device events")))?
+        };
+
+        // Check for device list updates since the last sync
+        let device_lists = if !is_initial_sync {
+            Some(self.device_repo.get_device_list_changes_since(user_id, sync_timestamp).await
+                .map_err(|_| RepositoryError::Database(surrealdb::Error::msg("Failed to fetch device list changes")))?)
+        } else {
+            None // Initial sync doesn't need device list changes
+        };
+
+        // Get one-time key counts for this device
+        let device_one_time_keys_count = self.device_repo.get_one_time_key_counts(user_id, device_id).await
+            .map_err(|_| RepositoryError::Database(surrealdb::Error::msg("Failed to fetch OTK counts")))?;
         
         Ok(SyncResponse {
             next_batch,
@@ -216,9 +240,9 @@ impl<C: Connection> InfrastructureService<C> {
             },
             presence: None,
             account_data: None,
-            to_device: None, // TODO: Fetch to-device events for device_id
-            device_lists: None, // TODO: Check for device list changes since last sync
-            device_one_time_keys_count: None, // TODO: Get OTK counts for device_id
+            to_device: Some(to_device_events),
+            device_lists,
+            device_one_time_keys_count: Some(device_one_time_keys_count),
         })
     }
 
@@ -523,5 +547,13 @@ impl<C: Connection> InfrastructureService<C> {
         }
 
         Ok(WhoisResponse { user_id: user_id.to_string(), devices: device_info })
+    }
+
+    /// Clean up expired transactions using the internal transaction repository
+    pub async fn cleanup_expired_transactions(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, RepositoryError> {
+        self.transaction_repo.cleanup_expired_transactions(cutoff).await
     }
 }

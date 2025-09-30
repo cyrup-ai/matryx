@@ -7,7 +7,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::MatrixAuthError;
-use matryx_surrealdb::repository::uia::{UiaFlow, UiaRepository, UiaSession};
+use matryx_surrealdb::repository::{AuthRepository, uia::{UiaRepository, UiaSession}};
+
+// Re-export UiaFlow for use by other modules in the server crate
+pub use matryx_surrealdb::repository::uia::UiaFlow;
 
 /// UIA authentication request
 #[derive(Debug, Deserialize)]
@@ -90,14 +93,24 @@ pub struct ThreepidCredentials {
 /// Service for managing User-Interactive Authentication flows
 pub struct UiaService {
     uia_repo: UiaRepository<Any>,
+    auth_repo: AuthRepository<Any>,
+    homeserver_name: String,
     session_lifetime: Duration,
+    require_captcha: bool,
+    require_email_verification: bool,
+    _cleanup_interval_hours: u64, // TODO: Implement periodic cleanup task
 }
 
 impl UiaService {
-    pub fn new(uia_repo: UiaRepository<Any>) -> Self {
+    pub fn new(uia_repo: UiaRepository<Any>, auth_repo: AuthRepository<Any>, homeserver_name: String, config: UiaConfig) -> Self {
         Self {
             uia_repo,
-            session_lifetime: Duration::minutes(10), // 10 minutes for UIA sessions
+            auth_repo,
+            homeserver_name,
+            session_lifetime: Duration::minutes(config.session_lifetime_minutes),
+            require_captcha: config.require_captcha,
+            require_email_verification: config.require_email_verification,
+            _cleanup_interval_hours: config.cleanup_interval_hours,
         }
     }
 
@@ -251,6 +264,7 @@ impl UiaService {
     }
 
     /// Check if UIA session is completed
+    #[allow(dead_code)]
     pub async fn is_session_completed(&self, session_id: &str) -> Result<bool, MatrixAuthError> {
         let session = self
             .uia_repo
@@ -264,6 +278,7 @@ impl UiaService {
     }
 
     /// Get UIA session data
+    #[allow(dead_code)]
     pub async fn get_session_data(
         &self,
         session_id: &str,
@@ -280,6 +295,7 @@ impl UiaService {
     }
 
     /// Clean up expired UIA sessions
+    #[allow(dead_code)]
     pub async fn cleanup_expired_sessions(&self) -> Result<u64, MatrixAuthError> {
         let count = self.uia_repo.cleanup_expired_sessions().await.map_err(|e| {
             MatrixAuthError::DatabaseError(format!("Failed to cleanup UIA sessions: {}", e))
@@ -316,17 +332,24 @@ impl UiaService {
         session: &mut UiaSession,
         auth: UiaAuth,
     ) -> Result<bool, MatrixAuthError> {
-        // Extract password from auth data
-        let password = auth
-            .auth_data
-            .get("password")
-            .and_then(|v| v.as_str())
-            .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+        // Parse password auth data using proper struct
+        let auth_data_value = serde_json::to_value(&auth.auth_data)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
+        let password_auth: PasswordAuth = serde_json::from_value(auth_data_value)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
 
-        // For password auth, we need to verify against the user's stored password
-        let user_id = session.user_id.as_ref().ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+        // Determine user ID - either from session or identifier
+        let user_id = if let Some(user_id) = &session.user_id {
+            user_id.clone()
+        } else if let Some(identifier) = &password_auth.identifier {
+            self.resolve_user_identifier(identifier).await?
+        } else if let Some(user) = &password_auth.user {
+            user.clone()
+        } else {
+            return Err(MatrixAuthError::InvalidXMatrixFormat);
+        };
 
-        if self.verify_user_password(user_id, password).await? {
+        if self.verify_user_password(&user_id, &password_auth.password).await? {
             session.completed_stages.push("m.login.password".to_string());
             session
                 .auth_data
@@ -345,14 +368,14 @@ impl UiaService {
         session: &mut UiaSession,
         auth: UiaAuth,
     ) -> Result<bool, MatrixAuthError> {
-        let response = auth
-            .auth_data
-            .get("response")
-            .and_then(|v| v.as_str())
-            .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+        // Parse CAPTCHA auth data using proper struct
+        let auth_data_value = serde_json::to_value(&auth.auth_data)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
+        let captcha_auth: CaptchaAuth = serde_json::from_value(auth_data_value)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
 
         // Verify CAPTCHA response (implementation depends on CAPTCHA service)
-        if self.verify_captcha_response(response).await? {
+        if self.verify_captcha_response(&captcha_auth.response).await? {
             session.completed_stages.push("m.login.recaptcha".to_string());
             session
                 .auth_data
@@ -371,14 +394,14 @@ impl UiaService {
         session: &mut UiaSession,
         auth: UiaAuth,
     ) -> Result<bool, MatrixAuthError> {
-        // Extract threepid credentials
-        let threepid_creds = auth
-            .auth_data
-            .get("threepid_creds")
-            .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+        // Parse email auth data using proper struct
+        let auth_data_value = serde_json::to_value(&auth.auth_data)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
+        let email_auth: EmailAuth = serde_json::from_value(auth_data_value)
+            .map_err(|_| MatrixAuthError::InvalidXMatrixFormat)?;
 
         // Verify email token (implementation depends on email service)
-        if self.verify_email_token(threepid_creds).await? {
+        if self.verify_email_token(&email_auth.threepid_creds).await? {
             session.completed_stages.push("m.login.email.identity".to_string());
             session
                 .auth_data
@@ -439,6 +462,8 @@ impl UiaService {
         }
     }
 
+
+
     /// Verify CAPTCHA response using existing CaptchaService
     async fn verify_captcha_response(&self, response: &str) -> Result<bool, MatrixAuthError> {
         // Use existing CaptchaService from captcha.rs
@@ -466,8 +491,13 @@ impl UiaService {
     /// Verify email token using existing ThirdPartyValidationSessionRepository
     async fn verify_email_token(
         &self,
-        threepid_creds: &serde_json::Value,
+        threepid_creds: &ThreepidCredentials,
     ) -> Result<bool, MatrixAuthError> {
+        // Log deprecated identity server fields if present (Matrix spec deprecation)
+        if threepid_creds.id_server.is_some() || threepid_creds.id_access_token.is_some() {
+            tracing::debug!("Identity server parameters provided (deprecated in Matrix spec)");
+        }
+        
         // Use existing ThirdPartyValidationSessionRepository
         use matryx_surrealdb::repository::{
             ThirdPartyValidationSessionRepository,
@@ -477,16 +507,9 @@ impl UiaService {
         let any_db = self.uia_repo.get_db().clone();
         let threepid_repo = ThirdPartyValidationSessionRepository::new(any_db);
 
-        // Extract session ID and client secret from threepid_creds
-        let sid = threepid_creds
-            .get("sid")
-            .and_then(|v| v.as_str())
-            .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
-
-        let client_secret = threepid_creds
-            .get("client_secret")
-            .and_then(|v| v.as_str())
-            .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+        // Extract session ID and client secret from threepid_creds struct
+        let sid = &threepid_creds.sid;
+        let client_secret = &threepid_creds.client_secret;
 
         // Validate session using existing repository
         match threepid_repo.get_session_by_id_and_secret(sid, client_secret).await {
@@ -501,17 +524,82 @@ impl UiaService {
         }
     }
 
+    /// Resolve user identifier to Matrix user ID
+    async fn resolve_user_identifier(&self, identifier: &UserIdentifier) -> Result<String, MatrixAuthError> {
+        match identifier.id_type.as_str() {
+            "m.id.user" => {
+                // Direct user ID or localpart
+                if let Some(user) = &identifier.user {
+                    if user.contains(':') {
+                        // Already a full MXID
+                        Ok(user.clone())
+                    } else {
+                        // Convert localpart to full MXID
+                        Ok(format!("@{}:{}", user, self.homeserver_name))
+                    }
+                } else {
+                    Err(MatrixAuthError::InvalidXMatrixFormat)
+                }
+            },
+            "m.id.thirdparty" => {
+                // Third-party identifier (email, phone, etc.)
+                let medium = identifier.medium.as_ref()
+                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+                let address = identifier.address.as_ref()
+                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+                
+                // Look up user by third-party identifier
+                match self.auth_repo.get_user_by_threepid(medium, address).await {
+                    Ok(Some(user_id)) => Ok(user_id),
+                    Ok(None) => Err(MatrixAuthError::InvalidCredentials),
+                    Err(_) => Err(MatrixAuthError::DatabaseError("Failed to resolve user identifier".to_string())),
+                }
+            },
+            "m.id.phone" => {
+                // Phone number identifier
+                let phone = identifier.address.as_ref()
+                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+                
+                match self.auth_repo.get_user_by_threepid("msisdn", phone).await {
+                    Ok(Some(user_id)) => Ok(user_id),
+                    Ok(None) => Err(MatrixAuthError::InvalidCredentials),
+                    Err(_) => Err(MatrixAuthError::DatabaseError("Failed to resolve phone identifier".to_string())),
+                }
+            },
+            _ => {
+                warn!("Unknown user identifier type: {}", identifier.id_type);
+                Err(MatrixAuthError::InvalidXMatrixFormat)
+            }
+        }
+    }
+
     /// Get default UIA flows for different operations
     fn get_default_flows(&self) -> Vec<UiaFlow> {
-        vec![
+        let mut flows = vec![
             UiaFlow { stages: vec!["m.login.password".to_string()] },
-            UiaFlow {
+        ];
+        
+        // Add captcha flow if configured
+        if self.require_captcha {
+            flows.push(UiaFlow {
                 stages: vec![
                     "m.login.recaptcha".to_string(),
                     "m.login.password".to_string(),
                 ],
-            },
-        ]
+            });
+        }
+        
+        // Add email verification flow if configured
+        if self.require_email_verification {
+            flows.push(UiaFlow {
+                stages: vec![
+                    "m.login.email.identity".to_string(),
+                    "m.login.password".to_string(),
+                ],
+            });
+        }
+        
+        flows
     }
 }
 

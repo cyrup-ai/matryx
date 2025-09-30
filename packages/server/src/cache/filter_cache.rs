@@ -12,6 +12,7 @@ use std::time::Duration;
 
 /// Compiled filter for efficient reuse
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CompiledFilter {
     pub original: MatrixFilter,
     pub hash: String,
@@ -52,6 +53,7 @@ impl FilterCache {
     }
 
     /// Cache filter results for a specific room and filter combination
+    #[allow(dead_code)]
     pub async fn cache_filter_results(
         &self,
         filter_hash: &str,
@@ -63,6 +65,7 @@ impl FilterCache {
     }
 
     /// Get cached filter results if available and not expired
+    #[allow(dead_code)]
     pub async fn get_cached_results(&self, filter_hash: &str, room_id: &str) -> Option<Vec<Event>> {
         let cache_key = format!("{}:{}", filter_hash, room_id);
 
@@ -76,6 +79,7 @@ impl FilterCache {
     }
 
     /// Invalidate cache for a specific room (call when room events change)
+    #[allow(dead_code)]
     pub async fn invalidate_room(&self, room_id: &str) {
         // Invalidate all entries for this room
         // Note: moka doesn't have a direct way to invalidate by pattern,
@@ -103,6 +107,7 @@ impl Default for FilterCache {
 
 /// Cache statistics for monitoring
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CacheStats {
     pub compiled_filters_count: u64,
     pub cached_results_count: u64,
@@ -111,6 +116,7 @@ pub struct CacheStats {
 }
 
 /// Calculate a hash for a filter to use as cache key
+#[allow(dead_code)] // Utility function for filter cache key generation
 fn calculate_filter_hash(filter: &MatrixFilter) -> String {
     let mut hasher = DefaultHasher::new();
 

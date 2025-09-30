@@ -8,6 +8,7 @@ use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 
 use super::super::types::{LiveSyncUpdate, SyncQuery};
+use super::super::filters::{apply_filter_to_update, create_live_filtered_stream, resolve_filter};
 use super::event_streams::{create_account_data_live_stream, create_event_live_stream};
 use super::membership_streams::create_enhanced_membership_stream;
 use super::presence_streams::create_presence_live_stream;
@@ -20,8 +21,16 @@ pub async fn get_sse_stream(
 ) -> Result<impl IntoResponse, StatusCode> {
     let user_id = auth.user_id.clone();
 
-    // Create combined live sync stream
-    let combined_stream = handle_live_sync_streams(state, user_id, query)
+    // Resolve filter parameter for streaming
+    let applied_filter = if let Some(filter_param) = &query.filter {
+        resolve_filter(&state, filter_param, &user_id).await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        None
+    };
+
+    // Create combined live sync stream with filter support
+    let combined_stream = handle_live_sync_streams(state, user_id, query, applied_filter)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -51,12 +60,18 @@ async fn handle_live_sync_streams(
     state: AppState,
     user_id: String,
     _query: SyncQuery,
+    filter: Option<matryx_entity::types::MatrixFilter>,
 ) -> Result<
     impl Stream<Item = Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>>>,
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    // Create individual live streams
-    let event_stream = create_event_live_stream(state.clone(), user_id.clone()).await?;
+    // Create individual live streams with filter support
+    let event_stream = if let Some(ref filter_obj) = filter {
+        create_live_filtered_stream(state.clone(), user_id.clone(), filter_obj.clone()).await?
+    } else {
+        Box::pin(create_event_live_stream(state.clone(), user_id.clone()).await?)
+    };
+    
     let account_data_stream =
         create_account_data_live_stream(state.clone(), user_id.clone()).await?;
     let presence_stream = create_presence_live_stream(state.clone(), user_id.clone()).await?;
@@ -86,5 +101,24 @@ async fn handle_live_sync_streams(
     // Use futures::stream::select_all to merge all streams
     let merged_stream = futures::stream::select_all(combined_streams);
 
-    Ok(merged_stream)
+    // Apply live filter updates if filter is present
+    let filtered_stream: SyncUpdateStream = if let Some(ref filter) = filter {
+        let filter_clone = filter.clone();
+        Box::pin(merged_stream.then(move |update_result| {
+            let filter = filter_clone.clone();
+            async move {
+                match update_result {
+                    Ok(update) => {
+                        // Apply filter to the sync update
+                        apply_filter_to_update(update, &filter).await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }))
+    } else {
+        Box::pin(merged_stream)
+    };
+
+    Ok(filtered_stream)
 }

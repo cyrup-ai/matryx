@@ -26,6 +26,7 @@ pub enum XMatrixParseError {
     /// Unterminated quoted string
     UnterminatedQuotedString,
     /// Invalid escape sequence in quoted string
+    #[allow(dead_code)]
     InvalidEscapeSequence,
     /// Missing required parameter
     MissingRequiredParameter(String),

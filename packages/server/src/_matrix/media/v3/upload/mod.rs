@@ -19,6 +19,7 @@ use matryx_surrealdb::repository::{
     membership::MembershipRepository,
     room::RoomRepository,
 };
+use chrono::Utc;
 use std::sync::Arc;
 
 #[derive(Serialize)]
@@ -36,6 +37,29 @@ pub struct MediaFile {
     pub upload_name: Option<String>,
     pub uploaded_by: String,
     pub created_at: String,
+}
+
+impl MediaFile {
+    pub fn new(
+        media_id: String,
+        server_name: String,
+        content_type: String,
+        content_length: u64,
+        file_path: String,
+        upload_name: Option<String>,
+        uploaded_by: String,
+    ) -> Self {
+        Self {
+            media_id,
+            server_name,
+            content_type,
+            content_length,
+            file_path,
+            upload_name,
+            uploaded_by,
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 fn validate_content_type(content_type: &str) -> bool {
@@ -157,8 +181,24 @@ pub async fn upload_media(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Create MediaFile for detailed tracking
+    let media_file = MediaFile::new(
+        upload_result.media_id.clone(),
+        state.homeserver_name.clone(),
+        upload_result.content_type.clone(),
+        upload_result.content_length,
+        format!("/media/{}", upload_result.media_id), // file_path
+        upload_name,
+        token_info.user_id.clone(),
+    );
+
+    // Log the media file creation for monitoring
+    debug!("Created media file: {:?}", media_file);
+
     Ok(Json(MediaUploadResponse { content_uri: upload_result.content_uri }))
 }
+
+
 
 /// POST /_matrix/media/v3/upload
 pub async fn post(

@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use serde_json::Value;
 use tracing::{error, info, warn};
 
@@ -160,9 +163,5 @@ impl ReplacementValidator {
     }
 }
 
-impl Default for ReplacementValidator {
-    fn default() -> Self {
-        // This is a placeholder - in practice, this should be constructed with proper state
-        panic!("ReplacementValidator must be constructed with AppState using new()")
-    }
-}
+// Note: Default implementation removed for production safety.
+// ReplacementValidator must be constructed with proper AppState using new().

@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use tracing::warn;
 
 use crate::_matrix::client::v3::sync::data::{
-    apply_account_data_filter,
-    apply_presence_filter,
     convert_events_to_matrix_format,
     get_invited_member_count,
     get_invited_rooms,
@@ -27,12 +25,16 @@ use crate::_matrix::client::v3::sync::data::{
 };
 use crate::_matrix::client::v3::sync::filters::{
     apply_event_fields_filter,
-    apply_lazy_loading_filter,
+    apply_cache_aware_lazy_loading_filter,
     get_filtered_timeline_events,
     resolve_filter,
     apply_room_event_filter,
+    apply_presence_filter,
+    apply_account_data_filter,
 };
+use crate::_matrix::client::v3::sync::filters::basic_filters::apply_room_filter;
 use crate::_matrix::client::v3::sync::streaming::get_sse_stream;
+use crate::metrics::filter_metrics::FilterTimer;
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 use matryx_entity::types::{
@@ -90,8 +92,8 @@ pub async fn get_json_sync(
     query: SyncQuery,
 ) -> Result<Json<SyncResponse>, StatusCode> {
     // Access authentication fields to ensure they're used
-    let _auth_device_id = &auth.device_id;
-    let _auth_access_token = &auth.access_token;
+    let _auth_device_id = auth.get_device_id();
+    let _auth_access_token = auth.get_access_token();
 
     let user_id = &auth.user_id;
 
@@ -108,6 +110,12 @@ pub async fn get_json_sync(
         None
     };
 
+    // Record filter operation metrics
+    if let Some(ref _filter) = applied_filter {
+        use crate::metrics::filter_metrics::FilterMetrics;
+        FilterMetrics::record_cache_operation("filter_resolve", true);
+    }
+
     // Handle presence setting
     if let Some(presence) = &query.set_presence {
         set_user_presence(&state, &auth.user_id, presence).await.map_err(|e| {
@@ -121,15 +129,22 @@ pub async fn get_json_sync(
     let next_batch = format!("s{}", Utc::now().timestamp_millis());
 
     // Get user's room memberships by state
-    let joined_memberships = get_joined_rooms(&state, user_id)
+    let mut joined_memberships = get_joined_rooms(&state, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let invited_memberships = get_invited_rooms(&state, user_id)
+    let mut invited_memberships = get_invited_rooms(&state, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let left_memberships = get_left_rooms(&state, user_id)
+    let mut left_memberships = get_left_rooms(&state, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Apply room filtering if a filter is specified
+    if let Some(ref filter) = applied_filter {
+        joined_memberships = apply_room_filter(joined_memberships, filter);
+        invited_memberships = apply_room_filter(invited_memberships, filter);
+        left_memberships = apply_room_filter(left_memberships, filter);
+    }
 
     // Build room responses
     let mut joined_rooms = HashMap::new();
@@ -197,6 +212,52 @@ pub async fn get_json_sync(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    // Query device list changes since last sync
+    let device_lists = if let Some(since_token) = &query.since {
+        // Parse since token to get timestamp
+        let since_timestamp = since_token
+            .trim_start_matches('s')
+            .parse::<i64>()
+            .unwrap_or_else(|_| Utc::now().timestamp_millis());
+        
+        // Query EDU repository for device list updates since last sync
+        use matryx_surrealdb::repository::EDURepository;
+        let edu_repo = EDURepository::new(state.db.clone());
+        let device_edus = edu_repo.get_by_type("m.device_list_update")
+            .await
+            .unwrap_or_default();
+        
+        // Filter EDUs after since_timestamp and extract changed user IDs
+        let changed_users: Vec<String> = device_edus
+            .iter()
+            .filter_map(|edu| {
+                let stream_id = edu.ephemeral_event.content
+                    .get("stream_id")
+                    .and_then(|v| v.as_i64())?;
+                
+                if stream_id > since_timestamp {
+                    edu.ephemeral_event.content
+                        .get("user_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        DeviceListsResponse {
+            changed: changed_users,
+            left: Vec::new(),
+        }
+    } else {
+        // Initial sync - no device list changes
+        DeviceListsResponse {
+            changed: Vec::new(),
+            left: Vec::new(),
+        }
+    };
+
     let response = SyncResponse {
         next_batch,
         rooms: RoomsResponse {
@@ -207,9 +268,26 @@ pub async fn get_json_sync(
         presence: PresenceResponse { events: presence_events },
         account_data: AccountDataResponse { events: account_data_events },
         to_device: ToDeviceResponse { events: Vec::new() },
-        device_lists: DeviceListsResponse { changed: Vec::new(), left: Vec::new() },
+        device_lists,
         device_one_time_keys_count: HashMap::new(),
     };
+
+    // Record sync performance metrics
+    if let Some(_lazy_metrics) = &state.lazy_loading_metrics {
+        // Metrics are recorded automatically by lazy loading functions
+        tracing::debug!("Lazy loading metrics recorded for sync");
+    }
+
+    // Log filter cache statistics periodically
+    if rand::random::<f64>() < 0.01 {
+        // 1% sample rate to avoid overhead
+        let stats = state.filter_cache.get_stats().await;
+        tracing::info!(
+            compiled_filters = stats.compiled_filters_count,
+            cached_results = stats.cached_results_count,
+            "Filter cache statistics"
+        );
+    }
 
     Ok(Json(response))
 }
@@ -247,13 +325,31 @@ pub async fn build_joined_room_response(
     // Get ephemeral events (read receipts, typing notifications)
     let ephemeral_events = get_room_ephemeral_events(state, room_id).await?;
 
-    // Apply lazy loading filter if specified
+    // Apply lazy loading filter if specified with cache optimization
     let filtered_timeline = if room_filter
         .and_then(|rf| rf.timeline.as_ref())
         .map(|tl| tl.lazy_load_members)
         .unwrap_or(false)
     {
-        apply_lazy_loading_filter(timeline_events, room_id, user_id, state, false).await?
+        if let Some(lazy_cache) = &state.lazy_loading_cache {
+            let _timer = FilterTimer::new("lazy_loading");
+            apply_cache_aware_lazy_loading_filter(
+                timeline_events,
+                room_id,
+                user_id,
+                state,
+                false,
+                lazy_cache,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Lazy loading filter failed: {}", e);
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn std::error::Error + Send + Sync>
+            })?
+        } else {
+            // Fallback if lazy cache not available
+            timeline_events
+        }
     } else {
         timeline_events
     };

@@ -19,10 +19,7 @@ use matryx_surrealdb::repository::{RepositoryError, device::DeviceRepository};
 
 /// Extract device ID from Matrix authentication
 fn extract_device_id_from_auth(auth: &MatrixAuth) -> Option<String> {
-    match auth {
-        MatrixAuth::User(token_info) => Some(token_info.device_id.clone()),
-        _ => None,
-    }
+    auth.device_id().map(|s| s.to_string())
 }
 
 /// Device trust level enumeration
@@ -97,22 +94,18 @@ pub async fn get(
         StatusCode::UNAUTHORIZED
     })?;
 
-    let user_id = match &auth {
-        MatrixAuth::User(token_info) => {
-            if token_info.is_expired() {
-                warn!("Device list failed - access token expired for user");
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            token_info.user_id.clone()
-        },
-        MatrixAuth::Server(_) => {
-            warn!("Device list failed - server authentication not allowed for device list");
-            return Err(StatusCode::FORBIDDEN);
-        },
-        MatrixAuth::Anonymous => {
-            warn!("Device list failed - anonymous authentication not allowed for device list");
+    // Check access permissions using MatrixAuth utility methods
+    if !auth.can_access("device_list") {
+        warn!("Device list failed - access denied");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let user_id = match auth.user_id() {
+        Some(user_id) => user_id.to_string(),
+        None => {
+            warn!("Device list failed - user authentication required");
             return Err(StatusCode::UNAUTHORIZED);
-        },
+        }
     };
 
     info!("Processing device list request for user: {} from: {}", user_id, addr);
@@ -185,9 +178,9 @@ pub async fn register_device_with_keys(
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let user_id = match auth {
-        MatrixAuth::User(token_info) => token_info.user_id.clone(),
-        _ => return Err(StatusCode::FORBIDDEN),
+    let user_id = match auth.user_id() {
+        Some(user_id) => user_id.to_string(),
+        None => return Err(StatusCode::FORBIDDEN),
     };
 
     let device_repo = DeviceRepository::new(state.db.clone());

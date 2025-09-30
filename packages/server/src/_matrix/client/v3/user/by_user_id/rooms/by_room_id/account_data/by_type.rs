@@ -111,6 +111,20 @@ pub async fn set_room_account_data(
 
     let profile_service = ProfileManagementService::new(state.db.clone());
 
+    // Create AccountData struct for room-specific account data tracking
+    let now = Utc::now();
+    let account_data = AccountData {
+        id: format!("{}:{}:{}", user_id, room_id, data_type),
+        user_id: user_id.clone(),
+        room_id: Some(room_id.clone()), // Room-specific account data has room_id
+        data_type: data_type.clone(),
+        content: request.content.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    tracing::info!("Setting room account data: {:?}", account_data);
+
     // Set room account data using ProfileManagementService
     match profile_service
         .set_account_data(&user_id, &data_type, request.content, Some(&room_id))

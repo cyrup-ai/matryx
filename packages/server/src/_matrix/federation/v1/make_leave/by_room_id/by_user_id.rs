@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
+use crate::federation::membership_federation::validate_federation_leave_allowed;
 use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 
@@ -132,6 +133,20 @@ pub async fn get(
             warn!("Room {} not found", room_id);
             StatusCode::NOT_FOUND
         })?;
+
+    // Validate room allows leave events from this federation server
+    if !validate_federation_leave_allowed(&room, &x_matrix_auth.origin) {
+        warn!(
+            "Federation leave denied for server {} in room {} - origin restrictions apply",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    info!(
+        "Room validation passed for make_leave request in room {} from server {}",
+        room_id, x_matrix_auth.origin
+    );
 
     // Check if user is in the room (must be joined or invited to leave)
     let existing_membership =

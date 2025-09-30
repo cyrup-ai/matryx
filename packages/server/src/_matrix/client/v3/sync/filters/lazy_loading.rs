@@ -6,7 +6,6 @@ use crate::state::AppState;
 use matryx_entity::types::Event;
 
 /// Cache-aware lazy loading filter that reuses cached results for repeated requests
-#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 pub async fn apply_cache_aware_lazy_loading_filter(
     events: Vec<Event>,
     room_id: &str,
@@ -56,7 +55,6 @@ pub async fn apply_cache_aware_lazy_loading_filter(
 }
 
 /// Enhanced Matrix-compliant lazy loading with SurrealDB LiveQuery and cache optimization
-#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 async fn apply_lazy_loading_filter_enhanced(
     events: Vec<Event>,
     room_id: &str,
@@ -185,7 +183,6 @@ pub async fn apply_lazy_loading_filter(
 }
 
 /// Calculate hash for lazy loading cache key
-#[allow(dead_code)] // Matrix lazy loading - will be integrated with sync endpoint
 fn calculate_lazy_loading_hash(
     room_id: &str,
     user_id: &str,

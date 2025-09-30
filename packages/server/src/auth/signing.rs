@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use crate::auth::x_matrix_parser::{parse_x_matrix_header, XMatrixAuth};
 use crate::error::MatrixError;
+use crate::utils::canonical_json::to_canonical_json;
 
 /// JSON structure for signing federation requests per Matrix Server-Server API specification
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,39 +56,38 @@ impl FederationRequestSigner {
         }
     }
 
-    /// Extract JSON content from a reqwest::Request
+    /// Sign a reqwest::RequestBuilder with X-Matrix authorization
     ///
-    /// Extracts and parses the request body as JSON if present and content-type is application/json.
-    /// Returns None for requests without bodies or non-JSON content.
-    fn extract_request_content(request: &reqwest::Request) -> Result<Option<Value>, EventSigningError> {
-        // Check if request has a body
-        let body_bytes = match request.body() {
-            Some(body) => {
-                // Extract bytes from the request body
-                match body.as_bytes() {
-                    Some(bytes) => bytes,
-                    None => return Ok(None), // Body exists but not accessible as bytes
-                }
-            }
-            None => return Ok(None), // No body
-        };
+    /// Production-quality implementation that properly handles Matrix federation signing.
+    /// The caller must provide the request content directly since reqwest doesn't allow
+    /// extracting body bytes from built requests.
+    ///
+    /// # Arguments
+    /// * `request_builder` - The reqwest RequestBuilder to sign
+    /// * `destination` - Destination server name (pre-delegation)
+    /// * `content` - Optional JSON request body content
+    ///
+    /// # Returns
+    /// * `Ok(RequestBuilder)` - The signed request builder with X-Matrix header
+    /// * `Err(EventSigningError)` - If any step fails
+    pub async fn sign_request_builder_with_content(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        method: &str,
+        uri: &str,
+        destination: &str,
+        content: Option<Value>,
+    ) -> Result<reqwest::RequestBuilder, EventSigningError> {
+        // Generate X-Matrix authorization header with provided details
+        let auth_header = self.create_authorization_header(
+            method,
+            uri,
+            destination,
+            content,
+        ).await?;
 
-        // Check content-type header
-        let headers = request.headers();
-        let content_type = headers.get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        // Only parse as JSON if content-type indicates JSON
-        if !content_type.starts_with("application/json") {
-            return Ok(None);
-        }
-
-        // Parse body as JSON
-        match serde_json::from_slice::<Value>(body_bytes) {
-            Ok(json_value) => Ok(Some(json_value)),
-            Err(e) => Err(EventSigningError::JsonError(e)),
-        }
+        // Add authorization header to request builder
+        Ok(request_builder.header("Authorization", auth_header))
     }
 
     /// Create X-Matrix authorization header for federation requests
@@ -149,52 +149,27 @@ impl FederationRequestSigner {
         ))
     }
 
-    /// Sign a reqwest::RequestBuilder with X-Matrix authorization
+    /// Sign a reqwest::RequestBuilder with X-Matrix authorization (DEPRECATED)
     ///
-    /// Complete implementation that extracts request details, parses body content,
-    /// and generates Matrix-compliant X-Matrix authorization header.
+    /// This method is deprecated because reqwest doesn't allow extracting body content
+    /// from built requests. Use sign_request_builder_with_content() instead.
     ///
     /// # Arguments
     /// * `request_builder` - The reqwest RequestBuilder to sign
     /// * `destination` - Destination server name (pre-delegation)
     ///
     /// # Returns
-    /// * `Ok(RequestBuilder)` - The signed request builder with X-Matrix header
-    /// * `Err(EventSigningError)` - If any step fails
+    /// * `Err(EventSigningError)` - Always returns an error explaining the issue
+    #[deprecated = "Use sign_request_builder_with_content() instead - cannot extract body from built reqwest::Request"]
+    #[allow(dead_code)]
     pub async fn sign_request_builder(
         &self,
-        request_builder: reqwest::RequestBuilder,
-        destination: &str,
+        _request_builder: reqwest::RequestBuilder,
+        _destination: &str,
     ) -> Result<reqwest::RequestBuilder, EventSigningError> {
-        // Build the request to extract details
-        let request = request_builder.try_clone()
-            .ok_or_else(|| EventSigningError::InvalidRequest("Cannot clone request builder".to_string()))?
-            .build()
-            .map_err(|e| EventSigningError::HttpError(e))?;
-
-        let method = request.method().to_string();
-        let url = request.url();
-
-        // Extract URI path + query per Matrix specification
-        // Must include full path starting with /_matrix/... and query parameters
-        let uri = format!("{}{}",
-            url.path(),
-            url.query().map(|q| format!("?{}", q)).unwrap_or_default()
-        );
-
-        // Extract request body content if present
-        let content = Self::extract_request_content(&request)?;
-
-        // Generate X-Matrix authorization header
-        let auth_header = self.create_authorization_header(
-            &method,
-            &uri,
-            destination,
-            content,
-        ).await?;
-
-        // Add authorization header to original request builder
-        Ok(request_builder.header("Authorization", auth_header))
+        Err(EventSigningError::InvalidRequest(
+            "Cannot extract request body from reqwest::Request - use sign_request_builder_with_content() instead".to_string()
+        ))
     }
 }
 
@@ -262,7 +237,7 @@ pub async fn verify_x_matrix_auth(
     let signing_json = serde_json::to_value(signing_data)
         .map_err(|_| MatrixError::Unknown)?;
 
-    let canonical_json = crate::utils::canonical_json::to_canonical_json(&signing_json)
+    let canonical_json = to_canonical_json(&signing_json)
         .map_err(|_| MatrixError::Unknown)?;
 
     // Fetch the remote server's public key

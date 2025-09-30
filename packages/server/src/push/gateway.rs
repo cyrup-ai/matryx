@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use matryx_surrealdb::repository::PushGatewayRepository;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

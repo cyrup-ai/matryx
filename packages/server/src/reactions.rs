@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -209,11 +212,7 @@ impl ReactionManager {
     }
 }
 
-impl Default for ReactionManager {
-    fn default() -> Self {
-        // This is a placeholder - in practice, this should be constructed with proper state
-        panic!("ReactionManager must be constructed with AppState using new()")
-    }
-}
+// Note: Default implementation removed for production safety.
+// ReactionManager must be constructed with proper AppState using new().
 
 // Re-export types for convenience - removed duplicate imports

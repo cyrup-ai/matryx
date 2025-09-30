@@ -8,6 +8,7 @@ use futures::stream::{Stream, StreamExt};
 use crate::cache::lazy_loading_cache::LazyLoadingCache;
 use crate::room::LiveMembershipService;
 use crate::state::AppState;
+// Function is defined in this module, no import needed
 use matryx_surrealdb::repository::MembershipRepository;
 
 
@@ -23,6 +24,9 @@ pub async fn create_enhanced_membership_stream(
     // Clone the user_id to avoid borrowing issues
     let user_id_owned = user_id.clone();
     let db_clone = state.db.clone();
+    
+    // Create lazy loading cache for membership optimization
+    let lazy_cache = LazyLoadingCache::new();
 
     // Create a membership stream using repository to avoid lifetime issues
     let membership_stream = async move {
@@ -69,10 +73,34 @@ pub async fn create_enhanced_membership_stream(
         },
     );
 
+    // Integrate lazy loading with membership updates for all user's rooms
+    // This runs in the background to optimize membership loading
+    let state_clone = state.clone();
+    let user_id_for_lazy = user_id.clone();
+    let lazy_cache_clone = lazy_cache.clone();
+    
+    tokio::spawn(async move {
+        // Get user's rooms and integrate lazy loading for each
+        let membership_repo = MembershipRepository::new(state_clone.db.clone());
+        if let Ok(user_memberships) = membership_repo.get_user_rooms(&user_id_for_lazy).await {
+            for membership in user_memberships {
+                if let Err(e) = integrate_live_membership_with_lazy_loading(
+                    &state_clone,
+                    &membership.room_id,
+                    &user_id_for_lazy,
+                    &lazy_cache_clone,
+                ).await {
+                    tracing::error!("Failed to integrate lazy loading for room {}: {}", membership.room_id, e);
+                }
+            }
+        }
+    });
+
     Ok(sync_stream)
 }
 
 /// Integration with LiveMembershipService for real-time updates
+#[allow(dead_code)]
 pub async fn integrate_live_membership_with_lazy_loading(
     state: &AppState,
     room_id: &str,

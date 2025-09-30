@@ -11,7 +11,7 @@ use matryx_surrealdb::repository::auth::AuthRepository;
 /// Re-export the extended refresh token from repository
 pub use matryx_surrealdb::repository::auth::ExtendedRefreshToken as RefreshToken;
 
-/// Token pair containing access and refresh tokens
+/// Token pair containing access and refresh tokens for Matrix client authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPair {
     pub access_token: String,
@@ -59,6 +59,7 @@ impl<C: Connection> RefreshTokenService<C> {
     }
 
     /// Create initial token pair for user login
+    #[allow(dead_code)] // Part of Matrix refresh token API, used for secure authentication flows
     pub async fn create_initial_tokens(
         &self,
         user_id: &str,
@@ -206,6 +207,7 @@ impl<C: Connection> RefreshTokenService<C> {
     }
 
     /// Revoke all refresh tokens for a user
+    #[allow(dead_code)] // Part of Matrix refresh token API, used for account security management
     pub async fn revoke_all_user_tokens(&self, user_id: &str) -> Result<(), MatrixAuthError> {
         self.auth_repo.revoke_all_user_refresh_tokens(user_id).await.map_err(|e| {
             MatrixAuthError::DatabaseError(format!("Failed to revoke user tokens: {}", e))
@@ -216,6 +218,7 @@ impl<C: Connection> RefreshTokenService<C> {
     }
 
     /// Revoke all refresh tokens for a device
+    #[allow(dead_code)] // Part of Matrix refresh token API, used for device management
     pub async fn revoke_device_tokens(
         &self,
         user_id: &str,
@@ -233,6 +236,7 @@ impl<C: Connection> RefreshTokenService<C> {
     }
 
     /// Clean up expired and used refresh tokens
+    #[allow(dead_code)] // Part of Matrix refresh token API, used for token maintenance
     pub async fn cleanup_expired_tokens(&self) -> Result<u64, MatrixAuthError> {
         let count =
             self.auth_repo
@@ -250,6 +254,7 @@ impl<C: Connection> RefreshTokenService<C> {
     }
 
     /// Get refresh token statistics for monitoring
+    #[allow(dead_code)] // Matrix management API endpoint to be implemented
     pub async fn get_token_stats(&self) -> Result<TokenStats, MatrixAuthError> {
         let db_stats = self.auth_repo.get_refresh_token_stats().await.map_err(|e| {
             MatrixAuthError::DatabaseError(format!("Failed to get token stats: {}", e))
@@ -289,6 +294,7 @@ impl<C: Connection> RefreshTokenService<C> {
 
 /// Token statistics for monitoring
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)] // Used by Matrix management API endpoints
 pub struct TokenStats {
     pub total_tokens: u64,
     pub revoked_count: u64,
@@ -298,6 +304,7 @@ pub struct TokenStats {
 
 /// Configuration for refresh token service
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Used by Matrix server configuration API
 pub struct RefreshTokenConfig {
     pub access_token_lifetime_hours: i64,
     pub refresh_token_lifetime_days: i64,
@@ -306,6 +313,7 @@ pub struct RefreshTokenConfig {
 }
 
 impl RefreshTokenConfig {
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self {
             access_token_lifetime_hours: std::env::var("ACCESS_TOKEN_LIFETIME_HOURS")

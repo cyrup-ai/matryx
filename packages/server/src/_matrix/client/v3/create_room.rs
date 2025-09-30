@@ -8,11 +8,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
-use uuid::Uuid;
+
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
+    utils::matrix_identifiers::generate_room_id,
 };
 use matryx_surrealdb::repository::{
     EventRepository,
@@ -107,7 +108,7 @@ pub async fn post(
     }
 
     // Generate room ID for the new room
-    let room_id = generate_room_id(&state.homeserver_name);
+    let room_id = generate_room_id();
     info!("Generated room ID: {} for user: {}", room_id, user_id);
 
     // Create repository instances
@@ -214,10 +215,7 @@ pub async fn post(
     }
 }
 
-pub fn generate_room_id(homeserver_name: &str) -> String {
-    let random_part = Uuid::new_v4().to_string().replace('-', "");
-    format!("!{}:{}", &random_part[..18], homeserver_name)
-}
+
 
 fn is_supported_room_version(version: &str) -> bool {
     matches!(version, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11")

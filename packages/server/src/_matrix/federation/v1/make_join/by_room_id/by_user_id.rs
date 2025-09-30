@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
+use crate::federation::membership_federation::validate_federation_join_allowed;
 use matryx_entity::types::{MembershipState, Room};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
@@ -143,6 +144,20 @@ pub async fn get(
             warn!("Room {} not found", room_id);
             StatusCode::NOT_FOUND
         })?;
+
+    // Validate room allows federation joins from this origin server
+    if !validate_federation_join_allowed(&room, &x_matrix_auth.origin) {
+        warn!(
+            "Federation join denied for server {} in room {} - federation restrictions apply",
+            x_matrix_auth.origin, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    info!(
+        "Room validation passed for make_join request in room {} from server {}",
+        room_id, x_matrix_auth.origin
+    );
 
     // Check room version compatibility
     let supported_versions = query.ver.unwrap_or_else(|| vec!["1".to_string()]);

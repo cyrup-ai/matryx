@@ -9,8 +9,11 @@ use std::net::SocketAddr;
 use tracing::{error, info, warn};
 
 use crate::state::AppState;
+use crate::auth::captcha::CaptchaService;
+// use crate::auth::errors::MatrixAuthError; // TODO: Use for proper error handling
+use crate::auth::refresh_token::TokenPair;
 // Cookie helper function is in main.rs
-use matryx_surrealdb::repository::{AuthRepository, SsoUserInfo, ApplicationService, DeviceRepository};
+use matryx_surrealdb::repository::{AuthRepository, SsoUserInfo, ApplicationService, DeviceRepository, captcha::CaptchaRepository};
 use std::sync::Arc;
 
 pub mod get_token;
@@ -128,24 +131,69 @@ async fn handle_password_login(
     let username = request.user.ok_or(StatusCode::BAD_REQUEST)?;
     let password_value = request.password.ok_or(StatusCode::BAD_REQUEST)?;
 
+    // Check if CAPTCHA is required for this login attempt
+    let captcha_repo = CaptchaRepository::new(state.db.clone());
+    let captcha_service = CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
+    
+    let client_ip = addr.ip().to_string();
+    let user_agent = headers.get("user-agent")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("unknown");
+
+    // Check if CAPTCHA is required based on rate limiting and suspicious activity
+    if captcha_service.is_captcha_required(&client_ip, "login").await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+
+        // Return CAPTCHA challenge - client must retry with CAPTCHA response
+        let _challenge = captcha_service.create_challenge(
+            Some(client_ip.clone()), 
+            Some(user_agent.to_string()), 
+            None
+        ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            
+        info!("CAPTCHA challenge required for login attempt: user={}, ip={}", username, client_ip);
+        
+        // Return Matrix M_CAPTCHA_NEEDED error with challenge data
+        return Err(StatusCode::TOO_MANY_REQUESTS); // Client should handle this as CAPTCHA needed
+    }
+
     // Create password login request
     let password_request = password::PasswordLoginRequest {
         login_type: request.login_type,
-        user: username,
+        user: Some(username.clone()),
+        identifier: None, // Legacy path uses user field
         password: password_value,
         device_id: request.device_id,
         initial_device_display_name: request.initial_device_display_name,
     };
 
     // Delegate to password authentication module
-    password::post_password_login(
-        axum::extract::State(state),
+    let result = password::post_password_login(
+        axum::extract::State(state.clone()),
         ConnectInfo(addr),
         headers,
         cookies.clone(), // Pass cookies to password module
         Json(password_request),
     )
-    .await
+    .await;
+
+    // Record rate limit violations if login failed
+    if result.is_err() {
+        if let Err(e) = captcha_service.record_rate_limit_violation(&username, &client_ip).await {
+            warn!("Failed to record rate limit violation: {:?}", e);
+        }
+    }
+
+    // Periodic cleanup of expired CAPTCHA challenges
+    tokio::spawn(async move {
+        let captcha_repo = CaptchaRepository::new(state.db.clone());
+        let captcha_service = CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
+        if let Err(e) = captcha_service.cleanup_expired_challenges().await {
+            warn!("Failed to cleanup expired CAPTCHA challenges: {:?}", e);
+        }
+    });
+
+    result
 }
 
 async fn handle_token_login(
@@ -201,15 +249,23 @@ async fn handle_refresh_token_login(
             StatusCode::UNAUTHORIZED
         })?;
 
+    // Create structured token pair for organized token management
+    let token_pair = TokenPair {
+        access_token: new_access_token.clone(),
+        refresh_token: new_refresh_token.clone(),
+        expires_in: 3600,
+        device_id: final_device_id.clone(),
+    };
+
     // Create JWT for the new access token
     let jwt_token = state
         .session_service
         .create_user_token(
             &user_id,
             &final_device_id,
-            &new_access_token,
-            Some(&new_refresh_token),
-            3600,
+            &token_pair.access_token,
+            Some(&token_pair.refresh_token),
+            token_pair.expires_in,
         )
         .map_err(|e| {
             error!("Failed to create JWT token: {}", e);
@@ -221,9 +277,9 @@ async fn handle_refresh_token_login(
     Ok(Json(LoginResponse {
         user_id,
         access_token: jwt_token,
-        device_id: final_device_id,
-        refresh_token: Some(new_refresh_token),
-        expires_in_ms: Some(3600000), // 1 hour in milliseconds
+        device_id: token_pair.device_id,
+        refresh_token: Some(token_pair.refresh_token),
+        expires_in_ms: Some((token_pair.expires_in * 1000) as u64), // Convert to milliseconds
         well_known: None,             // Not typically needed for refresh token responses
     }))
 }
@@ -527,6 +583,8 @@ fn can_app_service_login_as(app_service: &ApplicationService, user_id: &str) -> 
 
     false
 }
+
+
 
 // Re-export password module types for convenience
 

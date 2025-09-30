@@ -52,14 +52,16 @@ struct HcaptchaResponse {
 }
 
 /// CAPTCHA configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptchaConfig {
     pub provider: String, // "recaptcha", "hcaptcha", or "custom"
+    #[allow(dead_code)] // Used in create_challenge and get_public_config methods
     pub site_key: String,
     pub secret_key: String,
     pub verify_url: String,
     pub min_score: f64, // For reCAPTCHA v3
     pub enabled: bool,
+    #[allow(dead_code)] // Used in create_challenge method for expires_at calculation
     pub challenge_lifetime_minutes: i64,
 }
 
@@ -458,9 +460,9 @@ impl<C: Connection> CaptchaService<C> {
         Ok(())
     }
 
-    /// Get CAPTCHA statistics for monitoring
+    /// Get CAPTCHA statistics for monitoring and rate limit analysis
+    #[allow(dead_code)] // Used in rate limit middleware but compiler doesn't detect it
     pub async fn get_captcha_stats(&self) -> Result<CaptchaStats, MatrixAuthError> {
-        // Repository method will handle 24-hour window filtering
         self.captcha_repo.get_captcha_stats().await.map_err(|e| {
             MatrixAuthError::DatabaseError(format!("Failed to get CAPTCHA stats: {}", e))
         })

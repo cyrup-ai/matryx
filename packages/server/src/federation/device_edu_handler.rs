@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

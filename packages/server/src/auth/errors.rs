@@ -27,6 +27,9 @@ pub enum MatrixAuthError {
     #[error("Invalid X-Matrix authorization format")]
     InvalidXMatrixFormat,
 
+    #[error("Invalid credentials")]
+    InvalidCredentials,
+
     #[error("Session expired")]
     SessionExpired,
 
@@ -62,6 +65,9 @@ impl IntoResponse for MatrixAuthError {
                     "Invalid X-Matrix authorization format",
                 )
             },
+            MatrixAuthError::InvalidCredentials => {
+                (StatusCode::UNAUTHORIZED, "M_FORBIDDEN", "Invalid credentials")
+            },
             MatrixAuthError::SessionExpired => {
                 (StatusCode::UNAUTHORIZED, "M_UNKNOWN_TOKEN", "Session expired")
             },
@@ -91,6 +97,7 @@ impl From<MatrixAuthError> for StatusCode {
             MatrixAuthError::InvalidSignature => StatusCode::UNAUTHORIZED,
             MatrixAuthError::MissingAuthorization => StatusCode::UNAUTHORIZED,
             MatrixAuthError::InvalidXMatrixFormat => StatusCode::UNAUTHORIZED,
+            MatrixAuthError::InvalidCredentials => StatusCode::UNAUTHORIZED,
             MatrixAuthError::SessionExpired => StatusCode::UNAUTHORIZED,
             MatrixAuthError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MatrixAuthError::JwtError(_) => StatusCode::UNAUTHORIZED,

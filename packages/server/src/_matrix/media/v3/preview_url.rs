@@ -18,6 +18,7 @@ use std::sync::Arc;
 pub struct PreviewQuery {
     pub url: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub ts: Option<u64>,
 }
 

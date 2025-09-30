@@ -111,11 +111,63 @@ pub async fn post_register(
     // Handle User Interactive Authentication (UIA) if required
     if let Some(auth_data) = &request.auth {
         info!("Processing UIA authentication data for registration");
-        // TODO: Implement full UIA flow according to Matrix spec
-        // For now, validate that auth data is properly formatted
+
+        // Validate auth data format
         if !auth_data.is_object() {
             error!("Invalid UIA auth data format");
             return Err(StatusCode::BAD_REQUEST);
+        }
+
+        // Check if CAPTCHA is required for registration from this IP/client
+        let captcha_service = crate::auth::CaptchaService::new(
+            matryx_surrealdb::repository::CaptchaRepository::new(state.db.clone()),
+            crate::auth::captcha::CaptchaConfig::from_env()
+        );
+
+        if captcha_service.is_captcha_required(&client_ip, "registration").await.unwrap_or(false) {
+            // Check if CAPTCHA challenge is provided in auth data
+            if let Some(captcha_response) = auth_data.get("response") {
+                if let Some(challenge_id) = auth_data.get("session") {
+                    // Create verification request
+                    let verification_request = crate::auth::captcha::CaptchaVerificationRequest {
+                        challenge_id: challenge_id.as_str().unwrap_or("").to_string(),
+                        response: captcha_response.as_str().unwrap_or("").to_string(),
+                        remote_ip: Some(client_ip.clone()),
+                    };
+
+                    // Validate CAPTCHA response
+                    match captcha_service.verify_captcha(verification_request).await {
+                        Ok(response) => {
+                            if response.success {
+                                info!("CAPTCHA validation successful for registration");
+                            } else {
+                                warn!("CAPTCHA validation failed for registration from IP: {}", client_ip);
+                                return Err(StatusCode::UNAUTHORIZED);
+                            }
+                        },
+                        Err(e) => {
+                            error!("CAPTCHA validation error: {:?}", e);
+                            return Err(StatusCode::BAD_REQUEST);
+                        }
+                    }
+                } else {
+                    error!("Missing CAPTCHA session in auth data");
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            } else {
+                // CAPTCHA required but not provided - return challenge
+                match captcha_service.create_challenge(Some(client_ip.clone()), Some(user_agent.clone()), None).await {
+                    Ok(_challenge) => {
+                        info!("Created CAPTCHA challenge for registration");
+                        // Return UIA flow indicating CAPTCHA is required
+                        return Err(StatusCode::UNAUTHORIZED); // Matrix spec: 401 with flows
+                    },
+                    Err(e) => {
+                        error!("Failed to create CAPTCHA challenge: {:?}", e);
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                }
+            }
         }
     }
 

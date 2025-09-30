@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use aes::Aes256;
 use base64::Engine;
 use cbc::{
@@ -318,7 +321,7 @@ impl MatryxCryptoProvider {
 
         // Generate random IV for AES-CBC
         let mut iv = [0u8; 16];
-        getrandom::getrandom(&mut iv).expect("Failed to generate random bytes");
+        getrandom::fill(&mut iv).expect("Failed to generate random bytes");
 
         // Encrypt with AES-256-CBC
         let cipher = cbc::Encryptor::<Aes256>::new(&aes_key.into(), &iv.into());

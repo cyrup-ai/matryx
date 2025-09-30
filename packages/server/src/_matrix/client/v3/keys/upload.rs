@@ -135,6 +135,25 @@ pub async fn post(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         info!("Device keys uploaded and validated for user: {} device: {}", user_id, device_id);
+        
+        // Generate device list update
+        use crate::federation::device_management::DeviceListUpdate;
+        use chrono::Utc;
+        
+        let device_update = DeviceListUpdate {
+            user_id: user_id.clone(),
+            device_id: device_id.clone(),
+            stream_id: Utc::now().timestamp_millis(),
+            prev_id: vec![],
+            deleted: false,
+            device_display_name: None,
+            keys: None,
+        };
+        
+        if let Err(e) = state.device_manager.apply_device_update(&device_update).await {
+            error!("Failed to apply device update: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     let mut one_time_key_counts: std::collections::HashMap<String, u32> =

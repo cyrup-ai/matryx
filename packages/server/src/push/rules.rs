@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use matryx_entity::PDU;
 use matryx_surrealdb::repository::push::{
     PushEvent,

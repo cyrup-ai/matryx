@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 use moka::future::Cache;

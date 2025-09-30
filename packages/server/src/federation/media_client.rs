@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use reqwest::Response;
 use serde_json::Value;
@@ -109,8 +112,9 @@ impl FederationMediaClient {
 
         // Create signed federation request using existing signing infrastructure
         let request_builder = self.http_client.get(&url);
+        let uri = format!("/_matrix/federation/v1/media/download/{}", media_id);
         let signed_request = self.event_signer
-            .sign_federation_request(request_builder, server_name)
+            .sign_federation_request(request_builder, "GET", &uri, server_name, None)
             .await
             .map_err(|e| FederationMediaError::SigningError(e.to_string()))?;
 

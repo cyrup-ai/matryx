@@ -40,8 +40,12 @@ async fn sign_federation_post_request(
         .json(request_body);
 
     // Sign the request using the existing federation signing infrastructure
+    // Extract URI from full URL for signing
+    let uri = url.strip_prefix(&format!("https://{}", destination))
+        .unwrap_or(url);
+    let content = serde_json::to_value(request_body).map_err(|_| StatusCode::BAD_REQUEST)?;
     let signed_request = state.event_signer
-        .sign_federation_request(request_builder, destination)
+        .sign_federation_request(request_builder, "POST", uri, destination, Some(content))
         .await
         .map_err(|e| {
             error!("Failed to sign federation POST request: {:?}", e);
@@ -145,12 +149,16 @@ async fn fetch_identity_server_key(
     validate_matrix_destination_parameter(identity_server)?;
 
     let url = format!("https://{}/_matrix/identity/api/v1/pubkey/{}", identity_server, key_id);
+    let uri = format!("/_matrix/identity/api/v1/pubkey/{}", key_id);
 
     info!("Signing federation request to {} for {}", identity_server, url);
     let signed_request = state.event_signer
         .sign_federation_request(
             state.http_client.get(&url),
-            identity_server
+            "GET",
+            &uri,
+            identity_server,
+            None
         )
         .await
         .map_err(|e| {
@@ -1016,12 +1024,16 @@ async fn validate_identity_server_reachability(
     
     // Try to reach the identity server's status endpoint using configured HTTP client
     let url = format!("https://{}/_matrix/identity/api/v1/status", identity_server);
+    let uri = "/_matrix/identity/api/v1/status";
 
     info!("Signing federation request to {} for {}", identity_server, url);
     let signed_request_result = state.event_signer
         .sign_federation_request(
             state.http_client.get(&url).timeout(std::time::Duration::from_secs(10)),
-            identity_server
+            "GET",
+            uri,
+            identity_server,
+            None
         )
         .await;
 

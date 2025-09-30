@@ -17,11 +17,13 @@ pub struct ParsedServerName {
 
 impl ParsedServerName {
     /// Get the hostname for certificate validation
+    #[allow(dead_code)]
     pub fn cert_hostname(&self) -> &str {
         &self.hostname
     }
     
     /// Get the Host header value for HTTP requests
+    #[allow(dead_code)]
     pub fn host_header(&self) -> String {
         if self.port == 8448 {
             self.hostname.clone()
@@ -31,6 +33,7 @@ impl ParsedServerName {
     }
     
     /// Get the server name for Matrix protocol usage
+    #[allow(dead_code)]
     pub fn server_name(&self) -> String {
         if self.port == 8448 {
             self.hostname.clone()
@@ -77,6 +80,7 @@ pub fn generate_room_id() -> String {
 ///
 /// # Returns
 /// * Properly formatted Matrix user ID: `@localpart:server.name`
+#[allow(dead_code)] // Utility function for Matrix ID formatting
 pub fn format_user_id(localpart: &str) -> String {
     format!("@{}:{}", localpart, get_server_name())
 }
@@ -85,6 +89,7 @@ pub fn format_user_id(localpart: &str) -> String {
 ///
 /// # Returns
 /// * System user ID: `@system:server.name`
+#[allow(dead_code)] // Utility function for system user ID formatting
 pub fn format_system_user_id() -> String {
     format_user_id("system")
 }
@@ -96,6 +101,7 @@ pub fn format_system_user_id() -> String {
 ///
 /// # Returns
 /// * Properly formatted Matrix event ID: `$localpart:server.name`
+#[allow(dead_code)] // Utility function for Matrix event ID formatting
 pub fn format_event_id(localpart: &str) -> String {
     format!("${}:{}", localpart, get_server_name())
 }
@@ -104,6 +110,7 @@ pub fn format_event_id(localpart: &str) -> String {
 ///
 /// # Returns
 /// * New Matrix event ID: `${uuid}:server.name`
+#[allow(dead_code)] // Utility function for generating unique event IDs
 pub fn generate_event_id() -> String {
     format_event_id(&Uuid::new_v4().to_string())
 }
@@ -270,6 +277,7 @@ fn is_valid_hostname(hostname: &str) -> bool {
 ///
 /// # Returns
 /// * `true` if the hostname is an IP literal, `false` otherwise
+#[allow(dead_code)] // Utility function for IP literal detection
 pub fn is_ip_literal(hostname: &str) -> bool {
     // Check for IPv6 with brackets
     if hostname.starts_with('[') && hostname.ends_with(']') {

@@ -7,4 +7,3 @@ pub mod key;
 pub mod media;
 #[path = "static/mod.rs"]
 pub mod static_;
-pub mod websocket;

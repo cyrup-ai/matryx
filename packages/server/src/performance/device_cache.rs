@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use chrono::{DateTime, Duration, Utc};
 use matryx_surrealdb::repository::PerformanceRepository;
 use std::collections::HashMap;

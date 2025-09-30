@@ -117,6 +117,14 @@ impl MatrixAuth {
             _ => None,
         }
     }
+
+    /// Get the signature if this is server authentication
+    pub fn signature(&self) -> Option<&str> {
+        match self {
+            MatrixAuth::Server(server) => Some(&server.signature),
+            _ => None,
+        }
+    }
 }
 
 /// Matrix JWT claims for SurrealDB integration

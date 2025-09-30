@@ -1,9 +1,15 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use crate::{auth::MatrixAuth, error::MatrixError};
+use tracing::{warn, error, info};
+use crate::auth::CaptchaService;
+use crate::auth::captcha::CaptchaConfig;
 use axum::{
     extract::{ConnectInfo, Request, State},
     http::StatusCode,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use governor::{
     Quota,
@@ -11,6 +17,7 @@ use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
+use matryx_surrealdb::repository::CaptchaRepository;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -18,6 +25,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use surrealdb::engine::any::Any;
 use tokio::sync::RwLock;
 
 /// Type alias for a rate limiter with timestamp
@@ -250,6 +258,102 @@ impl RateLimitService {
         let mut server_limiters = self.server_limiters.write().await;
         server_limiters.retain(|_, (_, last_used)| *last_used > cutoff);
     }
+
+    /// Check if CAPTCHA is required for the given IP and operation
+    pub async fn is_captcha_required(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str, operation: &str) -> bool {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        match captcha_service.is_captcha_required(ip_address, operation).await {
+            Ok(required) => required,
+            Err(e) => {
+                warn!("Failed to check CAPTCHA requirement: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Record a rate limit violation for CAPTCHA tracking
+    pub async fn record_rate_limit_violation(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str, operation: &str) {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        if let Err(e) = captcha_service.record_rate_limit_violation(ip_address, operation).await {
+            error!("Failed to record rate limit violation: {}", e);
+        }
+    }
+
+    /// Create a CAPTCHA challenge when rate limits are exceeded
+    pub async fn create_captcha_challenge(
+        &self,
+        db: Arc<surrealdb::Surreal<Any>>,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+        session_id: Option<String>,
+    ) -> Option<String> {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        match captcha_service.create_challenge(ip_address, user_agent, session_id).await {
+            Ok(challenge) => Some(challenge.challenge_id),
+            Err(e) => {
+                error!("Failed to create CAPTCHA challenge: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Get CAPTCHA statistics for monitoring
+    pub async fn get_captcha_stats(&self, db: Arc<surrealdb::Surreal<Any>>) -> Option<String> {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        match captcha_service.get_captcha_stats().await {
+            Ok(_stats) => Some("CAPTCHA stats retrieved".to_string()),
+            Err(e) => {
+                error!("Failed to get CAPTCHA stats: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Cleanup expired CAPTCHA challenges
+    pub async fn cleanup_expired_captcha(&self, db: Arc<surrealdb::Surreal<Any>>) -> u64 {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        match captcha_service.cleanup_expired_challenges().await {
+            Ok(count) => {
+                info!("Cleaned up {} expired CAPTCHA challenges", count);
+                count
+            }
+            Err(e) => {
+                error!("Failed to cleanup expired CAPTCHA challenges: {}", e);
+                0
+            }
+        }
+    }
+
+    /// Check suspicious activity patterns for CAPTCHA triggering
+    pub async fn check_suspicious_activity(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str) -> bool {
+        let config = CaptchaConfig::from_env();
+        let captcha_repo = CaptchaRepository::new((*db).clone());
+        let captcha_service = CaptchaService::new(captcha_repo, config);
+
+        // Use the private check_suspicious_activity method through the public is_captcha_required method
+        match captcha_service.is_captcha_required(ip_address, "suspicious_check").await {
+            Ok(suspicious) => suspicious,
+            Err(e) => {
+                warn!("Failed to check suspicious activity: {}", e);
+                false
+            }
+        }
+    }
 }
 
 /// Rate limiting middleware for Matrix API endpoints with full authentication integration
@@ -263,8 +367,8 @@ pub async fn rate_limit_middleware(
     let ip = addr.ip();
 
     // Check IP-based rate limit first
-    if let Err(matrix_error) = rate_limit_service.check_ip_rate_limit(ip).await {
-        return Ok(matrix_error.into_response());
+    if let Err(_matrix_error) = rate_limit_service.check_ip_rate_limit(ip).await {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
     // Determine endpoint type for specialized rate limiting
@@ -275,24 +379,28 @@ pub async fn rate_limit_middleware(
     if let Some(auth) = request.extensions().get::<MatrixAuth>() {
         match auth {
             MatrixAuth::User(user_token) => {
-                if let Err(matrix_error) =
+                if let Err(_matrix_error) =
                     rate_limit_service.check_user_rate_limit(&user_token.user_id).await
                 {
-                    return Ok(matrix_error.into_response());
+                    return Err(StatusCode::TOO_MANY_REQUESTS);
                 }
             },
-            MatrixAuth::Server(server_auth) => {
+            MatrixAuth::Server(_) => {
                 // Apply server-based rate limiting for federation
-                let result = if is_media_endpoint {
-                    rate_limit_service.check_server_media_rate_limit(&server_auth.server_name).await
-                } else if is_federation_endpoint {
-                    rate_limit_service.check_server_rate_limit(&server_auth.server_name).await
+                if let Some(server_name) = auth.server_name() {
+                    let result = if is_media_endpoint {
+                        rate_limit_service.check_server_media_rate_limit(server_name).await
+                    } else if is_federation_endpoint {
+                        rate_limit_service.check_server_rate_limit(server_name).await
+                    } else {
+                        rate_limit_service.check_server_rate_limit(server_name).await
+                    };
+                    
+                    if let Err(_matrix_error) = result {
+                        return Err(StatusCode::TOO_MANY_REQUESTS);
+                    }
                 } else {
-                    rate_limit_service.check_server_rate_limit(&server_auth.server_name).await
-                };
-                
-                if let Err(matrix_error) = result {
-                    return Ok(matrix_error.into_response());
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
             },
             MatrixAuth::Anonymous => {

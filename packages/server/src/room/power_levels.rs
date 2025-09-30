@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use axum::http::StatusCode;

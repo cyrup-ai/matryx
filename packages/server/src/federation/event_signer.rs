@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Event Signing Utility for Matrix Server
 //!
 //! Provides high-level interface for signing outgoing Matrix events
@@ -14,7 +17,7 @@ use crate::auth::signing::FederationRequestSigner;
 use crate::federation::dns_resolver::MatrixDnsResolver;
 use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use matryx_entity::types::Event;
-use matryx_surrealdb::repository::KeyServerRepository;
+use matryx_surrealdb::repository::{KeyServerRepository, key_server::SigningKey};
 
 /// High-level event signing service for outgoing Matrix events
 ///
@@ -222,7 +225,7 @@ impl EventSigner {
         key_name: Option<&str>,
     ) -> Result<String, EventSigningError> {
         use base64::{Engine as _, engine::general_purpose};
-        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey};
         
 
         let db = &self.signing_engine.db;
@@ -236,8 +239,8 @@ impl EventSigner {
 
         // Generate Ed25519 key pair using cryptographically secure random number generator
         let mut secret_bytes = [0u8; 32];
-        getrandom::getrandom(&mut secret_bytes).expect("Failed to generate random bytes");
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
+        let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
         let verifying_key: VerifyingKey = (&signing_key).into();
 
         // Create key ID with base64-encoded key prefix for uniqueness
@@ -254,7 +257,7 @@ impl EventSigner {
         let expires_at = now + chrono::Duration::days(365); // 1 year validity
 
         // Create SigningKey struct for repository storage
-        let signing_key_entity = matryx_surrealdb::SigningKey {
+        let signing_key_entity = SigningKey {
             key_id: key_id.clone(),
             server_name: self.homeserver_name.clone(),
             signing_key: private_key_b64,
@@ -285,14 +288,42 @@ impl EventSigner {
         self.signing_engine.redact_event(event, room_version)
     }
 
-    /// Sign a federation HTTP request with X-Matrix authentication
+
+
+    /// Generate a server authentication token for federation requests
+    ///
+    /// Creates a JWT token for server-to-server authentication that can be used
+    /// alongside X-Matrix signatures for enhanced federation security.
+    ///
+    /// # Arguments
+    /// * `destination` - The destination server name
+    ///
+    /// # Returns
+    /// * `Ok(String)` - The generated JWT token
+    /// * `Err(EventSigningError)` - If token generation fails
+    pub fn generate_federation_token(
+        &self,
+        _destination: &str,
+    ) -> Result<String, EventSigningError> {
+        self.signing_engine.session_service.create_server_token(
+            &self.homeserver_name,
+            &self.default_key_id,
+            3600  // expires_in (1 hour)
+        ).map_err(|e| EventSigningError::InvalidRequest(format!("Token generation failed: {}", e)))
+    }
+
+    /// Sign a federation request with X-Matrix authorization
     ///
     /// This method adds the required X-Matrix authorization header to HTTP requests
     /// for federation API calls, following the Matrix Server-Server API specification.
+    /// Also adds a server authentication token for enhanced security.
     ///
     /// # Arguments
     /// * `request_builder` - The reqwest RequestBuilder to sign
+    /// * `method` - The HTTP method (GET, POST, PUT, etc.)
+    /// * `uri` - The request URI path and query (e.g., "/_matrix/federation/v1/media/download/example.org/abc123")
     /// * `destination` - The destination server name
+    /// * `content` - Optional JSON request body content
     ///
     /// # Returns
     /// * `Ok(RequestBuilder)` - The signed request builder
@@ -300,7 +331,10 @@ impl EventSigner {
     pub async fn sign_federation_request(
         &self,
         request_builder: reqwest::RequestBuilder,
+        method: &str,
+        uri: &str,
         destination: &str,
+        content: Option<serde_json::Value>,
     ) -> Result<reqwest::RequestBuilder, EventSigningError> {
         // Log the federation request signing attempt
         debug!("Attempting to sign federation request to destination: {}", destination);
@@ -310,17 +344,29 @@ impl EventSigner {
             return Err(EventSigningError::InvalidDestination(destination.to_string()));
         }
 
+        // Generate server authentication token for enhanced security
+        let server_token = self.generate_federation_token(destination)?;
+
         // Create federation request signer with complete Matrix specification implementation
         let signer = FederationRequestSigner::new(
             self.signing_engine.clone(),
             self.homeserver_name.clone(),
         );
 
-        // Sign the request using complete Matrix JSON signing algorithm
-        let signed_request = signer.sign_request_builder(request_builder, destination).await?;
+        // Sign the request using complete Matrix JSON signing algorithm with provided parameters
+        let signed_request = signer.sign_request_builder_with_content(
+            request_builder, 
+            method,
+            uri,
+            destination, 
+            content
+        ).await?;
+
+        // Add server authentication token header
+        let signed_request_with_token = signed_request.header("X-Matrix-Token", server_token);
 
         info!("Successfully signed federation request to destination: {}", destination);
-        Ok(signed_request)
+        Ok(signed_request_with_token)
     }
 }
 

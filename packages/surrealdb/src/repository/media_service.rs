@@ -629,6 +629,15 @@ impl<C: Connection> MediaService<C> {
             Err(e) => Err(e),
         }
     }
+
+    /// Get media info for a specific media ID and server
+    pub async fn get_media_info(
+        &self,
+        media_id: &str,
+        server_name: &str,
+    ) -> Result<Option<MediaInfo>, RepositoryError> {
+        self.media_repo.get_media_info(media_id, server_name).await
+    }
 }
 
 #[cfg(test)]

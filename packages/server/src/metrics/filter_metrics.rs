@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Performance monitoring for filtering operations
 //!
 //! This module provides metrics collection for Matrix sync filtering

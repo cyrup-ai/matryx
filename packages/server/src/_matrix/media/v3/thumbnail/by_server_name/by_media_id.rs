@@ -10,29 +10,12 @@ use matryx_surrealdb::repository::{
     membership::MembershipRepository,
     room::RoomRepository,
 };
-use serde::Deserialize;
+
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-pub struct ThumbnailQuery {
-    #[serde(default = "default_width")]
-    pub width: u32,
-    #[serde(default = "default_height")]
-    pub height: u32,
-    #[serde(default = "default_method")]
-    pub method: String,
-}
-
-fn default_width() -> u32 {
-    320
-}
-fn default_height() -> u32 {
-    240
-}
-fn default_method() -> String {
-    "scale".to_string()
-}
+// Use shared ThumbnailQuery from parent module
+use super::super::ThumbnailQuery;
 
 /// GET /_matrix/media/v3/thumbnail/{serverName}/{mediaId}
 pub async fn get(

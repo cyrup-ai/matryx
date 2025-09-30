@@ -9,6 +9,7 @@ use tracing::{debug, error, warn};
 
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
+use crate::federation::event_signer::EventSigner;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
 
@@ -319,14 +320,40 @@ async fn send_state_event(
     event.depth = Some(depth + 1);
     event.received_ts = Some(chrono::Utc::now().timestamp_millis());
     event.outlier = Some(false);
-    event.auth_events = Some(vec![]); // TODO: Populate with proper auth events
-    event.prev_events = Some(vec![]); // TODO: Populate with prev events
-    event.signatures = Some(Default::default());
-    event.hashes = Some(Default::default());
 
-    // Store the event
+    // TODO: Populate with proper auth events (for Matrix DAG compliance)
+    // This should include room creation event, power levels, etc.
+    event.auth_events = Some(vec![]);
+
+    // TODO: Populate with prev events (for Matrix DAG compliance)
+    // This should include references to previous events in the room
+    event.prev_events = Some(vec![]);
+
+    // Sign the event using proper Matrix cryptographic signatures
+    // This replaces the dangerous Default::default() stubs
+    let event_signer = match EventSigner::from_app_state(
+        state.session_service.clone(),
+        state.db.clone(),
+        state.dns_resolver.clone(),
+        state.homeserver_name.clone(),
+    ) {
+        Ok(signer) => signer,
+        Err(e) => {
+            error!("Failed to create event signer: {:?}", e);
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to create event signer")));
+        }
+    };
+
+    // Sign the event with proper Matrix signatures and hashes
+    let mut signed_event = event.clone();
+    if let Err(e) = event_signer.sign_outgoing_event(&mut signed_event, None).await {
+        error!("Failed to sign state event: {:?}", e);
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to sign state event")));
+    }
+
+    // Store the properly signed event
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    event_repo.create(&event).await?;
+    event_repo.create(&signed_event).await?;
 
     Ok(event_id)
 }

@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Matrix Federation Server Discovery Orchestrator
 //!
 //! Implements the complete Matrix server discovery process according to the

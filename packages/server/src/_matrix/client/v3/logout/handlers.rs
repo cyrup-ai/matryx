@@ -79,23 +79,33 @@ async fn logout_internal(
         StatusCode::UNAUTHORIZED
     })?;
 
-    let (user_id, device_id, access_token) = match auth {
-        MatrixAuth::User(token_info) => {
-            if token_info.is_expired() {
-                warn!("{} logout failed - access token expired for user", logout_type);
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-            (token_info.user_id.clone(), token_info.device_id.clone(), token_info.token.clone())
+    // Check authentication and extract user information using MatrixAuth utility methods
+    if auth.is_expired() {
+        warn!("{} logout failed - access token expired for user", logout_type);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let (user_id, device_id, access_token) = match (auth.user_id(), auth.device_id(), auth.access_token()) {
+        (Some(user_id), Some(device_id), Some(access_token)) => {
+            (user_id.to_string(), device_id.to_string(), access_token.to_string())
+        },
+        _ => {
+            warn!("{} logout failed - user authentication required", logout_type);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+
+    // Ensure we have user authentication (not server or anonymous)
+    match auth {
+        MatrixAuth::User(_) => {
+            // Valid user authentication - proceed with logout
         },
         MatrixAuth::Server(_) => {
             warn!("{} logout failed - server authentication not allowed for logout", logout_type);
-            return Err(StatusCode::FORBIDDEN);
+            return Err(StatusCode::UNAUTHORIZED);
         },
         MatrixAuth::Anonymous => {
-            warn!(
-                "{} logout failed - anonymous authentication not allowed for logout",
-                logout_type
-            );
+            warn!("{} logout failed - anonymous authentication not allowed for logout", logout_type);
             return Err(StatusCode::UNAUTHORIZED);
         },
     };

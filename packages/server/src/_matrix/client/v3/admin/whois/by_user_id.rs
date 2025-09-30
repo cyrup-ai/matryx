@@ -1,7 +1,7 @@
 use axum::extract::ConnectInfo;
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::Json,
 };
 
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::{error, info};
 
-use crate::auth::{MatrixAuthError, extract_matrix_auth};
+use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 use matryx_surrealdb::repository::{UserRepository, DeviceRepository, SessionRepository};
 
@@ -41,42 +41,41 @@ pub struct ConnectionInfo {
 pub async fn get(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    auth_user: AuthenticatedUser,
     Path(target_user_id): Path<String>,
 ) -> Result<Json<WhoisResponse>, StatusCode> {
-    // Authenticate user
-    let auth_result = extract_matrix_auth(&headers, &state.session_service).await;
-    let matrix_auth = match auth_result {
-        Ok(auth) => auth,
-        Err(MatrixAuthError::MissingToken) => return Err(StatusCode::UNAUTHORIZED),
-        Err(MatrixAuthError::MissingAuthorization) => return Err(StatusCode::UNAUTHORIZED),
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-    };
-
-    let user_id = match matrix_auth {
-        crate::auth::MatrixAuth::User(user_auth) => user_auth.user_id,
-        _ => return Err(StatusCode::UNAUTHORIZED),
-    };
-
     info!(
         "Admin whois request from user {} at {} for target user {}",
-        user_id, addr, target_user_id
+        auth_user.user_id, addr, target_user_id
     );
 
-    // Check if user is admin using repository
+    // Check if user is admin using AuthenticatedUser method
+    let is_admin = auth_user.is_admin(&state).await
+        .map_err(|e| {
+            error!("Failed to check admin status for user {}: {}", auth_user.user_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    
+    if !is_admin {
+        error!("User {} attempted admin whois without admin privileges", auth_user.user_id);
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Admin check passed - proceed with whois
     let user_repo = UserRepository::new(state.db.clone());
-    let is_admin = match user_repo.is_admin(&user_id).await {
-        Ok(admin_status) => admin_status,
+    let _target_user = match user_repo.get_by_id(&target_user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            error!("Target user {} not found for whois", target_user_id);
+            return Err(StatusCode::NOT_FOUND);
+        },
         Err(e) => {
             error!("Failed to check admin status: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };
 
-    if !is_admin {
-        error!("User {} attempted admin whois without admin privileges", user_id);
-        return Err(StatusCode::FORBIDDEN);
-    }
+
 
     // Check if target user exists using repository
     let user_exists = match user_repo.user_exists_admin(&target_user_id).await {

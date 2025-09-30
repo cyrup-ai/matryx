@@ -17,7 +17,7 @@ pub async fn get(
 ) -> Result<Json<Value>, StatusCode> {
     // Access authentication fields to ensure they're used
     let _auth_user_id = &auth.user_id;
-    let _auth_device_id = &auth.device_id;
+    let _auth_device_id = auth.get_device_id();
 
     // Validate user ID format and extract localpart for validation
     let _localpart = if user_id.starts_with('@') {
@@ -28,7 +28,7 @@ pub async fn get(
         }
     } else {
         // Use authenticated user's localpart method for comparison
-        auth.localpart()
+        auth.localpart().ok_or(StatusCode::BAD_REQUEST)?
     };
 
     // Get user profile from database

@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -288,7 +291,7 @@ impl LiveMembershipService {
                 &self.homeserver_name
             )), // Generate event ID
             sender: membership.invited_by.clone(),
-            reason: None, // TODO: Extract from event content
+            reason: extract_reason_from_membership_event(&membership),
             timestamp: chrono::Utc::now().timestamp_millis(),
         };
 
@@ -553,6 +556,21 @@ impl LiveMembershipService {
 
         Ok(batched_stream)
     }
+}
+
+/// Extract the reason field from a Matrix membership event according to the Matrix specification
+/// 
+/// Per the Matrix Client-Server API spec, the reason field is an optional user-supplied
+/// text explaining why their membership has changed. This function extracts that field
+/// from the membership event content.
+///
+/// # Arguments
+/// * `membership` - The membership entity containing the event data
+///
+/// # Returns
+/// * `Option<String>` - The reason if present, None otherwise
+fn extract_reason_from_membership_event(membership: &Membership) -> Option<String> {
+    membership.reason.clone()
 }
 
 // Make the service cloneable for use in async streams

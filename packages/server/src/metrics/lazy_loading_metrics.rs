@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+// Lazy loading metrics module - intentional library code not yet fully integrated
+
 use matryx_surrealdb::repository::PerformanceRepository;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

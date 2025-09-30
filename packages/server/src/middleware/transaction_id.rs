@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use crate::{auth::MatrixAuth, error::MatrixError};
 use axum::{
     Json,
@@ -7,7 +10,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use matryx_surrealdb::repository::{InfrastructureService, TransactionRepository};
+use matryx_surrealdb::repository::InfrastructureService;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
@@ -102,25 +105,14 @@ impl TransactionService {
         }
     }
 
-    /// Clean up old transactions using TransactionRepository directly
+    /// Clean up old transactions using TransactionRepository through InfrastructureService
     pub async fn cleanup_old_transactions(&self, older_than_days: i64) -> Result<(), MatrixError> {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(older_than_days);
 
-        // Access the transaction repository directly for cleanup
-        let transaction_repo = TransactionRepository::new(self.get_db_connection().await);
-
-        match transaction_repo.cleanup_expired_transactions(cutoff).await {
+        match self.infrastructure_service.cleanup_expired_transactions(cutoff).await {
             Ok(_) => Ok(()),
             Err(_) => Err(MatrixError::Unknown),
         }
-    }
-
-    /// Helper method to get database connection (would need to be implemented based on your architecture)
-    async fn get_db_connection(&self) -> Surreal<Any> {
-        // In a real implementation, you'd need access to the database connection
-        // For now, this is a placeholder that would need to be properly implemented
-        // based on your application's state management
-        todo!("Need to implement database connection access")
     }
 }
 
@@ -194,7 +186,7 @@ pub async fn transaction_id_middleware(
     State(transaction_service): State<Arc<TransactionService>>,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let path = request.uri().path().to_string();
 
     // Extract transaction ID from request path
@@ -221,7 +213,7 @@ pub async fn transaction_id_middleware(
                 };
 
                 // Return the stored response for idempotency
-                return Ok(Json(response_body).into_response());
+                return Json(response_body).into_response();
             },
             Ok(TransactionResult::NewTransaction) => {
                 // Process the request and store the result
@@ -241,16 +233,16 @@ pub async fn transaction_id_middleware(
                             .await;
                     }
 
-                return Ok(response);
+                return response;
             },
-            Err(matrix_error) => {
-                return Ok(matrix_error.into_response());
+            Err(_matrix_error) => {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             },
         }
     }
 
     // If no transaction ID found or no authentication, just pass through
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 /// Configuration for transaction ID handling

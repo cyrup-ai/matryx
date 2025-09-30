@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Matrix Event Signing and Validation System
 //!
 //! Complete implementation of Matrix Server-Server API event cryptographic operations

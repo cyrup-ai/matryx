@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 
 use crate::AppState;
+use crate::auth::uia::{UiaAuth, UiaFlow};
 use matryx_entity::types::third_party_validation_session::ThirdPartyValidationSession;
 use matryx_surrealdb::repository::ProfileManagementService;
 use matryx_surrealdb::repository::third_party_validation_session::{
@@ -126,11 +127,89 @@ pub async fn add_threepid(
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Validate auth data if provided (UIA - User Interactive Authentication)
-    if let Some(_auth_data) = &request.auth {
-        // According to Matrix spec, auth data should contain authentication information
-        // For now, we log that auth was provided but proceed (production should validate)
-        info!("Additional authentication data provided for 3PID addition");
-        // TODO: Implement proper UIA (User Interactive Authentication) validation
+    if let Some(auth_data) = &request.auth {
+        // Implement proper UIA validation according to Matrix specification
+        info!("Processing UIA authentication for 3PID addition");
+
+        // Parse auth data as UIA authentication
+        let uia_auth: UiaAuth = serde_json::from_value(auth_data.clone())
+            .map_err(|e| {
+                error!("Failed to parse UIA auth data: {:?}", e);
+                StatusCode::BAD_REQUEST
+            })?;
+
+        // Use centralized UIA service from AppState
+        let uia_service = &state.uia_service;
+
+        // Validate the authentication
+        let session_id = match &uia_auth.session {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => {
+                warn!("Invalid or missing session ID in UIA auth");
+                return Ok(Json(json!({
+                    "errcode": "M_INVALID_PARAM",
+                    "error": "Invalid or missing session ID"
+                })));
+            }
+        };
+        match uia_service.process_auth(&session_id, uia_auth).await {
+            Ok(_) => {
+                info!("UIA authentication successful for 3PID addition");
+                // Authentication passed, continue with 3PID addition
+            },
+            Err(uia_error) => {
+                warn!("UIA authentication failed for 3PID addition: {:?}", uia_error);
+                // Return UIA error response per Matrix spec
+                return Ok(Json(json!({
+                    "flows": uia_error.flows,
+                    "params": uia_error.params,
+                    "session": uia_error.session,
+                    "completed": uia_error.completed,
+                    "error": uia_error.error,
+                    "errcode": uia_error.errcode
+                })));
+            }
+        }
+    } else {
+        // No auth data provided - start UIA flow per Matrix spec
+        info!("No UIA auth provided for 3PID addition, starting UIA flow");
+
+        // Use centralized UIA service from AppState
+        let uia_service = &state.uia_service;
+
+        // Define required authentication flows for 3PID operations
+        let flows = vec![
+            UiaFlow {
+                stages: vec!["m.login.password".to_string()]
+            },
+            UiaFlow {
+                stages: vec![
+                    "m.login.recaptcha".to_string(),
+                    "m.login.password".to_string()
+                ]
+            },
+        ];
+
+        // Start UIA session
+        let session = uia_service.start_session(
+            Some(&token_info.user_id),
+            None, // device_id not required for 3PID operations
+            flows.clone(),
+            std::collections::HashMap::new(),
+        ).await.map_err(|e| {
+            error!("Failed to start UIA session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Return UIA challenge per Matrix spec
+        return Ok(Json(json!({
+            "flows": flows,
+            "params": {},
+            "session": session.session_id,
+            "completed": [],
+            "error": "User Interactive Authentication required",
+            "errcode": "M_FORBIDDEN"
+        })));
     }
 
     // Validate session and get verified 3PID

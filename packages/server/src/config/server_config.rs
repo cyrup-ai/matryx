@@ -1,4 +1,8 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use crate::middleware::TransactionConfig;
+use crate::auth::captcha::CaptchaConfig;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::OnceLock;
@@ -128,6 +132,7 @@ pub struct ServerConfig {
     pub transaction_config: TransactionConfig,
     pub tls_config: TlsConfig,
     pub rate_limiting: RateLimitConfig,
+    pub captcha: CaptchaConfig,
 }
 
 impl ServerConfig {
@@ -227,6 +232,7 @@ impl ServerConfig {
                 transaction_config: TransactionConfig::from_env(),
                 tls_config,
                 rate_limiting: RateLimitConfig::from_env(),
+                captcha: CaptchaConfig::from_env(),
             };
 
             // Enhanced validation

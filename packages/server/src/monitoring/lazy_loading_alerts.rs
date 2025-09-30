@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 use crate::metrics::lazy_loading_metrics::LazyLoadingMetrics;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

@@ -108,7 +108,7 @@ impl KeyManagementService {
 
         // Generate new Ed25519 keypair
         let mut secret_bytes = [0u8; 32];
-        getrandom::getrandom(&mut secret_bytes).expect("Failed to generate random bytes");
+        getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
         let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
 

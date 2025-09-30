@@ -7,12 +7,12 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     _matrix::client::v3::devices::{ClientDeviceInfo, TrustLevel},
     AppState,
-    auth::{MatrixAuth, extract_matrix_auth},
+    auth::{MatrixAuth, extract_matrix_auth, uia::{UiaAuth, UiaFlow}},
 };
 use matryx_surrealdb::repository::{
     RepositoryError,
@@ -80,17 +80,76 @@ pub async fn delete(
         },
     };
 
-    // Handle User-Interactive Authentication if provided
-    // According to Matrix spec, device deletion may require additional authentication
+    // Handle User-Interactive Authentication per Matrix specification
+    // Device deletion is a sensitive operation that requires proper authentication
     if let Some(auth_data) = request.auth {
-        info!("Processing additional authentication data for device deletion");
-        // TODO: Implement proper UIA validation based on auth_data
-        // This should validate the authentication method (password, etc.)
-        // For now, we accept any auth data as valid additional verification
-        debug!("Additional auth provided: {:?}", auth_data);
+        info!("Processing UIA authentication for device deletion");
+
+        // Parse auth data as UIA authentication
+        let uia_auth: UiaAuth = serde_json::from_value(auth_data)
+            .map_err(|e| {
+                error!("Failed to parse UIA auth data for device deletion: {:?}", e);
+                StatusCode::BAD_REQUEST
+            })?;
+
+        // Use centralized UIA service from AppState
+        let uia_service = &state.uia_service;
+
+        // Validate the authentication
+        let session_id = uia_auth.session.clone().unwrap_or_default();
+        match uia_service.process_auth(&session_id, uia_auth).await {
+            Ok(_) => {
+                info!("UIA authentication successful for device deletion");
+                // Authentication passed, continue with device deletion
+            },
+            Err(uia_error) => {
+                warn!("UIA authentication failed for device deletion: {:?}", uia_error);
+                // Return UIA error response per Matrix spec
+                return Ok(Json(json!({
+                    "flows": uia_error.flows,
+                    "params": uia_error.params,
+                    "session": uia_error.session,
+                    "completed": uia_error.completed,
+                    "error": uia_error.error,
+                    "errcode": uia_error.errcode
+                })));
+            }
+        }
     } else {
-        // Matrix spec allows device deletion without UIA in some implementations
-        info!("No additional authentication provided for device deletion");
+        // No auth data provided - start UIA flow per Matrix spec
+        // Device deletion is sensitive and requires authentication
+        info!("No UIA auth provided for device deletion, starting UIA flow");
+
+        // Use centralized UIA service from AppState
+        let uia_service = &state.uia_service;
+
+        // Define required authentication flows for device deletion
+        let flows = vec![
+            UiaFlow {
+                stages: vec!["m.login.password".to_string()]
+            },
+        ];
+
+        // Start UIA session
+        let session = uia_service.start_session(
+            Some(&user_id),
+            Some(&device_id), // device_id relevant for device operations
+            flows.clone(),
+            std::collections::HashMap::new(),
+        ).await.map_err(|e| {
+            error!("Failed to start UIA session for device deletion: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Return UIA challenge per Matrix spec
+        return Ok(Json(json!({
+            "flows": flows,
+            "params": {},
+            "session": session.session_id,
+            "completed": [],
+            "error": "User Interactive Authentication required for device deletion",
+            "errcode": "M_FORBIDDEN"
+        })));
     }
 
     info!(

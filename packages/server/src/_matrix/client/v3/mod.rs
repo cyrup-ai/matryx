@@ -15,6 +15,7 @@ pub mod knock;
 pub mod login;
 pub mod logout;
 pub mod notifications;
+pub mod oauth2_register;
 pub mod presence;
 pub mod profile;
 pub mod public_rooms;

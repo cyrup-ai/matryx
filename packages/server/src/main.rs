@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, State, Request},
     http::{HeaderMap, StatusCode},
-    middleware as axum_middleware,
+    middleware::{self as axum_middleware, Next},
+    response::Response,
     routing::{delete, get, post, put},
 };
 use axum_extra::{headers, TypedHeader};
@@ -40,8 +41,7 @@ mod utils;
 
 use crate::auth::{
     MatrixSessionService,
-
-    middleware::require_auth_middleware,
+    middleware::{auth_middleware, require_auth_middleware},
 };
 use crate::federation::dns_resolver::MatrixDnsResolver;
 use crate::federation::well_known_client::WellKnownClient;
@@ -254,9 +254,11 @@ fn create_router(
         // Apply middleware layers as specified in task
         .layer(create_cors_layer())
         .layer(CookieManagerLayer::new()) // Add cookie support
-        .layer(axum_middleware::from_fn_with_state(rate_limit_service, rate_limit_middleware))
-        .layer(axum_middleware::from_fn_with_state(transaction_service, transaction_id_middleware))
-        .layer(axum_middleware::from_fn(method_not_allowed_middleware))
+        // Add authentication extraction middleware globally
+        .layer(axum::middleware::from_fn_with_state(app_state.clone(), auth_middleware_wrapper))
+        .layer(axum::middleware::from_fn_with_state(rate_limit_service, rate_limit_middleware))
+        .layer(axum::middleware::from_fn_with_state(transaction_service, transaction_id_middleware))
+        .layer(axum::middleware::from_fn(method_not_allowed_middleware))
         .fallback(handler_404)
 }
 
@@ -270,8 +272,9 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v3/login", get(_matrix::client::v3::login::get).post(_matrix::client::v3::login::post))
         .route("/oauth2/authorize", get(oauth2_authorize_wrapper))
         .route("/oauth2/token", post(oauth2_token_wrapper))
-        .route("/v3/logout", post(_matrix::client::v3::logout::post))
-        .route("/v3/logout/soft", post(_matrix::client::v3::logout::post_soft_logout))
+        .route("/v3/oauth2/register", post(_matrix::client::v3::oauth2_register::post))
+        .route("/v3/logout", post(_matrix::client::v3::logout::handlers::post_logout))
+        .route("/v3/logout/soft", post(_matrix::client::v3::logout::handlers::post_soft_logout))
         .route("/v3/logout/all", post(_matrix::client::v3::logout::all::post))
         .route("/v3/register", post(_matrix::client::v3::register::post))
         .route("/v3/register/email/requestToken", post(_matrix::client::v3::account::threepid_3pid::request_3pid_token))
@@ -343,8 +346,10 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v3/rooms/{room_id}/state/{event_type}", get(_matrix::client::v3::rooms::by_room_id::state::by_event_type::handlers::get))
         .route("/v3/rooms/{room_id}/state/{event_type}/{state_key}", get(_matrix::client::v3::rooms::by_room_id::state::by_event_type::by_state_key::get))
         .route("/v3/sync", get(_matrix::client::v3::sync::get))
+        .route("/v3/sync/live", get(_matrix::client::v3::sync::streaming::filter_streams::get_with_live_filters))
         // WebSocket sync endpoint removed - not in Matrix specification
         // Matrix uses regular HTTP long-polling sync via GET /v3/sync
+        // Enhanced live filtering available via GET /v3/sync/live
         .route("/v3/thirdparty/location", get(_matrix::client::v3::thirdparty::location::get))
         .route("/v3/thirdparty/location/{alias}", get(_matrix::client::v3::thirdparty::location::by_alias::get))
         .route("/v3/thirdparty/location/{protocol}", get(_matrix::client::v3::thirdparty::location::by_protocol::get))
@@ -628,9 +633,9 @@ async fn handler_405() -> impl axum::response::IntoResponse {
 }
 
 async fn method_not_allowed_middleware(
-    request: axum::http::Request<axum::body::Body>,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
+    request: Request,
+    next: Next,
+) -> Response {
     let response = next.run(request).await;
     
     // If the response is 405 Method Not Allowed, convert to Matrix format
@@ -686,4 +691,13 @@ async fn federation_content_type_middleware(
     );
     
     response
+}
+
+/// Wrapper function for auth_middleware to ensure proper Axum compatibility
+async fn auth_middleware_wrapper(
+    State(app_state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    auth_middleware(State(app_state), request, next).await
 }

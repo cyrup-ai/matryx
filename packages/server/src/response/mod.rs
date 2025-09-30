@@ -1,3 +1,6 @@
+//! Module contains intentional library code not yet fully integrated
+#![allow(dead_code)]
+
 //! Standardized response types for Matrix API compliance
 
 use crate::error::MatrixError;

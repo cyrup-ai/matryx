@@ -5,6 +5,7 @@ pub mod matrix_errors;
 pub use matrix_errors::MatrixError;
 
 /// Helper function to create standardized Matrix error responses
+#[allow(dead_code)] // Utility function for Matrix error responses
 pub fn matrix_error_response(error: MatrixError) -> impl axum::response::IntoResponse {
     error
 }
