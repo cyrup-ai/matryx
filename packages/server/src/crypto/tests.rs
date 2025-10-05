@@ -1,11 +1,6 @@
 #[cfg(test)]
 mod crypto_tests {
-    use crate::crypto::{
-
-        CryptoError,
-        MatryxCryptoProvider,
-
-    };
+    use crate::crypto::{CryptoError, MatryxCryptoProvider};
     use serde_json::json;
     use std::collections::HashMap;
     use vodozemac::megolm::GroupSession;
@@ -211,7 +206,7 @@ mod crypto_tests {
             vodozemac::olm::OlmMessage::PreKey(msg) => msg,
             vodozemac::olm::OlmMessage::Normal(_) => panic!("First message should be PreKey"),
         };
-        
+
         let mut bob_session_result = bob_account
             .create_inbound_session(alice_account.curve25519_key(), pre_key_message)
             .unwrap();

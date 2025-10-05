@@ -72,11 +72,8 @@ impl CaptchaConfig {
         let verify_url = match provider.as_str() {
             "hcaptcha" => "https://hcaptcha.com/siteverify".to_string(),
             "recaptcha" => "https://www.google.com/recaptcha/api/siteverify".to_string(),
-            _ => {
-                std::env::var("CAPTCHA_VERIFY_URL").unwrap_or_else(|_| {
-                    "https://www.google.com/recaptcha/api/siteverify".to_string()
-                })
-            },
+            _ => std::env::var("CAPTCHA_VERIFY_URL")
+                .unwrap_or_else(|_| "https://www.google.com/recaptcha/api/siteverify".to_string()),
         };
 
         Self {
@@ -313,10 +310,8 @@ impl<C: Connection> CaptchaService<C> {
         })?;
 
         // For reCAPTCHA v3, check the score and action
-        let mut success = recaptcha_response.success &&
-            recaptcha_response
-                .score
-                .is_none_or(|score| score >= self.config.min_score);
+        let mut success = recaptcha_response.success
+            && recaptcha_response.score.is_none_or(|score| score >= self.config.min_score);
 
         // Validate action field for reCAPTCHA v3 (should match expected action like "login" or "register")
         if let Some(action) = &recaptcha_response.action {
@@ -414,11 +409,11 @@ impl<C: Connection> CaptchaService<C> {
 
         // Operation-specific thresholds for suspicious activity detection
         let threshold = match operation {
-            "login" => 5,        // Allow more login attempts
-            "register" => 3,     // Stricter on registration
+            "login" => 5,          // Allow more login attempts
+            "register" => 3,       // Stricter on registration
             "password_reset" => 2, // Very strict on password resets
-            "room_join" => 10,   // More lenient on room operations
-            _ => 3,              // Default threshold
+            "room_join" => 10,     // More lenient on room operations
+            _ => 3,                // Default threshold
         };
 
         info!(

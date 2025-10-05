@@ -38,10 +38,10 @@ pub async fn get() -> Result<Json<Value>, StatusCode> {
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Build admins array from support configuration
-    let mut admins = Vec::new();
+    // Build contacts array from support configuration
+    let mut contacts = Vec::new();
     for contact in support_config.get_support_contacts() {
-        admins.push(json!({
+        contacts.push(json!({
             "matrix_id": contact.matrix_id,
             "email_address": contact.email_address,
             "role": contact.role
@@ -50,7 +50,7 @@ pub async fn get() -> Result<Json<Value>, StatusCode> {
 
     // Build response object
     let mut support_info = json!({
-        "admins": admins
+        "contacts": contacts
     });
 
     // Add support page if enabled

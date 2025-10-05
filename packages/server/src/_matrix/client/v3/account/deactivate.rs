@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{error, info};
 
-use crate::auth::uia::{UiaAuthRequest, UiaAuthResponse};
 use crate::AppState;
+use crate::auth::uia::{UiaAuthRequest, UiaAuthResponse};
 use matryx_surrealdb::repository::{ProfileManagementService, UserRepository, uia::UiaFlow};
 
 #[derive(Deserialize)]
@@ -57,9 +57,9 @@ pub async fn deactivate_account(
             // UIA required or failed - return UIA challenge
             return Ok(Json(DeactivateAccountResponse {
                 id_server_unbind_result: serde_json::to_string(&uia_response)
-                    .unwrap_or_else(|_| "uia_required".to_string())
+                    .unwrap_or_else(|_| "uia_required".to_string()),
             }));
-        }
+        },
     }
 
     let profile_service = ProfileManagementService::new(state.db.clone());
@@ -72,12 +72,10 @@ pub async fn deactivate_account(
         Err(e) => {
             error!("Failed to deactivate account {}: {}", user_id, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     }
 
-    Ok(Json(DeactivateAccountResponse { 
-        id_server_unbind_result: "success".to_string() 
-    }))
+    Ok(Json(DeactivateAccountResponse { id_server_unbind_result: "success".to_string() }))
 }
 
 /// Handle UIA flow for account deactivation according to Matrix specification
@@ -87,11 +85,7 @@ async fn handle_deactivation_uia(
     uia_request: &UiaAuthRequest,
 ) -> Result<(), UiaAuthResponse> {
     // Define required authentication flows for account deactivation
-    let flows = vec![
-        UiaFlow {
-            stages: vec!["m.login.password".to_string()],
-        }
-    ];
+    let flows = vec![UiaFlow { stages: vec!["m.login.password".to_string()] }];
 
     let mut params = HashMap::new();
     params.insert("user_id".to_string(), serde_json::Value::String(user_id.to_string()));
@@ -99,12 +93,16 @@ async fn handle_deactivation_uia(
     // Check if this is the initial request (no auth provided)
     if uia_request.auth.is_none() && uia_request.session.is_none() {
         // Start new UIA session
-        match state.uia_service.start_session(
-            Some(user_id), 
-            None, // device_id not required for account deactivation
-            flows.clone(),
-            params.clone(),
-        ).await {
+        match state
+            .uia_service
+            .start_session(
+                Some(user_id),
+                None, // device_id not required for account deactivation
+                flows.clone(),
+                params.clone(),
+            )
+            .await
+        {
             Ok(session) => {
                 return Err(UiaAuthResponse {
                     flows,
@@ -125,35 +123,35 @@ async fn handle_deactivation_uia(
                     error: Some("Failed to start authentication".to_string()),
                     errcode: Some("M_UNKNOWN".to_string()),
                 });
-            }
+            },
         }
     }
 
     // Handle authentication attempt
     if let Some(auth) = &uia_request.auth {
-        let session_id = uia_request.session.as_ref()
-            .ok_or_else(|| UiaAuthResponse {
-                flows: flows.clone(),
-                params: params.clone(),
-                session: "".to_string(),
-                completed: None,
-                error: Some("Session required".to_string()),
-                errcode: Some("M_MISSING_PARAM".to_string()),
-            })?;
+        let session_id = uia_request.session.as_ref().ok_or_else(|| UiaAuthResponse {
+            flows: flows.clone(),
+            params: params.clone(),
+            session: "".to_string(),
+            completed: None,
+            error: Some("Session required".to_string()),
+            errcode: Some("M_MISSING_PARAM".to_string()),
+        })?;
 
         // Validate authentication based on type
         match auth.auth_type.as_str() {
             "m.login.password" => {
                 // Extract password from auth data
-                let password = auth.auth_data.get("password")
-                    .and_then(|p| p.as_str())
-                    .ok_or_else(|| UiaAuthResponse {
-                        flows: flows.clone(),
-                        params: params.clone(),
-                        session: session_id.clone(),
-                        completed: None,
-                        error: Some("Password required".to_string()),
-                        errcode: Some("M_MISSING_PARAM".to_string()),
+                let password =
+                    auth.auth_data.get("password").and_then(|p| p.as_str()).ok_or_else(|| {
+                        UiaAuthResponse {
+                            flows: flows.clone(),
+                            params: params.clone(),
+                            session: session_id.clone(),
+                            completed: None,
+                            error: Some("Password required".to_string()),
+                            errcode: Some("M_MISSING_PARAM".to_string()),
+                        }
                     })?;
 
                 // Get user from database to verify password
@@ -181,21 +179,25 @@ async fn handle_deactivation_uia(
                             error: Some("Authentication failed".to_string()),
                             errcode: Some("M_UNKNOWN".to_string()),
                         });
-                    }
+                    },
                 };
 
                 // Validate password using bcrypt
-                let password_valid = verify(password, &user.password_hash).map_err(|bcrypt_error| {
-                    error!("Bcrypt verification error during UIA for {}: {:?}", user_id, bcrypt_error);
-                    UiaAuthResponse {
-                        flows: flows.clone(),
-                        params: params.clone(),
-                        session: session_id.clone(),
-                        completed: None,
-                        error: Some("Authentication failed".to_string()),
-                        errcode: Some("M_UNKNOWN".to_string()),
-                    }
-                })?;
+                let password_valid =
+                    verify(password, &user.password_hash).map_err(|bcrypt_error| {
+                        error!(
+                            "Bcrypt verification error during UIA for {}: {:?}",
+                            user_id, bcrypt_error
+                        );
+                        UiaAuthResponse {
+                            flows: flows.clone(),
+                            params: params.clone(),
+                            session: session_id.clone(),
+                            completed: None,
+                            error: Some("Authentication failed".to_string()),
+                            errcode: Some("M_UNKNOWN".to_string()),
+                        }
+                    })?;
 
                 if password_valid {
                     // Password validated - complete UIA flow
@@ -221,7 +223,7 @@ async fn handle_deactivation_uia(
                     error: Some("Unsupported authentication type".to_string()),
                     errcode: Some("M_UNKNOWN".to_string()),
                 });
-            }
+            },
         }
     }
 

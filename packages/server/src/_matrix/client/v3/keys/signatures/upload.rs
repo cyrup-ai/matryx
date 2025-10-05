@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 
-
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -59,12 +58,15 @@ pub async fn post(
                     let device_id = parts[1].to_string();
 
                     // Update device key signatures using repository
-                    match keys_repo.update_device_key_signatures(
-                        &target_user_id,
-                        &device_id,
-                        &signing_user_id,
-                        &signatures,
-                    ).await {
+                    match keys_repo
+                        .update_device_key_signatures(
+                            &target_user_id,
+                            &device_id,
+                            &signing_user_id,
+                            &signatures,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             info!(
                                 "Device key signature added: signer={} target_user={} device={}",
@@ -101,12 +103,15 @@ pub async fn post(
 
                 if key_type != "unknown" {
                     // Update cross-signing key signatures using repository
-                    match keys_repo.update_cross_signing_key_signatures(
-                        &target_user_id,
-                        key_type,
-                        &signing_user_id,
-                        &signatures,
-                    ).await {
+                    match keys_repo
+                        .update_cross_signing_key_signatures(
+                            &target_user_id,
+                            key_type,
+                            &signing_user_id,
+                            &signatures,
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             info!(
                                 "Cross-signing key signature added: signer={} target_user={} key_type={}",

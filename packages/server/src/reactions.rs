@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 use matryx_surrealdb::repository::{
-    reactions::{ReactionsRepository, ReactionAggregation, ReactionSummary},
-    event::EventRepository,
     error::RepositoryError,
+    event::EventRepository,
+    reactions::{ReactionAggregation, ReactionSummary, ReactionsRepository},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -74,12 +74,19 @@ impl ReactionManager {
             None => {
                 warn!("Target event {} not found for reaction", target_event_id);
                 return Err(ReactionError::TargetEventNotFound);
-            }
+            },
         }
 
         // Check for duplicate reaction
-        if self.reactions_repo.has_user_reacted(sender, target_event_id, reaction_key).await? {
-            warn!("User {} already reacted with {} to event {}", sender, reaction_key, target_event_id);
+        if self
+            .reactions_repo
+            .has_user_reacted(sender, target_event_id, reaction_key)
+            .await?
+        {
+            warn!(
+                "User {} already reacted with {} to event {}",
+                sender, reaction_key, target_event_id
+            );
             return Err(ReactionError::DuplicateReaction);
         }
 
@@ -125,9 +132,7 @@ impl ReactionManager {
         &self,
         target_event_id: &str,
     ) -> Result<ReactionSummary, ReactionError> {
-        let summary = self.reactions_repo
-            .get_reaction_summary(target_event_id)
-            .await?;
+        let summary = self.reactions_repo.get_reaction_summary(target_event_id).await?;
 
         Ok(summary)
     }
@@ -138,24 +143,17 @@ impl ReactionManager {
         user_id: &str,
         room_id: Option<&str>,
     ) -> Result<Vec<Value>, ReactionError> {
-        let reactions = self.reactions_repo
-            .get_user_reactions(user_id, room_id)
-            .await?;
+        let reactions = self.reactions_repo.get_user_reactions(user_id, room_id).await?;
 
         Ok(reactions)
     }
 
     /// Get reaction statistics for a room using HashMap for aggregation
-    pub async fn get_reaction_stats(
-        &self,
-        room_id: &str,
-    ) -> Result<ReactionStats, ReactionError> {
+    pub async fn get_reaction_stats(&self, room_id: &str) -> Result<ReactionStats, ReactionError> {
         info!("Calculating reaction statistics for room {}", room_id);
-        
+
         // Get all reactions for the room and aggregate them
-        let reactions = self.reactions_repo
-            .get_room_reactions(room_id)
-            .await?;
+        let reactions = self.reactions_repo.get_room_reactions(room_id).await?;
 
         let mut reaction_counts: HashMap<String, u64> = HashMap::new();
         let mut users_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -165,7 +163,7 @@ impl ReactionManager {
         for reaction in reactions {
             if let (Some(key), Some(sender)) = (
                 reaction.get("reaction_key").and_then(|v| v.as_str()),
-                reaction.get("sender").and_then(|v| v.as_str())
+                reaction.get("sender").and_then(|v| v.as_str()),
             ) {
                 *reaction_counts.entry(key.to_string()).or_insert(0) += 1;
                 users_set.insert(sender.to_string());
@@ -179,10 +177,7 @@ impl ReactionManager {
         // Keep only top 10 reactions for the response
         let mut sorted_reactions: Vec<_> = reaction_counts.into_iter().collect();
         sorted_reactions.sort_by(|a, b| b.1.cmp(&a.1));
-        let top_reactions: HashMap<String, u64> = sorted_reactions
-            .into_iter()
-            .take(10)
-            .collect();
+        let top_reactions: HashMap<String, u64> = sorted_reactions.into_iter().take(10).collect();
 
         let stats = ReactionStats {
             total_reactions,
@@ -191,8 +186,10 @@ impl ReactionManager {
             active_users,
         };
 
-        info!("Room {} has {} total reactions, {} unique reactions, {} active users", 
-              room_id, stats.total_reactions, stats.unique_reactions, stats.active_users);
+        info!(
+            "Room {} has {} total reactions, {} unique reactions, {} active users",
+            room_id, stats.total_reactions, stats.unique_reactions, stats.active_users
+        );
 
         Ok(stats)
     }
@@ -203,10 +200,8 @@ impl ReactionManager {
         target_event_id: &str,
     ) -> Result<Vec<ReactionAggregation>, ReactionError> {
         info!("Getting reaction aggregation for event {}", target_event_id);
-        
-        let aggregations = self.reactions_repo
-            .get_reaction_aggregations(target_event_id)
-            .await?;
+
+        let aggregations = self.reactions_repo.get_reaction_aggregations(target_event_id).await?;
 
         Ok(aggregations)
     }

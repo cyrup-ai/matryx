@@ -3,8 +3,11 @@
 //! A comprehensive Matrix client implementation with SurrealDB integration
 //! and real-time WebSocket support for live queries and sync.
 
+#![deny(clippy::unwrap_used)]
+
 pub mod _matrix;
 pub mod device;
+pub mod http_client;
 pub mod realtime;
 pub mod repositories;
 pub mod sync;
@@ -34,7 +37,8 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            homeserver_url: Url::parse("https://matrix.example.com").unwrap(),
+            homeserver_url: Url::parse("https://matrix.example.com")
+                .expect("Default homeserver URL should be valid"),
             timeout_secs: 30,
             user_agent: "Matryx/0.1.0".to_string(),
             sync_timeout_secs: 30,
@@ -449,6 +453,22 @@ pub struct TimelineUpdates {
 // Re-export commonly used types from matryx_entity
 pub use matryx_entity::{Credentials, Event, MembershipState, Room, Session, User};
 
+// Re-export static client module
+pub mod r#static {
+    pub mod client {
+        pub use crate::_matrix::static_::client::*;
+    }
+}
+
+// Re-export app service module
+pub mod app {
+    pub mod v1 {
+        pub mod location {
+            pub use crate::_matrix::app::v1::location::*;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +487,7 @@ mod tests {
         let client = MatrixClient::new(config);
         assert!(client.is_ok());
 
-        let client = client.unwrap();
+        let client = client.expect("Failed to create Matrix client");
         assert!(!client.is_authenticated());
         assert!(client.user_id().is_none());
         assert!(client.access_token().is_none());

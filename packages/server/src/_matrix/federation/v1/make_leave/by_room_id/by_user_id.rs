@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::state::AppState;
 use crate::federation::membership_federation::validate_federation_leave_allowed;
+use crate::state::AppState;
 use matryx_entity::types::MembershipState;
 use matryx_surrealdb::repository::{MembershipRepository, RoomRepository};
 

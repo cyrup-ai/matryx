@@ -7,9 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-
 use crate::AppState;
-use matryx_surrealdb::repository::{ProfileManagementService, AccountDataRepository};
+use matryx_surrealdb::repository::{AccountDataRepository, ProfileManagementService};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AccountData {

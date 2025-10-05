@@ -12,7 +12,7 @@ use tracing::{error, info};
 
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
-use matryx_surrealdb::repository::{UserRepository, DeviceRepository, SessionRepository};
+use matryx_surrealdb::repository::{DeviceRepository, SessionRepository, UserRepository};
 
 #[derive(Serialize)]
 pub struct WhoisResponse {
@@ -50,12 +50,11 @@ pub async fn get(
     );
 
     // Check if user is admin using AuthenticatedUser method
-    let is_admin = auth_user.is_admin(&state).await
-        .map_err(|e| {
-            error!("Failed to check admin status for user {}: {}", auth_user.user_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    
+    let is_admin = auth_user.is_admin(&state).await.map_err(|e| {
+        error!("Failed to check admin status for user {}: {}", auth_user.user_id, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     if !is_admin {
         error!("User {} attempted admin whois without admin privileges", auth_user.user_id);
         return Err(StatusCode::FORBIDDEN);
@@ -74,8 +73,6 @@ pub async fn get(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         },
     };
-
-
 
     // Check if target user exists using repository
     let user_exists = match user_repo.user_exists_admin(&target_user_id).await {
@@ -120,20 +117,21 @@ pub async fn get(
     if let Ok(tokens) = session_repo.get_user_access_tokens_for_admin(&target_user_id).await {
         for (device_id, last_used_ip, last_used_ts) in tokens {
             if let Some(device_info) = device_info_map.get_mut(&device_id)
-                && let (Some(ip), Some(ts)) = (last_used_ip, last_used_ts) {
-                    // Add or update connection info
-                    if let Some(session) = device_info.sessions.get_mut(0) {
-                        // Check if we already have this IP, if not add it
-                        let has_ip = session.connections.iter().any(|c| c.ip == ip);
-                        if !has_ip {
-                            session.connections.push(ConnectionInfo {
-                                ip,
-                                last_seen: ts as u64,
-                                user_agent: None,
-                            });
-                        }
+                && let (Some(ip), Some(ts)) = (last_used_ip, last_used_ts)
+            {
+                // Add or update connection info
+                if let Some(session) = device_info.sessions.get_mut(0) {
+                    // Check if we already have this IP, if not add it
+                    let has_ip = session.connections.iter().any(|c| c.ip == ip);
+                    if !has_ip {
+                        session.connections.push(ConnectionInfo {
+                            ip,
+                            last_seen: ts as u64,
+                            user_agent: None,
+                        });
                     }
                 }
+            }
         }
     }
 

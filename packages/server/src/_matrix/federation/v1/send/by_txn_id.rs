@@ -15,14 +15,8 @@ use crate::federation::client::FederationClient;
 use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::state::AppState;
 use matryx_surrealdb::repository::{
-    DeviceRepository,
-    EventRepository,
-    FederationRepository,
-    KeyServerRepository,
-    MembershipRepository,
-    RoomRepository,
-    TransactionRepository,
-    UserRepository,
+    DeviceRepository, EventRepository, FederationRepository, KeyServerRepository,
+    MembershipRepository, RoomRepository, TransactionRepository, UserRepository,
 };
 
 /// Matrix X-Matrix authentication header parsed structure with comprehensive validation
@@ -131,7 +125,8 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
 
     // Validate destination if present
     if let Some(dest) = &destination
-        && !is_valid_server_name(dest) {
+        && !is_valid_server_name(dest)
+    {
         warn!("Invalid destination server name format: {}", dest);
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -248,7 +243,6 @@ pub async fn verify_server_signature(
 ) -> Result<(), MatrixAuthError> {
     use base64::{Engine as _, engine::general_purpose};
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-
 
     debug!(
         "Verifying server signature from {} using key {}",
@@ -983,26 +977,30 @@ async fn process_device_list_edu(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::federation::device_edu_handler::DeviceListUpdateEDU;
     use crate::federation::device_management::DeviceListUpdate;
-    
+
     // Parse EDU content into DeviceListUpdate
     let device_update: DeviceListUpdate = serde_json::from_value(content.clone())
         .map_err(|e| format!("Failed to parse device list EDU: {}", e))?;
-    
+
     // Validate user is from origin server
     if !device_update.user_id.ends_with(&format!(":{}", origin_server)) {
-        warn!("Device list EDU user {} not from origin server {}", 
-              device_update.user_id, origin_server);
-        return Err(format!("Invalid user origin for device list EDU").into());
+        warn!(
+            "Device list EDU user {} not from origin server {}",
+            device_update.user_id, origin_server
+        );
+        return Err("Invalid user origin for device list EDU".to_string().into());
     }
-    
+
     // Create EDU wrapper
     let edu = DeviceListUpdateEDU {
         edu_type: "m.device_list_update".to_string(),
         content: device_update,
     };
-    
+
     // Process through DeviceEDUHandler
-    state.device_edu_handler.handle_device_list_update(edu)
+    state
+        .device_edu_handler
+        .handle_device_list_update(edu)
         .await
         .map_err(|e| format!("Failed to handle device list update: {}", e))?;
 
@@ -1019,12 +1017,12 @@ async fn process_signing_key_update_edu(
     origin_server: &str,
     content: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::federation::device_edu_handler::{SigningKeyUpdateEDU, SigningKeyUpdateContent};
-    
+    use crate::federation::device_edu_handler::{SigningKeyUpdateContent, SigningKeyUpdateEDU};
+
     // Parse EDU content into SigningKeyUpdateContent
     let signing_update: SigningKeyUpdateContent = serde_json::from_value(content.clone())
         .map_err(|e| format!("Failed to parse signing key EDU: {}", e))?;
-    
+
     // Validate user is from origin server
     if !signing_update.user_id.ends_with(&format!(":{}", origin_server)) {
         return Err(format!(
@@ -1033,15 +1031,17 @@ async fn process_signing_key_update_edu(
         )
         .into());
     }
-    
+
     // Create EDU wrapper
     let edu = SigningKeyUpdateEDU {
         edu_type: "m.signing_key_update".to_string(),
         content: signing_update,
     };
-    
+
     // Process through DeviceEDUHandler
-    state.device_edu_handler.handle_signing_key_update(edu)
+    state
+        .device_edu_handler
+        .handle_signing_key_update(edu)
         .await
         .map_err(|e| format!("Failed to handle signing key update: {}", e))?;
 
@@ -1062,7 +1062,10 @@ async fn process_cross_signing_key(
         .and_then(|v| v.as_object())
         .ok_or(format!("Missing or invalid keys in {} key", key_type))?;
 
-    let signatures = key_data.get("signatures").and_then(|v| v.as_object()).cloned()
+    let signatures = key_data
+        .get("signatures")
+        .and_then(|v| v.as_object())
+        .cloned()
         .map(|s| serde_json::to_value(s).unwrap_or_default());
 
     let usage = key_data
@@ -1083,16 +1086,16 @@ async fn process_cross_signing_key(
         },
         "self_signing" => {
             if !usage.contains(&"self_signing".to_string()) {
-                return Err(
-                    "Self-signing key must have 'self_signing' in usage array".to_string().into()
-                );
+                return Err("Self-signing key must have 'self_signing' in usage array"
+                    .to_string()
+                    .into());
             }
         },
         "user_signing" => {
             if !usage.contains(&"user_signing".to_string()) {
-                return Err(
-                    "User-signing key must have 'user_signing' in usage array".to_string().into()
-                );
+                return Err("User-signing key must have 'user_signing' in usage array"
+                    .to_string()
+                    .into());
             }
         },
         _ => return Err(format!("Unknown key type: {}", key_type).into()),
@@ -1101,12 +1104,7 @@ async fn process_cross_signing_key(
     // Store or update the cross-signing key
     let federation_repo = FederationRepository::new(state.db.clone());
     federation_repo
-        .process_signing_key_update_edu(
-            user_id,
-            key_type,
-            serde_json::to_value(keys)?,
-            signatures,
-        )
+        .process_signing_key_update_edu(user_id, key_type, serde_json::to_value(keys)?, signatures)
         .await
         .map_err(|e| {
             format!("Failed to store {} cross-signing key for {}: {}", key_type, user_id, e)
@@ -1235,7 +1233,7 @@ async fn process_direct_to_device_edu(
                             content: message_content.clone(),
                             target_user_id: user_id,
                             target_device_id: Some(device_id),
-                        }
+                        },
                     )
                     .await?;
             }
@@ -1245,5 +1243,3 @@ async fn process_direct_to_device_edu(
     debug!("Successfully processed direct-to-device EDU: {}", message_id);
     Ok(())
 }
-
-

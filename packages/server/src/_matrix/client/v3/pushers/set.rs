@@ -96,7 +96,7 @@ pub async fn post(
         // append=false (default): replace all pushers for this app_id with this pusher
         // append=true: add this pusher alongside existing ones
         let append_mode = request.append.unwrap_or(false);
-        
+
         if !append_mode {
             // Replace mode: delete existing pushers for this app_id first
             if let Err(e) = push_repo.delete_pushers_by_app_id(&user_id, &request.app_id).await {
@@ -122,14 +122,7 @@ pub async fn post(
             data: &data_json,
         };
 
-        if let Err(e) = push_repo
-            .upsert_pusher(
-                &user_id,
-                &request.pusher_id,
-                config,
-            )
-            .await
-        {
+        if let Err(e) = push_repo.upsert_pusher(&user_id, &request.pusher_id, config).await {
             error!("Failed to set pusher: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }

@@ -95,9 +95,10 @@ pub async fn set_avatar_url(
 
     // Validate avatar URL if provided
     if let Some(ref avatar_url) = request.avatar_url
-        && !avatar_url.is_empty() {
-            validate_avatar_url(avatar_url).map_err(|_| StatusCode::BAD_REQUEST)?;
-        }
+        && !avatar_url.is_empty()
+    {
+        validate_avatar_url(avatar_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+    }
 
     let profile_service = ProfileManagementService::new(state.db.clone());
 

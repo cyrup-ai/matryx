@@ -109,13 +109,11 @@ impl ServerNoticesManager {
             "monthly_active_user" => {
                 UsageLimitReachedNotice::monthly_active_user_limit(admin_contact)
             },
-            _ => {
-                UsageLimitReachedNotice::new(
-                    format!("The server has exceeded a {} limit.", limit_type),
-                    limit_type.to_string(),
-                    admin_contact,
-                )
-            },
+            _ => UsageLimitReachedNotice::new(
+                format!("The server has exceeded a {} limit.", limit_type),
+                limit_type.to_string(),
+                admin_contact,
+            ),
         };
 
         let notice_content = ServerNoticeContent {

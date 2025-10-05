@@ -65,7 +65,8 @@ impl<C: Connection> RefreshTokenService<C> {
         user_id: &str,
         device_id: &str,
     ) -> Result<TokenPair, MatrixAuthError> {
-        let access_token = format!("syt_{}", Uuid::new_v4());
+        // Generate JWT access token
+        let access_token = self.session_service.create_access_token(user_id, device_id).await?;
         let refresh_token = format!("syr_{}", Uuid::new_v4());
         let now = Utc::now();
 
@@ -129,7 +130,10 @@ impl<C: Connection> RefreshTokenService<C> {
         }
 
         // Generate new tokens
-        let new_access_token = format!("syt_{}", Uuid::new_v4());
+        let new_access_token = self
+            .session_service
+            .create_access_token(&old_refresh.user_id, &old_refresh.device_id)
+            .await?;
         let new_refresh_token = format!("syr_{}", Uuid::new_v4());
         let now = Utc::now();
 

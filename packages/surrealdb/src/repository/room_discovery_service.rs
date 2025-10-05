@@ -144,11 +144,33 @@ impl RoomDiscoveryService {
         })
     }
 
-    /// Update room search index (placeholder for full-text search implementation)
+    /// Update room search index for full-text search
     pub async fn update_room_search_index(&self, room_id: &str) -> Result<(), RepositoryError> {
-        // In a full implementation, this would update search indexes
-        // For now, we'll just ensure the room directory info is up to date
-        self.update_room_directory_stats(room_id).await
+        // Update directory stats first
+        self.update_room_directory_stats(room_id).await?;
+        
+        // Get room info for search index
+        let room_info = match self.room_repo.get_room_public_info(room_id).await? {
+            Some(info) => info,
+            None => {
+                return Err(RepositoryError::NotFound {
+                    entity_type: "Room".to_string(),
+                    id: room_id.to_string(),
+                });
+            }
+        };
+        
+        // Update search index with room name and topic
+        self.public_rooms_repo.update_room_search_index(
+            room_id,
+            &room_info.name.unwrap_or_default(),
+            &room_info.topic.unwrap_or_default(),
+        ).await?;
+        
+        // Trigger directory refresh event for LiveQuery subscribers
+        self.public_rooms_repo.emit_directory_update_event(room_id).await?;
+        
+        Ok(())
     }
 }
 

@@ -167,7 +167,9 @@ impl RoomAliasRepository {
             return Ok(false);
         }
 
-        let colon_pos = alias.rfind(':').unwrap(); // Safe because we checked count above
+        let Some(colon_pos) = alias.rfind(':') else {
+            return Ok(false);
+        };
 
         // Check localpart (between # and :)
         let localpart = &alias[1..colon_pos];

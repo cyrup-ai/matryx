@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::federation::state_resolution::{StateResolutionError, StateResolver};
+use matryx_surrealdb::repository::{StateResolutionError, StateResolver};
 use crate::room::membership_errors::{MembershipError, MembershipResult};
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
@@ -117,12 +117,10 @@ impl MembershipValidator {
     fn validate_membership_state_value(&self, membership: &str) -> MembershipResult<()> {
         match membership {
             "join" | "leave" | "invite" | "ban" | "knock" => Ok(()),
-            _ => {
-                Err(MembershipError::InvalidEvent {
-                    event_id: None,
-                    reason: format!("Invalid membership state: {}", membership),
-                })
-            },
+            _ => Err(MembershipError::InvalidEvent {
+                event_id: None,
+                reason: format!("Invalid membership state: {}", membership),
+            }),
         }
     }
 
@@ -137,11 +135,9 @@ impl MembershipValidator {
         }
 
         // Must have state_key
-        let state_key = event.state_key.as_ref().ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: Some(event.event_id.clone()),
-                reason: "Membership event must have state_key".to_string(),
-            }
+        let state_key = event.state_key.as_ref().ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: Some(event.event_id.clone()),
+            reason: "Membership event must have state_key".to_string(),
         })?;
 
         // State key must be valid Matrix user ID
@@ -153,19 +149,16 @@ impl MembershipValidator {
         }
 
         // Content must be object with membership field
-        let content = event.content.as_object().ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: Some(event.event_id.clone()),
-                reason: "Membership event content must be object".to_string(),
-            }
+        let content = event.content.as_object().ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: Some(event.event_id.clone()),
+            reason: "Membership event content must be object".to_string(),
         })?;
 
-        let membership = content.get("membership").ok_or_else(|| {
-            MembershipError::InvalidEvent {
+        let membership =
+            content.get("membership").ok_or_else(|| MembershipError::InvalidEvent {
                 event_id: Some(event.event_id.clone()),
                 reason: "Membership event must have membership field".to_string(),
-            }
-        })?;
+            })?;
 
         if !membership.is_string() {
             return Err(MembershipError::InvalidEvent {
@@ -176,12 +169,13 @@ impl MembershipValidator {
 
         // Validate optional fields if present
         if let Some(reason) = content.get("reason")
-            && !reason.is_string() {
-                return Err(MembershipError::InvalidEvent {
-                    event_id: Some(event.event_id.clone()),
-                    reason: "Reason field must be string".to_string(),
-                });
-            }
+            && !reason.is_string()
+        {
+            return Err(MembershipError::InvalidEvent {
+                event_id: Some(event.event_id.clone()),
+                reason: "Reason field must be string".to_string(),
+            });
+        }
 
         debug!("Membership event format validation passed for {}", event.event_id);
         Ok(())
@@ -209,11 +203,12 @@ impl MembershipValidator {
             AND event_id != $current_event_id
             ORDER BY origin_server_ts DESC
         ";
-        
+
         // Check for events within a 5-second window for conflict detection
         let timestamp_threshold = event.origin_server_ts - 5000;
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(conflict_query)
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -221,8 +216,9 @@ impl MembershipValidator {
             .bind(("current_event_id", event.event_id.clone()))
             .await
             .map_err(|e| MembershipError::database_error("conflict detection", &e.to_string()))?;
-            
-        let conflicting_events: Vec<serde_json::Value> = result.take(0)
+
+        let conflicting_events: Vec<serde_json::Value> = result
+            .take(0)
             .map_err(|e| MembershipError::database_error("parsing conflicts", &e.to_string()))?;
 
         if !conflicting_events.is_empty() {
@@ -234,30 +230,51 @@ impl MembershipValidator {
             );
 
             // Enhanced conflict analysis using event_repo for detailed validation
+            let mut conflicting_event_objects = Vec::new();
             for conflict in &conflicting_events {
                 if let Some(event_id) = conflict.get("event_id").and_then(|id| id.as_str()) {
                     // Use event_repo to get full event details for conflict resolution
                     match self.event_repo.get_by_id(event_id).await {
                         Ok(Some(conflicting_event)) => {
-                            debug!("Analyzing conflicting event {} with auth chain validation", event_id);
-                            
+                            debug!(
+                                "Analyzing conflicting event {} with auth chain validation",
+                                event_id
+                            );
+
                             // Perform Matrix specification auth chain validation
                             self.validate_auth_chain_conflict(&conflicting_event, event).await?;
+                            conflicting_event_objects.push(conflicting_event);
                         },
                         Ok(None) => {
                             warn!("Conflicting event {} not found in event repository", event_id);
                         },
                         Err(e) => {
                             debug!("Failed to retrieve conflicting event {}: {:?}", event_id, e);
-                        }
+                        },
                     }
                 }
             }
-            
-            // If we have multiple conflicts, trigger Matrix state resolution
-            if conflicting_events.len() > 1 {
-                debug!("Multiple conflicts detected - would trigger Matrix State Resolution v2");
-                // In production, this would call the state resolver with the conflicting events
+
+            // If we have multiple conflicts, trigger Matrix State Resolution v2
+            if conflicting_event_objects.len() > 1 {
+                info!(
+                    "Multiple conflicts detected ({}) - triggering Matrix State Resolution v2",
+                    conflicting_event_objects.len()
+                );
+                
+                // Add current event to the conflict set for resolution
+                let mut all_conflicting_events = conflicting_event_objects;
+                all_conflicting_events.push(event.clone());
+                
+                // Call existing resolve_membership_conflicts method
+                let resolved_event = self
+                    .resolve_membership_conflicts(room_id, user_id, all_conflicting_events)
+                    .await?;
+                
+                info!(
+                    "State resolution completed for user {} in room {}: event {} selected",
+                    user_id, room_id, resolved_event.event_id
+                );
             }
         }
 
@@ -273,9 +290,11 @@ impl MembershipValidator {
         conflicting_event: &Event,
         current_event: &Event,
     ) -> MembershipResult<()> {
-        debug!("Validating auth chain conflict between {} and {}", 
-               conflicting_event.event_id, current_event.event_id);
-        
+        debug!(
+            "Validating auth chain conflict between {} and {}",
+            conflicting_event.event_id, current_event.event_id
+        );
+
         // Get auth events for both events using event_repo
         let conflicting_auth_events = if let Some(auth_events) = &conflicting_event.auth_events {
             let mut auth_chain = Vec::new();
@@ -287,14 +306,14 @@ impl MembershipValidator {
                     },
                     Err(e) => {
                         debug!("Failed to retrieve auth event {}: {:?}", auth_event_id, e);
-                    }
+                    },
                 }
             }
             auth_chain
         } else {
             Vec::new()
         };
-        
+
         let current_auth_events = if let Some(auth_events) = &current_event.auth_events {
             let mut auth_chain = Vec::new();
             for auth_event_id in auth_events {
@@ -305,23 +324,27 @@ impl MembershipValidator {
                     },
                     Err(e) => {
                         debug!("Failed to retrieve auth event {}: {:?}", auth_event_id, e);
-                    }
+                    },
                 }
             }
             auth_chain
         } else {
             Vec::new()
         };
-        
+
         // Compare auth chains for Matrix specification compliance
         if conflicting_auth_events.len() != current_auth_events.len() {
-            debug!("Auth chain length mismatch - conflicting: {}, current: {}", 
-                   conflicting_auth_events.len(), current_auth_events.len());
+            debug!(
+                "Auth chain length mismatch - conflicting: {}, current: {}",
+                conflicting_auth_events.len(),
+                current_auth_events.len()
+            );
         }
-        
+
         // Validate power level authorization in both auth chains
-        self.validate_power_levels_in_auth_chains(&conflicting_auth_events, &current_auth_events).await?;
-        
+        self.validate_power_levels_in_auth_chains(&conflicting_auth_events, &current_auth_events)
+            .await?;
+
         Ok(())
     }
 
@@ -333,9 +356,12 @@ impl MembershipValidator {
         conflicting_auth: &[Event],
         current_auth: &[Event],
     ) -> MembershipResult<()> {
-        debug!("Validating power levels in {} conflicting and {} current auth events", 
-               conflicting_auth.len(), current_auth.len());
-        
+        debug!(
+            "Validating power levels in {} conflicting and {} current auth events",
+            conflicting_auth.len(),
+            current_auth.len()
+        );
+
         // Direct database query for current power levels using db field
         let power_query = "
             SELECT content, origin_server_ts 
@@ -346,7 +372,7 @@ impl MembershipValidator {
             ORDER BY origin_server_ts DESC 
             LIMIT 1
         ";
-        
+
         // Extract room_id from first available event
         let room_id = if !conflicting_auth.is_empty() {
             &conflicting_auth[0].room_id
@@ -356,25 +382,33 @@ impl MembershipValidator {
             debug!("No auth events available for power level validation");
             return Ok(());
         };
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(power_query)
             .bind(("room_id", room_id.to_string()))
             .await
-            .map_err(|e| MembershipError::database_error("power level validation", &e.to_string()))?;
-            
-        let power_levels: Option<serde_json::Value> = result.take(0)
+            .map_err(|e| {
+                MembershipError::database_error("power level validation", &e.to_string())
+            })?;
+
+        let power_levels: Option<serde_json::Value> = result
+            .take(0)
             .map_err(|e| MembershipError::database_error("parsing power levels", &e.to_string()))?;
-        
+
         if let Some(power_data) = power_levels
-            && let Some(content) = power_data.get("content") {
-                debug!("Current power levels retrieved for auth chain validation: users_default = {}", 
-                       content.get("users_default").unwrap_or(&serde_json::json!(0)));
-                
-                // Validate that both auth chains respect current power level constraints
-                // This ensures Matrix specification compliance for membership changes
-                self.validate_membership_power_requirements(content, conflicting_auth, current_auth).await?;
-            }
+            && let Some(content) = power_data.get("content")
+        {
+            debug!(
+                "Current power levels retrieved for auth chain validation: users_default = {}",
+                content.get("users_default").unwrap_or(&serde_json::json!(0))
+            );
+
+            // Validate that both auth chains respect current power level constraints
+            // This ensures Matrix specification compliance for membership changes
+            self.validate_membership_power_requirements(content, conflicting_auth, current_auth)
+                .await?;
+        }
 
         Ok(())
     }
@@ -386,37 +420,49 @@ impl MembershipValidator {
         conflicting_auth: &[Event],
         current_auth: &[Event],
     ) -> MembershipResult<()> {
-        debug!("Validating membership power requirements for {} + {} auth events", 
-               conflicting_auth.len(), current_auth.len());
-        
+        debug!(
+            "Validating membership power requirements for {} + {} auth events",
+            conflicting_auth.len(),
+            current_auth.len()
+        );
+
         // Extract power level requirements per Matrix specification
         let invite_power = power_levels.get("invite").and_then(|p| p.as_i64()).unwrap_or(0);
         let kick_power = power_levels.get("kick").and_then(|p| p.as_i64()).unwrap_or(50);
         let ban_power = power_levels.get("ban").and_then(|p| p.as_i64()).unwrap_or(50);
         let users_default = power_levels.get("users_default").and_then(|p| p.as_i64()).unwrap_or(0);
-        
-        debug!("Power requirements - invite: {}, kick: {}, ban: {}, users_default: {}", 
-               invite_power, kick_power, ban_power, users_default);
-        
+
+        debug!(
+            "Power requirements - invite: {}, kick: {}, ban: {}, users_default: {}",
+            invite_power, kick_power, ban_power, users_default
+        );
+
         // Validate all auth events meet power level requirements
         for auth_event in conflicting_auth.iter().chain(current_auth.iter()) {
             if auth_event.event_type == "m.room.member"
                 && let Some(content) = auth_event.content.as_object()
-                && let Some(membership) = content.get("membership").and_then(|m| m.as_str()) {
-                    match membership {
-                        "invite" => {
-                            debug!("Validating invite power requirement for event {}", auth_event.event_id);
-                            // Would check sender power level against invite_power
-                        },
-                        "ban" => {
-                            debug!("Validating ban power requirement for event {}", auth_event.event_id);
-                            // Would check sender power level against ban_power
-                        },
-                        _ => {}
-                    }
+                && let Some(membership) = content.get("membership").and_then(|m| m.as_str())
+            {
+                match membership {
+                    "invite" => {
+                        debug!(
+                            "Validating invite power requirement for event {}",
+                            auth_event.event_id
+                        );
+                        // Would check sender power level against invite_power
+                    },
+                    "ban" => {
+                        debug!(
+                            "Validating ban power requirement for event {}",
+                            auth_event.event_id
+                        );
+                        // Would check sender power level against ban_power
+                    },
+                    _ => {},
                 }
+            }
         }
-        
+
         Ok(())
     }
 
@@ -490,9 +536,10 @@ impl MembershipValidator {
         if to_membership == "join" {
             let current_membership = self.get_current_membership(room_id, user_id).await?;
             if let Some(current) = current_membership
-                && current.membership == MembershipState::Ban {
-                    return Err(MembershipError::user_banned(user_id, room_id, None));
-                }
+                && current.membership == MembershipState::Ban
+            {
+                return Err(MembershipError::user_banned(user_id, room_id, None));
+            }
         }
 
         // Validate invite edge cases
@@ -521,20 +568,22 @@ impl MembershipValidator {
         // Cannot invite already joined users
         let current_membership = self.get_current_membership(room_id, user_id).await?;
         if let Some(current) = current_membership
-            && current.membership == MembershipState::Join {
-                return Err(MembershipError::MembershipAlreadyExists {
-                    user_id: user_id.to_string(),
-                    room_id: room_id.to_string(),
-                    current_membership: "join".to_string(),
-                    requested_membership: "invite".to_string(),
-                });
-            }
+            && current.membership == MembershipState::Join
+        {
+            return Err(MembershipError::MembershipAlreadyExists {
+                user_id: user_id.to_string(),
+                room_id: room_id.to_string(),
+                current_membership: "join".to_string(),
+                requested_membership: "invite".to_string(),
+            });
+        }
 
         // Validate third-party invite content if present
         if let Some(content) = event.content.as_object()
-            && let Some(third_party_invite) = content.get("third_party_invite") {
-                self.validate_third_party_invite_content(third_party_invite)?;
-            }
+            && let Some(third_party_invite) = content.get("third_party_invite")
+        {
+            self.validate_third_party_invite_content(third_party_invite)?;
+        }
 
         Ok(())
     }
@@ -606,34 +655,26 @@ impl MembershipValidator {
 
     /// Validate third-party invite content structure
     fn validate_third_party_invite_content(&self, tpi_content: &Value) -> MembershipResult<()> {
-        let tpi_obj = tpi_content.as_object().ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: None,
-                reason: "Third-party invite must be object".to_string(),
-            }
+        let tpi_obj = tpi_content.as_object().ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: None,
+            reason: "Third-party invite must be object".to_string(),
         })?;
 
         // Must have signed field
-        let signed = tpi_obj.get("signed").ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: None,
-                reason: "Third-party invite must have signed field".to_string(),
-            }
+        let signed = tpi_obj.get("signed").ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: None,
+            reason: "Third-party invite must have signed field".to_string(),
         })?;
 
         // Signed field must be object with token
-        let signed_obj = signed.as_object().ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: None,
-                reason: "Third-party invite signed field must be object".to_string(),
-            }
+        let signed_obj = signed.as_object().ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: None,
+            reason: "Third-party invite signed field must be object".to_string(),
         })?;
 
-        signed_obj.get("token").ok_or_else(|| {
-            MembershipError::InvalidEvent {
-                event_id: None,
-                reason: "Third-party invite signed field must have token".to_string(),
-            }
+        signed_obj.get("token").ok_or_else(|| MembershipError::InvalidEvent {
+            event_id: None,
+            reason: "Third-party invite signed field must have token".to_string(),
         })?;
 
         Ok(())
@@ -653,23 +694,31 @@ impl MembershipValidator {
             Ok(membership) => {
                 if let Some(ref member) = membership {
                     // Validate the membership using event_repo for Matrix spec compliance
-                    debug!("Validating membership {} for user {} using event repository", 
-                           member.membership, user_id);
-                    
+                    debug!(
+                        "Validating membership {} for user {} using event repository",
+                        member.membership, user_id
+                    );
+
                     // Validate membership consistency using direct database query
-                    debug!("Validating membership {} for user {} using database consistency check", 
-                           member.membership, user_id);
-                    
+                    debug!(
+                        "Validating membership {} for user {} using database consistency check",
+                        member.membership, user_id
+                    );
+
                     // Use db field to perform consistency validation
-                    self.validate_membership_database_consistency(room_id, user_id, member).await?;
+                    self.validate_membership_database_consistency(room_id, user_id, member)
+                        .await?;
                 }
                 Ok(membership)
             },
             Err(e) => {
-                debug!("Membership repository query failed: {:?} - falling back to direct DB query", e);
+                debug!(
+                    "Membership repository query failed: {:?} - falling back to direct DB query",
+                    e
+                );
                 // Fallback to direct database access using db field
                 self.get_membership_from_events(room_id, user_id).await
-            }
+            },
         }
     }
 
@@ -682,8 +731,11 @@ impl MembershipValidator {
         room_id: &str,
         user_id: &str,
     ) -> MembershipResult<Option<Membership>> {
-        debug!("Getting membership for user {} in room {} via direct database query", user_id, room_id);
-        
+        debug!(
+            "Getting membership for user {} in room {} via direct database query",
+            user_id, room_id
+        );
+
         // Direct database query using the db field for Matrix spec compliance
         let membership_query = "
             SELECT membership, display_name, avatar_url, reason, invited_by, updated_at
@@ -693,17 +745,21 @@ impl MembershipValidator {
             ORDER BY updated_at DESC 
             LIMIT 1
         ";
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(membership_query)
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .await
-            .map_err(|e| MembershipError::database_error("direct membership query", &e.to_string()))?;
-            
-        let membership_data: Option<serde_json::Value> = result.take(0)
-            .map_err(|e| MembershipError::database_error("parsing membership data", &e.to_string()))?;
-        
+            .map_err(|e| {
+                MembershipError::database_error("direct membership query", &e.to_string())
+            })?;
+
+        let membership_data: Option<serde_json::Value> = result.take(0).map_err(|e| {
+            MembershipError::database_error("parsing membership data", &e.to_string())
+        })?;
+
         if let Some(data) = membership_data {
             // Parse the membership data into proper structure
             if let Some(membership_str) = data.get("membership").and_then(|m| m.as_str()) {
@@ -718,18 +774,28 @@ impl MembershipValidator {
                             event_id: None,
                             reason: format!("Invalid membership state: {}", membership_str),
                         });
-                    }
+                    },
                 };
-                
+
                 let membership = Membership {
                     room_id: room_id.to_string(),
                     user_id: user_id.to_string(),
                     membership: membership_state,
-                    display_name: data.get("display_name").and_then(|d| d.as_str()).map(|s| s.to_string()),
-                    avatar_url: data.get("avatar_url").and_then(|a| a.as_str()).map(|s| s.to_string()),
+                    display_name: data
+                        .get("display_name")
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.to_string()),
+                    avatar_url: data
+                        .get("avatar_url")
+                        .and_then(|a| a.as_str())
+                        .map(|s| s.to_string()),
                     reason: data.get("reason").and_then(|r| r.as_str()).map(|s| s.to_string()),
-                    invited_by: data.get("invited_by").and_then(|i| i.as_str()).map(|s| s.to_string()),
-                    updated_at: data.get("updated_at")
+                    invited_by: data
+                        .get("invited_by")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string()),
+                    updated_at: data
+                        .get("updated_at")
                         .and_then(|ts| ts.as_str())
                         .and_then(|ts_str| chrono::DateTime::parse_from_rfc3339(ts_str).ok())
                         .map(|dt| dt.with_timezone(&chrono::Utc)),
@@ -737,13 +803,15 @@ impl MembershipValidator {
                     third_party_invite: None,
                     join_authorised_via_users_server: None,
                 };
-                
-                debug!("Successfully constructed membership from direct DB query: {} for user {}", 
-                       membership_str, user_id);
+
+                debug!(
+                    "Successfully constructed membership from direct DB query: {} for user {}",
+                    membership_str, user_id
+                );
                 return Ok(Some(membership));
             }
         }
-        
+
         debug!("No membership found for user {} in room {} via direct query", user_id, room_id);
         Ok(None)
     }
@@ -758,8 +826,11 @@ impl MembershipValidator {
         user_id: &str,
         membership: &Membership,
     ) -> MembershipResult<()> {
-        debug!("Validating membership database consistency for user {} in room {}", user_id, room_id);
-        
+        debug!(
+            "Validating membership database consistency for user {} in room {}",
+            user_id, room_id
+        );
+
         // Cross-validate with direct database query using db field
         let validation_query = "
             SELECT COUNT(*) as membership_count
@@ -768,37 +839,44 @@ impl MembershipValidator {
             AND user_id = $user_id
             AND membership = $membership_state
         ";
-        
+
         let membership_str = match membership.membership {
             MembershipState::Join => "join",
-            MembershipState::Leave => "leave", 
+            MembershipState::Leave => "leave",
             MembershipState::Invite => "invite",
             MembershipState::Ban => "ban",
             MembershipState::Knock => "knock",
         };
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(validation_query)
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .bind(("membership_state", membership_str.to_string()))
             .await
-            .map_err(|e| MembershipError::database_error("membership consistency validation", &e.to_string()))?;
-            
-        let count_data: Option<serde_json::Value> = result.take(0)
-            .map_err(|e| MembershipError::database_error("parsing membership count data", &e.to_string()))?;
-        
+            .map_err(|e| {
+                MembershipError::database_error("membership consistency validation", &e.to_string())
+            })?;
+
+        let count_data: Option<serde_json::Value> = result.take(0).map_err(|e| {
+            MembershipError::database_error("parsing membership count data", &e.to_string())
+        })?;
+
         if let Some(data) = count_data
             && let Some(count) = data.get("membership_count").and_then(|c| c.as_i64())
-            && count < 1 {
-                warn!("Membership consistency issue - no matching membership found in database for user {} in room {}", 
-                      user_id, room_id);
-                return Err(MembershipError::InternalError {
-                    context: "membership consistency".to_string(),
-                    error: format!("Expected at least 1 membership record, found {}", count),
-                });
-            }
-        
+            && count < 1
+        {
+            warn!(
+                "Membership consistency issue - no matching membership found in database for user {} in room {}",
+                user_id, room_id
+            );
+            return Err(MembershipError::InternalError {
+                context: "membership consistency".to_string(),
+                error: format!("Expected at least 1 membership record, found {}", count),
+            });
+        }
+
         debug!("Membership consistency validation passed for user {} in room {}", user_id, room_id);
         Ok(())
     }
@@ -813,9 +891,11 @@ impl MembershipValidator {
         user_id: &str,
         event: &Event,
     ) -> MembershipResult<()> {
-        debug!("Validating membership consistency for user {} in room {} with event {}", 
-               user_id, room_id, event.event_id);
-        
+        debug!(
+            "Validating membership consistency for user {} in room {} with event {}",
+            user_id, room_id, event.event_id
+        );
+
         // Verify the event is actually a membership event
         if event.event_type != "m.room.member" {
             return Err(MembershipError::InvalidEvent {
@@ -823,16 +903,19 @@ impl MembershipValidator {
                 reason: "Event is not a membership event".to_string(),
             });
         }
-        
+
         // Verify state_key matches user_id
         if event.state_key.as_deref() != Some(user_id) {
             return Err(MembershipError::InvalidEvent {
                 event_id: Some(event.event_id.clone()),
-                reason: format!("State key {} does not match user ID {}", 
-                              event.state_key.as_deref().unwrap_or("None"), user_id),
+                reason: format!(
+                    "State key {} does not match user ID {}",
+                    event.state_key.as_deref().unwrap_or("None"),
+                    user_id
+                ),
             });
         }
-        
+
         // Cross-validate with direct database query using db field
         let validation_query = "
             SELECT COUNT(*) as event_count
@@ -842,29 +925,36 @@ impl MembershipValidator {
             AND event_type = 'm.room.member'
             AND state_key = $user_id
         ";
-        
-        let mut result = self.db
+
+        let mut result = self
+            .db
             .query(validation_query)
             .bind(("event_id", event.event_id.clone()))
             .bind(("room_id", room_id.to_string()))
             .bind(("user_id", user_id.to_string()))
             .await
-            .map_err(|e| MembershipError::database_error("consistency validation", &e.to_string()))?;
-            
-        let count_data: Option<serde_json::Value> = result.take(0)
+            .map_err(|e| {
+                MembershipError::database_error("consistency validation", &e.to_string())
+            })?;
+
+        let count_data: Option<serde_json::Value> = result
+            .take(0)
             .map_err(|e| MembershipError::database_error("parsing count data", &e.to_string()))?;
-        
+
         if let Some(data) = count_data
             && let Some(count) = data.get("event_count").and_then(|c| c.as_i64())
-            && count != 1 {
-                warn!("Membership consistency issue - found {} events for {} instead of 1", 
-                      count, event.event_id);
-                return Err(MembershipError::InternalError {
-                    context: "membership consistency".to_string(),
-                    error: format!("Expected 1 event, found {}", count),
-                });
-            }
-        
+            && count != 1
+        {
+            warn!(
+                "Membership consistency issue - found {} events for {} instead of 1",
+                count, event.event_id
+            );
+            return Err(MembershipError::InternalError {
+                context: "membership consistency".to_string(),
+                error: format!("Expected 1 event, found {}", count),
+            });
+        }
+
         debug!("Membership consistency validation passed for event {}", event.event_id);
         Ok(())
     }
@@ -894,7 +984,11 @@ impl MembershipValidator {
         }
 
         if conflicting_events.len() == 1 {
-            return Ok(conflicting_events.into_iter().next().unwrap());
+            return conflicting_events.into_iter().next()
+                .ok_or_else(|| MembershipError::InternalError {
+                    context: "conflict resolution".to_string(),
+                    error: "Vector length mismatch (len=1 but iterator empty)".to_string(),
+                });
         }
 
         debug!(
@@ -917,11 +1011,9 @@ impl MembershipValidator {
                     StateResolutionError::DatabaseError(db_err) => {
                         MembershipError::database_error("state resolution", &db_err.to_string())
                     },
-                    StateResolutionError::InvalidStateEvent(msg) => {
-                        MembershipError::InvalidEvent {
-                            event_id: None,
-                            reason: format!("State resolution failed: {}", msg),
-                        }
+                    StateResolutionError::InvalidStateEvent(msg) => MembershipError::InvalidEvent {
+                        event_id: None,
+                        reason: format!("State resolution failed: {}", msg),
                     },
                     StateResolutionError::CircularDependency => {
                         MembershipError::InconsistentRoomState {
@@ -953,14 +1045,9 @@ impl MembershipValidator {
         let winning_event = resolved_state
             .state_events
             .get(&membership_state_key)
-            .ok_or_else(|| {
-                MembershipError::InternalError {
-                    context: "state resolution".to_string(),
-                    error: format!(
-                        "No membership event found for user {} after resolution",
-                        user_id
-                    ),
-                }
+            .ok_or_else(|| MembershipError::InternalError {
+                context: "state resolution".to_string(),
+                error: format!("No membership event found for user {} after resolution", user_id),
             })?
             .clone();
 
@@ -1021,9 +1108,9 @@ mod tests {
     use mockall::predicate::*;
     use serde_json::json;
     use std::collections::HashMap;
-    
-    use matryx_entity::types::{Event, Membership, MembershipState};
+
     use super::*;
+    use matryx_entity::types::{Event, Membership, MembershipState};
 
     // Test fixtures
     fn create_test_event(
@@ -1066,8 +1153,6 @@ mod tests {
         });
         create_test_event("m.room.member", sender, room_id, Some(user_id), content)
     }
-
-
 
     // Setup helper for creating validator with mocked dependencies
     async fn setup_test_validator() -> MembershipValidator {

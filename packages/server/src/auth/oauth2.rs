@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use surrealdb::Connection;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -74,9 +74,9 @@ impl<C: Connection> OAuth2Service<C> {
         session_service: Arc<MatrixSessionService<C>>,
         homeserver_name: String,
     ) -> Self {
-        Self { 
-            oauth2_repo, 
-            session_service, 
+        Self {
+            oauth2_repo,
+            session_service,
             homeserver_name,
             csrf_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -86,20 +86,20 @@ impl<C: Connection> OAuth2Service<C> {
     pub async fn generate_csrf_token(&self, user_id: &str) -> String {
         let csrf_token = Uuid::new_v4().to_string();
         let expires_at = chrono::Utc::now().timestamp() + 3600; // 1 hour expiry
-        
+
         let mut tokens = self.csrf_tokens.write().await;
         tokens.insert(csrf_token.clone(), (user_id.to_string(), expires_at));
-        
+
         // Cleanup expired tokens
         tokens.retain(|_, (_, exp)| *exp > chrono::Utc::now().timestamp());
-        
+
         csrf_token
     }
 
     // Validate CSRF token in authorize method
     pub async fn validate_csrf_token(&self, state: &str, user_id: &str) -> bool {
         let mut tokens = self.csrf_tokens.write().await;
-        
+
         if let Some((stored_user_id, expires_at)) = tokens.remove(state) {
             stored_user_id == user_id && expires_at > chrono::Utc::now().timestamp()
         } else {
@@ -128,21 +128,17 @@ impl<C: Connection> OAuth2Service<C> {
             .oauth2_repo
             .get_client(&params.client_id)
             .await
-            .map_err(|_| {
-                ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client not found or inactive".to_string()),
-                    error_uri: None,
-                    state: params.state.clone(),
-                }
+            .map_err(|_| ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: Some("Client not found or inactive".to_string()),
+                error_uri: None,
+                state: params.state.clone(),
             })?
-            .ok_or_else(|| {
-                ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client not found or inactive".to_string()),
-                    error_uri: None,
-                    state: params.state.clone(),
-                }
+            .ok_or_else(|| ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: Some("Client not found or inactive".to_string()),
+                error_uri: None,
+                state: params.state.clone(),
             })?;
 
         // Validate redirect_uri
@@ -157,7 +153,10 @@ impl<C: Connection> OAuth2Service<C> {
 
         // Additional security: validate redirect URI is not to our own homeserver to prevent loops
         if params.redirect_uri.contains(&self.homeserver_name) {
-            warn!("OAuth2 redirect URI contains homeserver name - potential security issue: {}", params.redirect_uri);
+            warn!(
+                "OAuth2 redirect URI contains homeserver name - potential security issue: {}",
+                params.redirect_uri
+            );
             // Allow but log for security monitoring
         }
 
@@ -172,18 +171,24 @@ impl<C: Connection> OAuth2Service<C> {
                     state: params.state.clone(),
                 });
             }
-            
+
             // Validate challenge length according to RFC 7636
             if challenge.len() < 43 || challenge.len() > 128 {
                 return Err(ErrorResponse {
                     error: "invalid_request".to_string(),
-                    error_description: Some("Code challenge must be between 43-128 characters".to_string()),
+                    error_description: Some(
+                        "Code challenge must be between 43-128 characters".to_string(),
+                    ),
                     error_uri: None,
                     state: params.state.clone(),
                 });
             }
-            
-            debug!("PKCE challenge validated: method={}, challenge_len={}", method, challenge.len());
+
+            debug!(
+                "PKCE challenge validated: method={}, challenge_len={}",
+                method,
+                challenge.len()
+            );
         }
 
         // CSRF Protection: Validate state parameter if user is authenticated
@@ -238,13 +243,11 @@ impl<C: Connection> OAuth2Service<C> {
                 params.code_challenge_method.as_deref(),
             )
             .await
-            .map_err(|_| {
-                ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: Some("Failed to create authorization code".to_string()),
-                    error_uri: None,
-                    state: params.state.clone(),
-                }
+            .map_err(|_| ErrorResponse {
+                error: "server_error".to_string(),
+                error_description: Some("Failed to create authorization code".to_string()),
+                error_uri: None,
+                state: params.state.clone(),
             })?;
 
         // Build redirect URL with authorization code
@@ -278,21 +281,17 @@ impl<C: Connection> OAuth2Service<C> {
             .oauth2_repo
             .get_client(&request.client_id)
             .await
-            .map_err(|_| {
-                ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client not found or inactive".to_string()),
-                    error_uri: None,
-                    state: None,
-                }
+            .map_err(|_| ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: Some("Client not found or inactive".to_string()),
+                error_uri: None,
+                state: None,
             })?
-            .ok_or_else(|| {
-                ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: Some("Client not found or inactive".to_string()),
-                    error_uri: None,
-                    state: None,
-                }
+            .ok_or_else(|| ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: Some("Client not found or inactive".to_string()),
+                error_uri: None,
+                state: None,
             })?;
 
         // Validate client secret for confidential clients
@@ -322,21 +321,17 @@ impl<C: Connection> OAuth2Service<C> {
             .oauth2_repo
             .consume_authorization_code(&request.code)
             .await
-            .map_err(|_| {
-                ErrorResponse {
-                    error: "invalid_grant".to_string(),
-                    error_description: Some("Invalid or expired authorization code".to_string()),
-                    error_uri: None,
-                    state: None,
-                }
+            .map_err(|_| ErrorResponse {
+                error: "invalid_grant".to_string(),
+                error_description: Some("Invalid or expired authorization code".to_string()),
+                error_uri: None,
+                state: None,
             })?
-            .ok_or_else(|| {
-                ErrorResponse {
-                    error: "invalid_grant".to_string(),
-                    error_description: Some("Invalid or expired authorization code".to_string()),
-                    error_uri: None,
-                    state: None,
-                }
+            .ok_or_else(|| ErrorResponse {
+                error: "invalid_grant".to_string(),
+                error_description: Some("Invalid or expired authorization code".to_string()),
+                error_uri: None,
+                state: None,
             })?;
 
         // Validate redirect_uri matches
@@ -361,13 +356,11 @@ impl<C: Connection> OAuth2Service<C> {
 
         // Validate PKCE if present
         if let Some(ref challenge) = auth_code.code_challenge {
-            let verifier = request.code_verifier.as_deref().ok_or_else(|| {
-                ErrorResponse {
-                    error: "invalid_request".to_string(),
-                    error_description: Some("PKCE code_verifier required".to_string()),
-                    error_uri: None,
-                    state: None,
-                }
+            let verifier = request.code_verifier.as_deref().ok_or_else(|| ErrorResponse {
+                error: "invalid_request".to_string(),
+                error_description: Some("PKCE code_verifier required".to_string()),
+                error_uri: None,
+                state: None,
             })?;
 
             let method = auth_code.code_challenge_method.as_deref().unwrap_or("plain");
@@ -398,8 +391,10 @@ impl<C: Connection> OAuth2Service<C> {
             .await
         {
             Ok(_) => {
-                info!("OAuth2 token exchange successful for user: {} on homeserver: {}",
-                     auth_code.user_id, self.homeserver_name);
+                info!(
+                    "OAuth2 token exchange successful for user: {} on homeserver: {}",
+                    auth_code.user_id, self.homeserver_name
+                );
 
                 Ok(TokenResponse {
                     access_token,
@@ -409,14 +404,12 @@ impl<C: Connection> OAuth2Service<C> {
                     scope: auth_code.scope,
                 })
             },
-            Err(_) => {
-                Err(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: Some("Failed to create session".to_string()),
-                    error_uri: None,
-                    state: None,
-                })
-            },
+            Err(_) => Err(ErrorResponse {
+                error: "server_error".to_string(),
+                error_description: Some("Failed to create session".to_string()),
+                error_uri: None,
+                state: None,
+            }),
         }
     }
 
@@ -444,9 +437,10 @@ impl<C: Connection> OAuth2Service<C> {
         client_name: &str,
         redirect_uris: Vec<String>,
         client_type: &str,
+        allowed_scopes: Option<Vec<String>>,
     ) -> Result<OAuth2Client, MatrixAuthError> {
         self.oauth2_repo
-            .register_client(client_name, redirect_uris, client_type)
+            .register_client(client_name, redirect_uris, client_type, allowed_scopes)
             .await
             .map_err(|e| {
                 MatrixAuthError::DatabaseError(format!("Failed to register client: {}", e))

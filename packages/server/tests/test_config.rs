@@ -11,9 +11,9 @@ pub fn test_database_config() -> HashMap<String, String> {
 }
 
 /// Initialize test database with schema
-pub async fn init_test_database()
--> Result<Surreal<Any>, Box<dyn std::error::Error>> {
-    let db = surrealdb::engine::any::connect("surrealkv://test_data/server_integration_test.db").await?;
+pub async fn init_test_database() -> Result<Surreal<Any>, Box<dyn std::error::Error>> {
+    let db =
+        surrealdb::engine::any::connect("surrealkv://test_data/server_integration_test.db").await?;
     db.use_ns("test").use_db("matrix_test").await?;
 
     // Load the comprehensive Matrix schema
@@ -71,7 +71,7 @@ impl TestConfig {
                 .unwrap_or(true),
         }
     }
-    
+
     /// Validate test configuration settings
     pub fn validate(&self) -> Result<(), String> {
         if self.homeserver_name.is_empty() {
@@ -88,12 +88,12 @@ impl TestConfig {
         }
         Ok(())
     }
-    
+
     /// Get database configuration for tests
     pub fn get_database_config(&self) -> HashMap<String, String> {
         test_database_config()
     }
-    
+
     /// Initialize database for testing
     pub async fn init_database(&self) -> Result<Surreal<Any>, Box<dyn std::error::Error>> {
         init_test_database().await
@@ -108,7 +108,7 @@ mod tests {
     fn test_config_validation() {
         let config = TestConfig::default();
         assert!(config.validate().is_ok(), "Default config should be valid");
-        
+
         // Use all fields to satisfy clippy
         assert_eq!(config.homeserver_name, "test.localhost");
         assert_eq!(config.server_name, "test.localhost");
@@ -117,22 +117,22 @@ mod tests {
         assert!(config.enable_federation_tests);
         assert!(config.enable_performance_tests);
     }
-    
+
     #[test]
     fn test_database_config_creation() {
         let config = TestConfig::default();
         let db_config = config.get_database_config();
-        
+
         assert!(db_config.contains_key("url"));
         assert!(db_config.contains_key("namespace"));
         assert!(db_config.contains_key("database"));
     }
-    
+
     #[tokio::test]
     async fn test_database_initialization() {
         let config = TestConfig::default();
         let result = config.init_database().await;
-        
+
         // We expect this to work or fail gracefully
         match result {
             Ok(_db) => {
@@ -141,7 +141,7 @@ mod tests {
             Err(_e) => {
                 // Expected to fail in CI/test environments without proper setup
                 // This is acceptable as we're just ensuring the code path is exercised
-            }
+            },
         }
     }
 }

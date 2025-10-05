@@ -1,8 +1,8 @@
 mod common;
 mod test_config;
 
-use common::integration::compliance::*;
 use common::integration::MatrixTestServer;
+use common::integration::compliance::*;
 use test_config::TestConfig;
 
 #[tokio::test]
@@ -78,10 +78,10 @@ async fn test_sytest_compliance() {
 
     // SyTest may not be available in all environments
     assert!(
-        results.status == "SyTest not available - skipped" ||
-            results.status == "PASSED" ||
-            results.status == "FAILED" ||
-            results.status == "ERROR",
+        results.status == "SyTest not available - skipped"
+            || results.status == "PASSED"
+            || results.status == "FAILED"
+            || results.status == "ERROR",
         "SyTest should return valid status"
     );
 

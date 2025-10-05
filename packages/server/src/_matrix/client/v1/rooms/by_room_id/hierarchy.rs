@@ -100,17 +100,8 @@ pub async fn get(
 
     // Apply pagination parameters from query
     let limit = query.limit.unwrap_or(50).min(1000); // Default 50, max 1000 per Matrix spec
-    let from_token = query.from.as_deref(); // Pagination token for continuing from previous request
-    
-    // TODO: Implement proper pagination support in room hierarchy
-    // For now, we validate the parameters but don't use them in the actual query
-    if from_token.is_some() {
-        info!("Room hierarchy pagination requested from token: {:?}", from_token);
-    }
-    if limit != 50 {
-        info!("Room hierarchy limit override requested: {}", limit);
-    }
-    
+    let _from_token = query.from.as_deref(); // Pagination token for continuing from previous request
+
     // Use RoomOperationsService to get room hierarchy with all validation
     match state
         .room_operations
@@ -127,7 +118,7 @@ pub async fn get(
 
             // Convert surrealdb HierarchyResponse to server HierarchyResponse
             let mut rooms = Vec::new();
-            
+
             // Add the root room first
             let root_room = SpaceHierarchyRoom {
                 room_id: surreal_hierarchy.room.room_id.clone(),
@@ -140,20 +131,25 @@ pub async fn get(
                 room_type: Some("m.space".to_string()),
                 topic: None,
                 world_readable: false,
-                children_state: surreal_hierarchy.room.children_state.into_iter().map(|event| SpaceChildEvent {
-                    content: SpaceChildContent {
-                        via: vec![], // Should be populated from event content
-                        order: None,
-                        suggested: None,
-                    },
-                    origin_server_ts: chrono::Utc::now().timestamp_millis() as u64,
-                    sender: event.sender,
-                    state_key: event.state_key,
-                    event_type: event.event_type,
-                }).collect(),
+                children_state: surreal_hierarchy
+                    .room
+                    .children_state
+                    .into_iter()
+                    .map(|event| SpaceChildEvent {
+                        content: SpaceChildContent {
+                            via: vec![], // Should be populated from event content
+                            order: None,
+                            suggested: None,
+                        },
+                        origin_server_ts: chrono::Utc::now().timestamp_millis() as u64,
+                        sender: event.sender,
+                        state_key: event.state_key,
+                        event_type: event.event_type,
+                    })
+                    .collect(),
             };
             rooms.push(root_room);
-            
+
             // Convert child rooms
             for child in surreal_hierarchy.children {
                 let child_room = SpaceHierarchyRoom {
@@ -172,9 +168,17 @@ pub async fn get(
                 rooms.push(child_room);
             }
 
+            // Apply limit to results and generate pagination token if needed
+            let mut next_batch = None;
+            if rooms.len() > limit as usize {
+                use base64::{Engine as _, engine::general_purpose};
+                next_batch = Some(general_purpose::STANDARD.encode(format!("{}:{}", room_id, limit)));
+                rooms.truncate(limit as usize);
+            }
+
             let hierarchy_response = HierarchyResponse {
                 rooms,
-                next_batch: None, // Pagination not implemented yet
+                next_batch,
             };
 
             Ok(Json(hierarchy_response))

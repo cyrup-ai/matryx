@@ -12,8 +12,13 @@ mod third_party_tests {
     use surrealdb::{Surreal, engine::any::Any};
 
     async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("surrealkv://test_data/third_party_test.db").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
+        let db = surrealdb::engine::any::connect("surrealkv://test_data/third_party_test.db")
+            .await
+            .expect("Failed to connect to test database");
+        db.use_ns("test")
+            .use_db("test")
+            .await
+            .expect("Failed to set test database namespace");
         db
     }
 
@@ -61,19 +66,28 @@ mod third_party_tests {
         assert!(result.is_ok());
 
         // Test protocol retrieval
-        let retrieved = third_party_repo.get_protocol_by_id("test_protocol").await.unwrap();
+        let retrieved = third_party_repo
+            .get_protocol_by_id("test_protocol")
+            .await
+            .expect("Failed to get protocol by ID");
         assert!(retrieved.is_some());
-        let retrieved_protocol = retrieved.unwrap();
+        let retrieved_protocol = retrieved.expect("Expected protocol to exist");
         assert_eq!(retrieved_protocol.protocol_id, "test_protocol");
         assert_eq!(retrieved_protocol.display_name, "Test Protocol");
 
         // Test get all protocols
-        let all_protocols = third_party_repo.get_all_protocols().await.unwrap();
+        let all_protocols = third_party_repo
+            .get_all_protocols()
+            .await
+            .expect("Failed to get all protocols");
         assert!(!all_protocols.is_empty());
         assert!(all_protocols.iter().any(|p| p.protocol_id == "test_protocol"));
 
         // Test protocol instances
-        let instances = third_party_repo.get_protocol_instances("test_protocol").await.unwrap();
+        let instances = third_party_repo
+            .get_protocol_instances("test_protocol")
+            .await
+            .expect("Failed to get protocol instances");
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].instance_id, "test_instance");
     }
@@ -114,7 +128,10 @@ mod third_party_tests {
             fields
         };
 
-        let _locations = third_party_repo.lookup_third_party_location("test_protocol", &search_fields).await.unwrap();
+        let _locations = third_party_repo
+            .lookup_third_party_location("test_protocol", &search_fields)
+            .await
+            .expect("Failed to lookup third party location");
         // In a real test, we would insert test data and verify results
 
         // Test user lookup
@@ -124,15 +141,24 @@ mod third_party_tests {
             fields
         };
 
-        let _users = third_party_repo.lookup_third_party_user("test_protocol", &user_search_fields).await.unwrap();
+        let _users = third_party_repo
+            .lookup_third_party_user("test_protocol", &user_search_fields)
+            .await
+            .expect("Failed to lookup third party user");
         // In a real test, we would insert test data and verify results
 
         // Test get location by alias
-        let _location_result = third_party_repo.get_location_by_alias("#test:example.com").await.unwrap();
+        let _location_result = third_party_repo
+            .get_location_by_alias("#test:example.com")
+            .await
+            .expect("Failed to get location by alias");
         // Would be Some(location) if test data was inserted
 
         // Test get user by userid
-        let _user_result = third_party_repo.get_user_by_userid("@testuser:example.com").await.unwrap();
+        let _user_result = third_party_repo
+            .get_user_by_userid("@testuser:example.com")
+            .await
+            .expect("Failed to get user by userid");
         // Would be Some(user) if test data was inserted
     }
 
@@ -159,14 +185,20 @@ mod third_party_tests {
         assert!(result.is_ok());
 
         // Test bridge retrieval
-        let retrieved = bridge_repo.get_bridge_by_id("test_bridge").await.unwrap();
+        let retrieved = bridge_repo
+            .get_bridge_by_id("test_bridge")
+            .await
+            .expect("Failed to get bridge by ID");
         assert!(retrieved.is_some());
-        let retrieved_bridge = retrieved.unwrap();
+        let retrieved_bridge = retrieved.expect("Expected bridge to exist");
         assert_eq!(retrieved_bridge.bridge_id, "test_bridge");
         assert_eq!(retrieved_bridge.name, "Test Bridge");
 
         // Test get bridges for protocol
-        let protocol_bridges = bridge_repo.get_bridges_for_protocol("test_protocol").await.unwrap();
+        let protocol_bridges = bridge_repo
+            .get_bridges_for_protocol("test_protocol")
+            .await
+            .expect("Failed to get bridges for protocol");
         assert!(!protocol_bridges.is_empty());
         assert!(protocol_bridges.iter().any(|b| b.bridge_id == "test_bridge"));
 
@@ -177,12 +209,15 @@ mod third_party_tests {
         // Test bridge statistics
         let stats_result = bridge_repo.get_bridge_statistics("test_bridge").await;
         assert!(stats_result.is_ok());
-        let stats = stats_result.unwrap();
+        let stats = stats_result.expect("Expected bridge statistics");
         assert_eq!(stats.total_users, 0); // No test data inserted
         assert_eq!(stats.total_rooms, 0); // No test data inserted
 
         // Test get all active bridges
-        let _active_bridges = bridge_repo.get_all_active_bridges().await.unwrap();
+        let _active_bridges = bridge_repo
+            .get_all_active_bridges()
+            .await
+            .expect("Failed to get all active bridges");
         // Would contain bridges with Active status
 
         // Test cleanup inactive bridges
@@ -242,7 +277,7 @@ mod third_party_tests {
         let connectivity_result = third_party_service.validate_network_connectivity("test_protocol").await;
         assert!(connectivity_result.is_ok());
         
-        let connectivity = connectivity_result.unwrap();
+        let connectivity = connectivity_result.expect("Expected network connectivity validation result");
         assert_eq!(connectivity.protocol_id, "test_protocol");
         assert_eq!(connectivity.total_bridges, 0); // No bridges in test
         assert_eq!(connectivity.healthy_bridges, 0);
@@ -257,7 +292,7 @@ mod third_party_tests {
         // Test getting non-existent bridge
         let result = bridge_repo.get_bridge_by_id("non_existent_bridge").await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.expect("Expected result for non-existent bridge query").is_none());
 
         // Test updating status of non-existent bridge
         let status_result = bridge_repo.update_bridge_status("non_existent_bridge", BridgeStatus::Error).await;
@@ -311,7 +346,7 @@ mod third_party_tests {
         // Test querying all protocols
         let protocols_result = third_party_service.query_third_party_protocols().await;
         assert!(protocols_result.is_ok());
-        let _protocols = protocols_result.unwrap();
+        let _protocols = protocols_result.expect("Expected third party protocols query result");
         // Would contain protocols if any were registered
 
         // Test location lookup with validation
@@ -367,7 +402,7 @@ mod third_party_tests {
         // Test bridge performance metrics retrieval
         let performance_result = bridge_repo.get_bridge_performance_metrics("test_bridge").await;
         assert!(performance_result.is_ok());
-        let performance = performance_result.unwrap();
+        let performance = performance_result.expect("Expected bridge performance metrics");
         assert_eq!(performance.messages_24h, 0); // Default value
         assert_eq!(performance.errors_24h, 0); // Default value
     }

@@ -14,13 +14,18 @@ use crate::repository::{
 };
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use surrealdb::{Connection, Surreal};
+use sysinfo::{Disks, Networks, System};
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct MonitoringService<C: Connection> {
     metrics_repo: MetricsRepository<C>,
     performance_repo: PerformanceRepository<C>,
     monitoring_repo: MonitoringRepository<C>,
+    last_network_stats: Arc<Mutex<Option<(Instant, u64, u64)>>>,
 }
 
 impl<C: Connection> MonitoringService<C> {
@@ -29,6 +34,7 @@ impl<C: Connection> MonitoringService<C> {
             metrics_repo: MetricsRepository::new(db.clone()),
             performance_repo: PerformanceRepository::new(db.clone()),
             monitoring_repo: MonitoringRepository::new(db),
+            last_network_stats: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -314,27 +320,98 @@ impl<C: Connection> MonitoringService<C> {
     // Private helper methods for system metrics collection
 
     async fn get_current_cpu_usage(&self) -> Result<f64, RepositoryError> {
-        // In a real implementation, this would use system APIs
-        // For now, return a simulated value
-        Ok(25.0 + (rand::random::<f64>() * 20.0))
+        let cpu_usage = tokio::task::spawn_blocking(|| {
+            let mut system = System::new();
+            system.refresh_cpu_all();
+
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            system.refresh_cpu_all();
+
+            system.global_cpu_usage() as f64
+        }).await
+        .map_err(|e| RepositoryError::SystemError(format!("CPU metrics task failed: {}", e)))?;
+
+        Ok(cpu_usage)
     }
 
     async fn get_current_memory_usage(&self) -> Result<f64, RepositoryError> {
-        // In a real implementation, this would use system APIs
-        // For now, return a simulated value in MB
-        Ok(2048.0 + (rand::random::<f64>() * 1024.0))
+        let memory_mb = tokio::task::spawn_blocking(|| {
+            let mut system = System::new();
+            system.refresh_memory();
+
+            (system.used_memory() / 1024 / 1024) as f64
+        }).await
+        .map_err(|e| RepositoryError::SystemError(format!("Memory metrics task failed: {}", e)))?;
+
+        Ok(memory_mb)
     }
 
     async fn get_current_disk_usage(&self) -> Result<f64, RepositoryError> {
-        // In a real implementation, this would use system APIs
-        // For now, return a simulated value in MB
-        Ok(50000.0 + (rand::random::<f64>() * 10000.0))
+        let data_path = std::env::current_dir()
+            .map_err(|e| RepositoryError::SystemError(format!("Failed to get current dir: {}", e)))?;
+
+        let disk_usage_mb = tokio::task::spawn_blocking(move || {
+            let disks = Disks::new_with_refreshed_list();
+
+            for disk in disks.list() {
+                if let Some(mount_point) = disk.mount_point().to_str()
+                    && data_path.starts_with(mount_point)
+                {
+                    let total_mb = (disk.total_space() / 1024 / 1024) as f64;
+                    let available_mb = (disk.available_space() / 1024 / 1024) as f64;
+                    let used_mb = total_mb - available_mb;
+                    return used_mb;
+                }
+            }
+
+            disks.list().iter()
+                .map(|disk| {
+                    let total = disk.total_space();
+                    let available = disk.available_space();
+                    ((total - available) / 1024 / 1024) as f64
+                })
+                .sum()
+        }).await
+        .map_err(|e| RepositoryError::SystemError(format!("Disk metrics task failed: {}", e)))?;
+
+        Ok(disk_usage_mb)
     }
 
     async fn get_network_throughput(&self) -> Result<f64, RepositoryError> {
-        // In a real implementation, this would use system APIs
-        // For now, return a simulated value in bytes per second
-        Ok(1000000.0 + (rand::random::<f64>() * 500000.0))
+        let last_stats = self.last_network_stats.clone();
+
+        let throughput = tokio::task::spawn_blocking(move || {
+            let networks = Networks::new_with_refreshed_list();
+
+            let now = Instant::now();
+            let (total_rx, total_tx): (u64, u64) = networks.list().values().map(|data| {
+                    (data.total_received(), data.total_transmitted())
+                })
+                .fold((0, 0), |(acc_rx, acc_tx), (rx, tx)| {
+                    (acc_rx + rx, acc_tx + tx)
+                });
+
+            let total_bytes = total_rx + total_tx;
+
+            let mut last = last_stats.blocking_lock();
+            let bytes_per_sec = if let Some((prev_time, prev_bytes, _)) = *last {
+                let duration_secs = now.duration_since(prev_time).as_secs_f64();
+                if duration_secs > 0.0 {
+                    (total_bytes.saturating_sub(prev_bytes)) as f64 / duration_secs
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            *last = Some((now, total_bytes, total_tx));
+
+            bytes_per_sec
+        }).await
+        .map_err(|e| RepositoryError::SystemError(format!("Network metrics task failed: {}", e)))?;
+
+        Ok(throughput)
     }
 
     async fn get_current_resource_usage(&self) -> Result<ResourceUsage, RepositoryError> {

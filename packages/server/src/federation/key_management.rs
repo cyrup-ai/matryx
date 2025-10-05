@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::{error, info, warn};
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use surrealdb::engine::any::Any;
+use tokio::time::{Duration, interval};
+use tracing::{error, info, warn};
 
 use crate::AppState;
 use matryx_surrealdb::repository::{InfrastructureService, SigningKey};
@@ -24,7 +24,7 @@ impl KeyManagementService {
     pub fn new(app_state: Arc<AppState>) -> Self {
         Self {
             app_state,
-            check_interval_hours: 6, // Check every 6 hours
+            check_interval_hours: 6,    // Check every 6 hours
             refresh_threshold_days: 30, // Refresh keys 30 days before expiration
         }
     }
@@ -63,16 +63,17 @@ impl KeyManagementService {
         let server_name = &self.app_state.homeserver_name;
 
         // Get current server keys
-        let server_keys_response = infrastructure_service
-            .get_server_keys(server_name, None)
-            .await?;
+        let server_keys_response =
+            infrastructure_service.get_server_keys(server_name, None).await?;
 
         let now = Utc::now();
         let refresh_threshold = now + chrono::Duration::days(self.refresh_threshold_days);
 
         for server_keys in &server_keys_response.server_keys {
             let valid_until = DateTime::from_timestamp(server_keys.valid_until_ts / 1000, 0)
-                .ok_or_else(|| format!("Invalid timestamp in server keys: {}", server_keys.valid_until_ts))?;
+                .ok_or_else(|| {
+                    format!("Invalid timestamp in server keys: {}", server_keys.valid_until_ts)
+                })?;
 
             if valid_until <= refresh_threshold {
                 warn!(
@@ -81,7 +82,9 @@ impl KeyManagementService {
                 );
 
                 // Generate new key before expiration
-                if let Err(e) = self.generate_new_signing_key(&infrastructure_service, server_name).await {
+                if let Err(e) =
+                    self.generate_new_signing_key(&infrastructure_service, server_name).await
+                {
                     error!("Failed to generate new signing key for {}: {}", server_name, e);
                 } else {
                     info!("Successfully generated new signing key for {}", server_name);
@@ -103,8 +106,8 @@ impl KeyManagementService {
         infrastructure_service: &InfrastructureService<Any>,
         server_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use ed25519_dalek::SigningKey as Ed25519SigningKey;
         use base64::{Engine, engine::general_purpose};
+        use ed25519_dalek::SigningKey as Ed25519SigningKey;
 
         // Generate new Ed25519 keypair
         let mut secret_bytes = [0u8; 32];
@@ -147,12 +150,18 @@ impl KeyManagementService {
 
     /// Create infrastructure service instance
     async fn create_infrastructure_service(&self) -> InfrastructureService<Any> {
-        let websocket_repo = matryx_surrealdb::repository::WebSocketRepository::new(self.app_state.db.clone());
-        let transaction_repo = matryx_surrealdb::repository::TransactionRepository::new(self.app_state.db.clone());
-        let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(self.app_state.db.clone());
-        let registration_repo = matryx_surrealdb::repository::RegistrationRepository::new(self.app_state.db.clone());
-        let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(self.app_state.db.clone());
-        let device_repo = matryx_surrealdb::repository::DeviceRepository::new(self.app_state.db.clone());
+        let websocket_repo =
+            matryx_surrealdb::repository::WebSocketRepository::new(self.app_state.db.clone());
+        let transaction_repo =
+            matryx_surrealdb::repository::TransactionRepository::new(self.app_state.db.clone());
+        let key_server_repo =
+            matryx_surrealdb::repository::KeyServerRepository::new(self.app_state.db.clone());
+        let registration_repo =
+            matryx_surrealdb::repository::RegistrationRepository::new(self.app_state.db.clone());
+        let directory_repo =
+            matryx_surrealdb::repository::DirectoryRepository::new(self.app_state.db.clone());
+        let device_repo =
+            matryx_surrealdb::repository::DeviceRepository::new(self.app_state.db.clone());
 
         InfrastructureService::new(
             websocket_repo,

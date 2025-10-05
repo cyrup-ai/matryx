@@ -1,5 +1,4 @@
-//! Module contains intentional library code not yet fully integrated
-#![allow(dead_code)]
+//! Module for processing mentions in Matrix messages
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -69,18 +68,21 @@ pub struct MentionsMetadata {
 
 /// Static regex patterns for safe compilation
 static USER_MENTION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})")
-        .unwrap_or_else(|e| panic!("Invalid user mention regex pattern - this indicates a programming error: {}", e))
+    Regex::new(r"@([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap_or_else(|e| {
+        panic!("Invalid user mention regex pattern - this indicates a programming error: {}", e)
+    })
 });
 
 static ROOM_MENTION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@room\b")
-        .unwrap_or_else(|e| panic!("Invalid room mention regex pattern - this indicates a programming error: {}", e))
+    Regex::new(r"@room\b").unwrap_or_else(|e| {
+        panic!("Invalid room mention regex pattern - this indicates a programming error: {}", e)
+    })
 });
 
 static ROOM_ALIAS_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"#([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})")
-        .unwrap_or_else(|e| panic!("Invalid room alias regex pattern - this indicates a programming error: {}", e))
+    Regex::new(r"#([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap_or_else(|e| {
+        panic!("Invalid room alias regex pattern - this indicates a programming error: {}", e)
+    })
 });
 
 /// Mention detection and processing
@@ -125,11 +127,14 @@ impl MentionsProcessor {
             // Detect mentions from content text (fallback for backwards compatibility)
             mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
             has_room_mention = self.detect_room_mentions(&text_content);
-            
+
             // Also detect room alias mentions for context and logging
             let room_alias_mentions = self.detect_room_alias_mentions(&text_content);
             if !room_alias_mentions.is_empty() {
-                info!("Detected room alias mentions in room {}: {:?}", room_id, room_alias_mentions);
+                info!(
+                    "Detected room alias mentions in room {}: {:?}",
+                    room_id, room_alias_mentions
+                );
                 // Room alias mentions could be used for cross-room notifications or context
                 // For now, we log them but don't add to mentions metadata as Matrix spec
                 // defines m.mentions for user and @room mentions only
@@ -375,10 +380,10 @@ impl MentionsProcessor {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         // Integrate with push notification system
-        if let Ok(event) = state.room_operations.get_event(event_id).await {
-            if let Err(e) = state.push_engine.process_event(&event, room_id).await {
-                warn!("Failed to process push notifications for mention: {}", e);
-            }
+        if let Ok(event) = state.room_operations.get_event(event_id).await
+            && let Err(e) = state.push_engine.process_event(&event, room_id).await
+        {
+            warn!("Failed to process push notifications for mention: {}", e);
         }
 
         Ok(())
@@ -401,10 +406,10 @@ impl MentionsProcessor {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         // Integrate with push notification system
-        if let Ok(event) = state.room_operations.get_event(event_id).await {
-            if let Err(e) = state.push_engine.process_event(&event, room_id).await {
-                warn!("Failed to process push notifications for room mention: {}", e);
-            }
+        if let Ok(event) = state.room_operations.get_event(event_id).await
+            && let Err(e) = state.push_engine.process_event(&event, room_id).await
+        {
+            warn!("Failed to process push notifications for room mention: {}", e);
         }
 
         Ok(())

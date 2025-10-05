@@ -1,12 +1,9 @@
 use serde_json::{Value, json};
 
-
 use crate::state::AppState;
 use matryx_entity::filter::EventFilter;
 use matryx_entity::types::{Event, Membership};
 use matryx_surrealdb::repository::{AccountDataRepository, EventRepository, MembershipRepository};
-
-
 
 pub async fn get_user_account_data(
     state: &AppState,
@@ -38,7 +35,7 @@ pub async fn set_user_presence(
     presence: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::{PresenceRepository, PresenceState};
-    
+
     // Validate presence value and convert to PresenceState
     let presence_state = match presence {
         "online" => PresenceState::Online,
@@ -48,7 +45,9 @@ pub async fn set_user_presence(
     };
 
     let presence_repo = PresenceRepository::new(state.db.clone());
-    presence_repo.update_user_presence_state(user_id, presence_state, None).await
+    presence_repo
+        .update_user_presence_state(user_id, presence_state, None)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     Ok(())
@@ -61,7 +60,7 @@ pub async fn get_room_heroes(
     current_user_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::SyncRepository;
-    
+
     let sync_repo = SyncRepository::new(state.db.clone());
     let heroes = sync_repo
         .get_room_heroes(room_id, current_user_id)
@@ -77,9 +76,11 @@ pub async fn get_joined_member_count(
     room_id: &str,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::SyncRepository;
-    
+
     let sync_repo = SyncRepository::new(state.db.clone());
-    let count = sync_repo.get_room_member_count(room_id).await
+    let count = sync_repo
+        .get_room_member_count(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(count)
 }
@@ -90,9 +91,11 @@ pub async fn get_invited_member_count(
     room_id: &str,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::SyncRepository;
-    
+
     let sync_repo = SyncRepository::new(state.db.clone());
-    let count = sync_repo.get_room_invited_member_count(room_id).await
+    let count = sync_repo
+        .get_room_invited_member_count(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(count)
 }
@@ -103,9 +106,11 @@ pub async fn get_user_presence_events(
     user_id: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::PresenceRepository;
-    
+
     let presence_repo = PresenceRepository::new(state.db.clone());
-    let presence_events = presence_repo.get_user_presence_events(user_id, None).await
+    let presence_events = presence_repo
+        .get_user_presence_events(user_id, None)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     let events: Vec<Value> = presence_events
@@ -127,8 +132,6 @@ pub async fn get_user_presence_events(
     Ok(events)
 }
 
-
-
 /// Get room state events
 pub async fn get_room_state_events(
     state: &AppState,
@@ -149,9 +152,11 @@ pub async fn get_room_ephemeral_events(
     room_id: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     use matryx_surrealdb::repository::SyncRepository;
-    
+
     let sync_repo = SyncRepository::new(state.db.clone());
-    let ephemeral_events = sync_repo.get_room_ephemeral_events(room_id, None).await
+    let ephemeral_events = sync_repo
+        .get_room_ephemeral_events(room_id, None)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     let json_events: Vec<Value> = ephemeral_events
@@ -219,10 +224,11 @@ pub async fn get_room_timeline_events(
     state: &AppState,
     room_id: &str,
     limit: Option<u32>,
+    since_ts: Option<i64>,
 ) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = EventRepository::new(state.db.clone());
     let events = event_repo
-        .get_room_events(room_id, limit)
+        .get_room_events_since(room_id, since_ts, limit)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 

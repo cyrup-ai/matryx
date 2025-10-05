@@ -60,13 +60,13 @@ pub async fn get(
 
     // TASK17 SUBTASK 4: Use ThirdPartyService instead of direct queries
     let third_party_service = ThirdPartyService::new(state.db.clone());
-    
+
     let protocols_map = match third_party_service.query_third_party_protocols().await {
         Ok(protocols) => protocols,
         Err(e) => {
             error!("Failed to query third-party protocols: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     // Convert to response format
@@ -74,23 +74,20 @@ pub async fn get(
 
     for (protocol_id, protocol_config) in protocols_map {
         // Convert repository types to server types
-        let user_fields: Vec<FieldType> = protocol_config.user_fields
+        let user_fields: Vec<FieldType> = protocol_config
+            .user_fields
             .into_iter()
-            .map(|f| FieldType {
-                regexp: f.regexp,
-                placeholder: f.placeholder,
-            })
+            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
             .collect();
 
-        let location_fields: Vec<FieldType> = protocol_config.location_fields
+        let location_fields: Vec<FieldType> = protocol_config
+            .location_fields
             .into_iter()
-            .map(|f| FieldType {
-                regexp: f.regexp,
-                placeholder: f.placeholder,
-            })
+            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
             .collect();
 
-        let instances: Vec<ProtocolInstance> = protocol_config.instances
+        let instances: Vec<ProtocolInstance> = protocol_config
+            .instances
             .into_iter()
             .map(|i| ProtocolInstance {
                 desc: i.desc,

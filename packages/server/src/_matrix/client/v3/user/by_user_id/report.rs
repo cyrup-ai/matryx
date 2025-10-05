@@ -4,9 +4,7 @@ use axum::{
     response::Json,
 };
 use serde::{Deserialize, Serialize};
-
-
-
+use tracing::{info, warn};
 
 use crate::AppState;
 use matryx_surrealdb::repository::ProfileManagementService;
@@ -77,7 +75,23 @@ pub async fn post(
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 
-    // TODO: Notify moderators/administrators
+    // Notify server administrators of the report
+    if let Some(email_service) = &state.email_service {
+        let admin_email = &state.config.admin_email;
+        if let Err(e) = email_service.send_moderator_notification(
+            admin_email,
+            &token_info.user_id,
+            &reported_user_id,
+            &request.reason,
+        ).await {
+            warn!("Failed to send moderator notification email: {}", e);
+            // Continue anyway - report is already created
+        } else {
+            info!("Moderator notification sent to {}", admin_email);
+        }
+    } else {
+        warn!("Email service not available - moderator notification not sent");
+    }
 
     Ok(Json(ReportResponse {}))
 }

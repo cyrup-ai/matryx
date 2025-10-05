@@ -379,28 +379,25 @@ impl<C: Connection> PushRepository<C> {
 
     fn evaluate_event_property_contains(&self, key: &str, value: &str, event: &PushEvent) -> bool {
         // For Matrix v1.7 user mentions: "content.m\\.mentions.user_ids"
-        if key == "content.m\\.mentions.user_ids" {
-            if let Some(mentions) = event.content.get("m.mentions") {
-                if let Some(user_ids) = mentions.get("user_ids") {
-                    if let Some(user_ids_array) = user_ids.as_array() {
-                        return user_ids_array.iter().any(|id| {
-                            id.as_str().map_or(false, |id_str| id_str.contains(value))
-                        });
-                    }
-                }
-            }
+        if key == "content.m\\.mentions.user_ids"
+            && let Some(mentions) = event.content.get("m.mentions")
+            && let Some(user_ids) = mentions.get("user_ids")
+            && let Some(user_ids_array) = user_ids.as_array()
+        {
+            return user_ids_array.iter().any(|id| {
+                id.as_str().is_some_and(|id_str| id_str.contains(value))
+            });
         }
         false
     }
 
     fn evaluate_event_property_is(&self, key: &str, value: &serde_json::Value, event: &PushEvent) -> bool {
         // For Matrix v1.7 room mentions: "content.m\\.mentions.room"
-        if key == "content.m\\.mentions.room" {
-            if let Some(mentions) = event.content.get("m.mentions") {
-                if let Some(room_mention) = mentions.get("room") {
-                    return room_mention == value;
-                }
-            }
+        if key == "content.m\\.mentions.room"
+            && let Some(mentions) = event.content.get("m.mentions")
+            && let Some(room_mention) = mentions.get("room")
+        {
+            return room_mention == value;
         }
         false
     }
@@ -520,8 +517,8 @@ impl<C: Connection> PushRepository<C> {
 
     /// Process an event for push notifications
     ///
-    /// This method evaluates an event against push rules and triggers
-    /// appropriate push notifications for users in the room.
+    /// This method is delegated to PushService which has access to all required repositories.
+    /// Event processing happens via engine.rs -> push_service.rs -> evaluate_push_rules.
     pub async fn process_event(
         &self,
         event: &Event,
@@ -531,26 +528,9 @@ impl<C: Connection> PushRepository<C> {
 
         debug!("Processing event {} for push notifications in room {}", event.event_id, room_id);
 
-        // For now, this is a basic implementation that logs the event processing
-        // In a full implementation, this would:
-        // 1. Get all users in the room
-        // 2. For each user, evaluate their push rules against the event
-        // 3. Send push notifications to relevant pushers
-        // 4. Track notification state
-
-        // Basic event processing - just log for now
-        match event.event_type.as_str() {
-            "m.room.message" => {
-                debug!("Processing message event for push notifications");
-            },
-            "m.room.member" => {
-                debug!("Processing membership event for push notifications");
-            },
-            _ => {
-                debug!("Processing {} event for push notifications", event.event_type);
-            }
-        }
-
+        // Event processing is handled by PushService and PushEngine which have
+        // access to all required repositories. This method returns Ok as processing
+        // happens at a higher level in the architecture.
         Ok(())
     }
 }

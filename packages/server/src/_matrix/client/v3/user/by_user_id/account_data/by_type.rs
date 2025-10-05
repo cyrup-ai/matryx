@@ -7,8 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{info, error};
-
+use tracing::{error, info};
 
 use crate::AppState;
 use matryx_surrealdb::repository::ProfileManagementService;
@@ -75,57 +74,58 @@ pub async fn get_account_data(
                 "m.direct" => {
                     // Validate and return direct message data structure
                     match serde_json::from_value::<DirectMessageData>(content.clone()) {
-                        Ok(_) => return Ok(Json(content)),
+                        Ok(_) => Ok(Json(content)),
                         Err(_) => {
                             // If existing data is malformed, return empty direct message structure
-                            let empty_dm_data = DirectMessageData {
-                                user_rooms: HashMap::new(),
-                            };
-                            return Ok(Json(serde_json::to_value(empty_dm_data).unwrap_or(content)));
-                        }
+                            let empty_dm_data = DirectMessageData { user_rooms: HashMap::new() };
+                            Ok(Json(serde_json::to_value(empty_dm_data).unwrap_or(content)))
+                        },
                     }
                 },
                 "m.ignored_user_list" => {
                     // Validate and return ignored user list structure
                     match serde_json::from_value::<IgnoredUserList>(content.clone()) {
-                        Ok(_) => return Ok(Json(content)),
+                        Ok(_) => Ok(Json(content)),
                         Err(_) => {
                             // If existing data is malformed, return empty ignored user list
-                            let empty_ignored_list = IgnoredUserList {
-                                ignored_users: HashMap::new(),
-                            };
-                            return Ok(Json(serde_json::to_value(empty_ignored_list).unwrap_or(content)));
-                        }
+                            let empty_ignored_list =
+                                IgnoredUserList { ignored_users: HashMap::new() };
+                            Ok(Json(serde_json::to_value(empty_ignored_list).unwrap_or(content)))
+                        },
                     }
                 },
                 _ => {
                     // For custom account data types, return as-is
-                    return Ok(Json(content));
-                }
+                    Ok(Json(content))
+                },
             }
         },
         Ok(None) => {
             // Return appropriate default structure for Matrix-standard types
             match data_type.as_str() {
                 "m.direct" => {
-                    let default_dm_data = DirectMessageData {
-                        user_rooms: HashMap::new(),
-                    };
-                    return Ok(Json(serde_json::to_value(default_dm_data).unwrap()));
+                    let default_dm_data = DirectMessageData { user_rooms: HashMap::new() };
+                    Ok(Json(serde_json::to_value(default_dm_data)
+                        .map_err(|e| {
+                            error!("Failed to serialize default m.direct data: {}", e);
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?))
                 },
                 "m.ignored_user_list" => {
-                    let default_ignored_list = IgnoredUserList {
-                        ignored_users: HashMap::new(),
-                    };
-                    return Ok(Json(serde_json::to_value(default_ignored_list).unwrap()));
+                    let default_ignored_list = IgnoredUserList { ignored_users: HashMap::new() };
+                    Ok(Json(serde_json::to_value(default_ignored_list)
+                        .map_err(|e| {
+                            error!("Failed to serialize default m.ignored_user_list data: {}", e);
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?))
                 },
                 _ => {
                     // For custom types, return 404 if not found
-                    return Err(StatusCode::NOT_FOUND);
-                }
+                    Err(StatusCode::NOT_FOUND)
+                },
             }
         },
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -173,7 +173,7 @@ pub async fn set_account_data(
                 Err(_) => {
                     error!("Invalid m.direct account data structure for user {}", user_id);
                     return Err(StatusCode::BAD_REQUEST);
-                }
+                },
             }
         },
         "m.ignored_user_list" => {
@@ -181,15 +181,18 @@ pub async fn set_account_data(
             match serde_json::from_value::<IgnoredUserList>(request.content.clone()) {
                 Ok(_) => request.content,
                 Err(_) => {
-                    error!("Invalid m.ignored_user_list account data structure for user {}", user_id);
+                    error!(
+                        "Invalid m.ignored_user_list account data structure for user {}",
+                        user_id
+                    );
                     return Err(StatusCode::BAD_REQUEST);
-                }
+                },
             }
         },
         _ => {
             // For custom account data types, accept as-is
             request.content
-        }
+        },
     };
 
     let profile_service = ProfileManagementService::new(state.db.clone());

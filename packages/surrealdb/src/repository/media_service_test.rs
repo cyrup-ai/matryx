@@ -11,8 +11,13 @@ mod media_service_tests {
     use tokio;
 
     async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("surrealkv://test_data/media_test.db").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
+        let db = surrealdb::engine::any::connect("surrealkv://test_data/media_test.db")
+            .await
+            .expect("Failed to connect to test database");
+        db.use_ns("test")
+            .use_db("test")
+            .await
+            .expect("Failed to set test database namespace");
         db
     }
 
@@ -39,7 +44,7 @@ mod media_service_tests {
             .await;
 
         assert!(result.is_ok());
-        let upload_result = result.unwrap();
+        let upload_result = result.expect("Expected upload result");
         assert!(!upload_result.media_id.is_empty());
         assert!(upload_result.content_uri.starts_with("mxc://"));
         assert_eq!(upload_result.content_type, content_type);
@@ -74,10 +79,14 @@ mod media_service_tests {
         let upload_result = media_service
             .upload_media(user_id, content, content_type, None)
             .await
-            .unwrap();
+            .expect("Failed to upload media");
 
         // Extract media_id and server_name from content_uri
-        let uri_parts: Vec<&str> = upload_result.content_uri.strip_prefix("mxc://").unwrap().split('/').collect();
+        let uri_parts: Vec<&str> = upload_result.content_uri
+            .strip_prefix("mxc://")
+            .expect("Expected mxc:// prefix")
+            .split('/')
+            .collect();
         let server_name = uri_parts[0];
         let media_id = uri_parts[1];
 
@@ -87,7 +96,7 @@ mod media_service_tests {
             .await;
 
         assert!(download_result.is_ok());
-        let download = download_result.unwrap();
+        let download = download_result.expect("Expected download result");
         assert_eq!(download.content, content);
         assert_eq!(download.content_type, content_type);
         assert_eq!(download.content_length, content.len() as u64);
@@ -116,9 +125,13 @@ mod media_service_tests {
         let upload_result = media_service
             .upload_media(user_id, content, content_type, None)
             .await
-            .unwrap();
+            .expect("Failed to upload media");
 
-        let uri_parts: Vec<&str> = upload_result.content_uri.strip_prefix("mxc://").unwrap().split('/').collect();
+        let uri_parts: Vec<&str> = upload_result.content_uri
+            .strip_prefix("mxc://")
+            .expect("Expected mxc:// prefix")
+            .split('/')
+            .collect();
         let server_name = uri_parts[0];
         let media_id = uri_parts[1];
 
@@ -128,7 +141,7 @@ mod media_service_tests {
             .await;
 
         assert!(thumbnail_result.is_ok());
-        let thumbnail = thumbnail_result.unwrap();
+        let thumbnail = thumbnail_result.expect("Expected thumbnail result");
         assert_eq!(thumbnail.width, 320);
         assert_eq!(thumbnail.height, 240);
         assert_eq!(thumbnail.content_type, "image/jpeg");
@@ -147,9 +160,13 @@ mod media_service_tests {
         let upload_result = media_service
             .upload_media(user_id, content, content_type, None)
             .await
-            .unwrap();
+            .expect("Failed to upload media");
 
-        let uri_parts: Vec<&str> = upload_result.content_uri.strip_prefix("mxc://").unwrap().split('/').collect();
+        let uri_parts: Vec<&str> = upload_result.content_uri
+            .strip_prefix("mxc://")
+            .expect("Expected mxc:// prefix")
+            .split('/')
+            .collect();
         let server_name = uri_parts[0];
         let media_id = uri_parts[1];
 
@@ -170,7 +187,7 @@ mod media_service_tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.expect("Expected media upload validation result"));
     }
 
     #[tokio::test]
@@ -182,7 +199,7 @@ mod media_service_tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(!result.unwrap());
+        assert!(!result.expect("Expected media upload validation result"));
     }
 
     #[tokio::test]
@@ -194,7 +211,7 @@ mod media_service_tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(!result.unwrap());
+        assert!(!result.expect("Expected media upload validation result"));
     }
 
     #[tokio::test]
@@ -207,9 +224,13 @@ mod media_service_tests {
         let upload_result = media_service
             .upload_media(user_id, content, "text/plain", None)
             .await
-            .unwrap();
+            .expect("Failed to upload media");
 
-        let uri_parts: Vec<&str> = upload_result.content_uri.strip_prefix("mxc://").unwrap().split('/').collect();
+        let uri_parts: Vec<&str> = upload_result.content_uri
+            .strip_prefix("mxc://")
+            .expect("Expected mxc:// prefix")
+            .split('/')
+            .collect();
         let server_name = uri_parts[0];
         let media_id = uri_parts[1];
 
@@ -219,7 +240,7 @@ mod media_service_tests {
             .await;
 
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.expect("Expected media access validation result"));
     }
 
     #[tokio::test]
@@ -234,12 +255,12 @@ mod media_service_tests {
         let _upload1 = media_service
             .upload_media(user_id, content1, "text/plain", None)
             .await
-            .unwrap();
+            .expect("Failed to upload media 1");
             
         let _upload2 = media_service
             .upload_media(user_id, content2, "text/plain", None)
             .await
-            .unwrap();
+            .expect("Failed to upload media 2");
 
         // Get statistics
         let stats_result = media_service
@@ -247,7 +268,7 @@ mod media_service_tests {
             .await;
 
         assert!(stats_result.is_ok());
-        let stats = stats_result.unwrap();
+        let stats = stats_result.expect("Expected media statistics");
         assert!(stats.total_files >= 2);
         assert!(stats.total_size > 0);
     }
@@ -263,7 +284,7 @@ mod media_service_tests {
             .await;
 
         assert!(cleanup_result.is_ok());
-        let cleanup = cleanup_result.unwrap();
+        let cleanup = cleanup_result.expect("Expected cleanup result");
         assert_eq!(cleanup.deleted_files, 0); // No files should be deleted with future cutoff
     }
 
@@ -277,9 +298,13 @@ mod media_service_tests {
         let upload_result = media_service
             .upload_media(user_id, content, "text/plain", None)
             .await
-            .unwrap();
+            .expect("Failed to upload media");
 
-        let uri_parts: Vec<&str> = upload_result.content_uri.strip_prefix("mxc://").unwrap().split('/').collect();
+        let uri_parts: Vec<&str> = upload_result.content_uri
+            .strip_prefix("mxc://")
+            .expect("Expected mxc:// prefix")
+            .split('/')
+            .collect();
         let server_name = uri_parts[0];
         let media_id = uri_parts[1];
 
@@ -289,7 +314,7 @@ mod media_service_tests {
             .await;
 
         assert!(federation_result.is_ok());
-        let response = federation_result.unwrap();
+        let response = federation_result.expect("Expected federation media response");
         assert_eq!(response.content, content);
         assert_eq!(response.content_type, "text/plain");
         assert_eq!(response.content_length, content.len() as u64);
@@ -307,12 +332,12 @@ mod media_service_tests {
         let upload1 = media_service
             .upload_media(user_id, content, content_type, None)
             .await
-            .unwrap();
+            .expect("Failed to upload media first time");
 
         let upload2 = media_service
             .upload_media(user_id, content, content_type, None)
             .await
-            .unwrap();
+            .expect("Failed to upload media second time");
 
         // Should return the same media_id due to deduplication
         assert_eq!(upload1.media_id, upload2.media_id);

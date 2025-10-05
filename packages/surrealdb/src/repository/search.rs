@@ -353,7 +353,7 @@ impl SearchRepository {
     ) -> Result<Vec<UserSearchResult>, RepositoryError> {
         let search_query = r#"
             SELECT user_id, display_name, avatar_url
-            FROM users 
+            FROM user 
             WHERE (user_id CONTAINS $query OR display_name CONTAINS $query)
             AND active = true
             AND user_id != $requesting_user_id
@@ -477,7 +477,7 @@ impl SearchRepository {
         let start_time = std::time::Instant::now();
 
         // Get all events for the room
-        let events_query = "SELECT * FROM events WHERE room_id = $room_id";
+        let events_query = "SELECT * FROM event WHERE room_id = $room_id";
 
         let mut response = self
             .db
@@ -553,7 +553,7 @@ impl SearchRepository {
     }
 
     async fn get_full_event(&self, event_id: &str) -> Result<Option<Value>, RepositoryError> {
-        let event_query = "SELECT * FROM events WHERE event_id = $event_id";
+        let event_query = "SELECT * FROM event WHERE event_id = $event_id";
 
         let mut response = self
             .db
@@ -575,7 +575,7 @@ impl SearchRepository {
     ) -> Result<matryx_entity::types::UserDirectoryResponse, RepositoryError> {
         let query = r#"
             SELECT user_id, display_name, avatar_url, is_guest
-            FROM users
+            FROM user
             WHERE display_name CONTAINS $search_term
             OR user_id CONTAINS $search_term
             ORDER BY display_name

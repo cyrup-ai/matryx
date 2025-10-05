@@ -1,4 +1,8 @@
-use axum::{Json, extract::{Path, State}, http::{HeaderMap, StatusCode}};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use tracing::{error, info};
@@ -56,45 +60,54 @@ pub async fn get(
 
     // Use ThirdPartyService and BridgeRepository for protocol information
     let third_party_service = ThirdPartyService::new(state.db.clone());
-    
-    let protocol_config = match third_party_service.third_party_repo().get_protocol_by_id(&protocol).await {
-        Ok(Some(config)) => config,
-        Ok(None) => {
-            error!("Protocol '{}' not found", protocol);
-            return Err(StatusCode::NOT_FOUND);
-        },
-        Err(e) => {
-            error!("Failed to get protocol '{}': {}", protocol, e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+
+    let protocol_config =
+        match third_party_service.third_party_repo().get_protocol_by_id(&protocol).await {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                error!("Protocol '{}' not found", protocol);
+                return Err(StatusCode::NOT_FOUND);
+            },
+            Err(e) => {
+                error!("Failed to get protocol '{}': {}", protocol, e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        };
 
     // Get bridge status for this protocol
-    let bridges = match third_party_service.bridge_repo().get_bridges_for_protocol(&protocol).await {
+    let bridges = match third_party_service.bridge_repo().get_bridges_for_protocol(&protocol).await
+    {
         Ok(bridges) => bridges,
         Err(e) => {
             error!("Failed to get bridges for protocol '{}': {}", protocol, e);
             Vec::new() // Continue without bridge info
-        }
+        },
     };
 
     // Build field_types map
     let mut field_types: HashMap<String, FieldType> = HashMap::new();
     for field in &protocol_config.user_fields {
-        field_types.insert(format!("user.{}", field.placeholder), FieldType {
-            regexp: field.regexp.clone(),
-            placeholder: field.placeholder.clone(),
-        });
+        field_types.insert(
+            format!("user.{}", field.placeholder),
+            FieldType {
+                regexp: field.regexp.clone(),
+                placeholder: field.placeholder.clone(),
+            },
+        );
     }
     for field in &protocol_config.location_fields {
-        field_types.insert(format!("location.{}", field.placeholder), FieldType {
-            regexp: field.regexp.clone(),
-            placeholder: field.placeholder.clone(),
-        });
+        field_types.insert(
+            format!("location.{}", field.placeholder),
+            FieldType {
+                regexp: field.regexp.clone(),
+                placeholder: field.placeholder.clone(),
+            },
+        );
     }
 
     // Convert protocol instances
-    let instances: Vec<ProtocolInstance> = protocol_config.instances
+    let instances: Vec<ProtocolInstance> = protocol_config
+        .instances
         .into_iter()
         .map(|instance| ProtocolInstance {
             desc: instance.desc,
@@ -112,14 +125,16 @@ pub async fn get(
     };
 
     let response = ProtocolResponse {
-        user_fields: protocol_config.user_fields.into_iter().map(|f| FieldType {
-            regexp: f.regexp,
-            placeholder: f.placeholder,
-        }).collect(),
-        location_fields: protocol_config.location_fields.into_iter().map(|f| FieldType {
-            regexp: f.regexp,
-            placeholder: f.placeholder,
-        }).collect(),
+        user_fields: protocol_config
+            .user_fields
+            .into_iter()
+            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .collect(),
+        location_fields: protocol_config
+            .location_fields
+            .into_iter()
+            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .collect(),
         icon: protocol_config.avatar_url,
         field_types,
         instances,

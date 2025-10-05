@@ -58,13 +58,11 @@ impl IntoResponse for MatrixAuthError {
             MatrixAuthError::MissingAuthorization => {
                 (StatusCode::UNAUTHORIZED, "M_UNAUTHORIZED", "Missing Authorization header")
             },
-            MatrixAuthError::InvalidXMatrixFormat => {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "M_UNAUTHORIZED",
-                    "Invalid X-Matrix authorization format",
-                )
-            },
+            MatrixAuthError::InvalidXMatrixFormat => (
+                StatusCode::UNAUTHORIZED,
+                "M_UNAUTHORIZED",
+                "Invalid X-Matrix authorization format",
+            ),
             MatrixAuthError::InvalidCredentials => {
                 (StatusCode::UNAUTHORIZED, "M_FORBIDDEN", "Invalid credentials")
             },

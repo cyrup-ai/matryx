@@ -1,6 +1,8 @@
 use crate::repository::error::RepositoryError;
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{SigningKey, Signature as Ed25519Signature, Signer, VerifyingKey, Verifier};
+use matryx_entity::utils::canonical_json::canonical_json_for_signing;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
@@ -221,12 +223,43 @@ impl CrossSigningRepository {
                 }
             })?;
 
-            // In a real implementation, this would use proper ed25519 verification
-            // For now, we'll validate the format and structure
-            if signature_bytes.len() == 64 && public_key_bytes.len() == 32 {
-                Ok(true)
-            } else {
-                Ok(false)
+            // Validate sizes
+            if signature_bytes.len() != 64 || public_key_bytes.len() != 32 {
+                return Ok(false);
+            }
+
+            // Convert to fixed-size arrays
+            let key_array: [u8; 32] = public_key_bytes.try_into()
+                .map_err(|_| RepositoryError::Validation {
+                    field: "public_key".to_string(),
+                    message: "Public key must be 32 bytes".to_string(),
+                })?;
+            let sig_array: [u8; 64] = signature_bytes.try_into()
+                .map_err(|_| RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: "Signature must be 64 bytes".to_string(),
+                })?;
+
+            // Create verifying key and signature
+            let verifying_key = VerifyingKey::from_bytes(&key_array)
+                .map_err(|e| RepositoryError::Validation {
+                    field: "public_key".to_string(),
+                    message: format!("Invalid Ed25519 key: {}", e),
+                })?;
+            let signature_obj = Ed25519Signature::from_bytes(&sig_array);
+
+            // Get canonical JSON of signing key
+            let signing_key_value = serde_json::to_value(signing_key)
+                .map_err(RepositoryError::Serialization)?;
+            let canonical = canonical_json_for_signing(&signing_key_value)
+                .map_err(|e| RepositoryError::SerializationError {
+                    message: format!("Canonical JSON error: {}", e),
+                })?;
+
+            // Verify signature
+            match verifying_key.verify(canonical.as_bytes(), &signature_obj) {
+                Ok(()) => Ok(true),
+                Err(_) => Ok(false),
             }
         } else {
             Err(RepositoryError::Validation {
@@ -238,7 +271,7 @@ impl CrossSigningRepository {
 
     pub async fn sign_device_key(
         &self,
-        user_id: &str,
+        _user_id: &str,
         _device_id: &str,
         device_key: &DeviceKey,
         signing_key: &CrossSigningKey,
@@ -275,14 +308,31 @@ impl CrossSigningRepository {
         let canonical_json =
             serde_json::to_string(&device_value).map_err(RepositoryError::Serialization)?;
 
-        // In a real implementation, this would use actual ed25519 signing
-        // For now, we'll create a mock signature
-        let signature_data = format!("{}:{}:{}", canonical_json, ed25519_key.1, user_id);
-        let mock_signature = general_purpose::STANDARD.encode(signature_data.as_bytes());
+        // Decode signing key from base64
+        let key_bytes = general_purpose::STANDARD.decode(ed25519_key.1)
+            .map_err(|e| RepositoryError::Validation {
+                field: "signing_key".to_string(),
+                message: format!("Invalid base64 signing key: {}", e),
+            })?;
+        
+        let key_array: [u8; 32] = key_bytes.try_into()
+            .map_err(|_| RepositoryError::Validation {
+                field: "signing_key".to_string(),
+                message: "Signing key must be 32 bytes".to_string(),
+            })?;
+
+        // Sign with Ed25519
+        let signing_key_obj = SigningKey::from_bytes(&key_array);
+        let signature = signing_key_obj.sign(canonical_json.as_bytes());
+        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         Ok(Signature {
-            signature: mock_signature,
-            key_id: ed25519_key.0.split(':').nth(1).unwrap_or("unknown").to_string(),
+            signature: signature_b64,
+            key_id: ed25519_key.0.split(':').nth(1)
+                .ok_or_else(|| RepositoryError::Validation {
+                    field: "key_id".to_string(),
+                    message: "Invalid key ID format".to_string(),
+                })?.to_string(),
             algorithm: "ed25519".to_string(),
         })
     }

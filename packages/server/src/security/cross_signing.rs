@@ -6,13 +6,10 @@ use serde::Serialize;
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
 
-use matryx_surrealdb::repository::cross_signing::{
-    CrossSigningKey,
-    CrossSigningKeys,
-    DeviceKey,
-    Signature,
-};
 use matryx_surrealdb::repository::CrossSigningRepository;
+use matryx_surrealdb::repository::cross_signing::{
+    CrossSigningKey, CrossSigningKeys, DeviceKey, Signature,
+};
 
 #[derive(Debug)]
 pub enum CryptoError {

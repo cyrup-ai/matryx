@@ -541,11 +541,17 @@ impl FilterRepository {
         &self,
         room_id: &str,
         filter: &RoomEventFilter,
+        since_ts: Option<i64>,
     ) -> Result<Vec<matryx_entity::types::Event>, RepositoryError> {
         let limit = filter.base.limit.unwrap_or(20) as i32;
         let mut query = "SELECT * FROM event WHERE room_id = $room_id".to_string();
         let mut bindings = std::collections::HashMap::new();
         bindings.insert("room_id".to_string(), room_id.to_string());
+
+        // Add incremental sync filtering
+        if let Some(ts) = since_ts {
+            query.push_str(&format!(" AND received_ts > {}", ts));
+        }
 
         // Add event type filtering at database level for performance
         if let Some(types) = &filter.base.types
@@ -583,7 +589,7 @@ impl FilterRepository {
             query.push_str(&format!(" AND sender NOT IN ({})", not_sender_list));
         }
 
-        query.push_str(" ORDER BY origin_server_ts DESC LIMIT $limit");
+        query.push_str(" ORDER BY received_ts ASC LIMIT $limit");
         bindings.insert("limit".to_string(), limit.to_string());
 
         let mut response = self.db

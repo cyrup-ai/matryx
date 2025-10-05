@@ -1,8 +1,11 @@
 use crate::repository::error::RepositoryError;
+use crate::repository::state_resolution::StateResolver;
+use crate::repository::{EventRepository, RoomRepository};
 use futures_util::{Stream, StreamExt};
 use matryx_entity::types::{Event, Membership, MembershipState};
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use surrealdb::{Surreal, engine::any::Any};
 use tracing;
@@ -1191,6 +1194,7 @@ impl MembershipRepository {
         user_id: &str,
         display_name: Option<String>,
         avatar_url: Option<String>,
+        auth_service: &crate::repository::room_authorization::RoomAuthorizationService,
     ) -> Result<(), RepositoryError> {
         let existing_membership = self.get_membership(room_id, user_id).await?;
 
@@ -1212,8 +1216,16 @@ impl MembershipRepository {
                     // Can join from invite
                 },
                 MembershipState::Leave | MembershipState::Knock => {
-                    // May be able to join depending on room settings
-                    // For now, allow it (room join rules would be checked elsewhere)
+                    // Validate join rules before allowing join
+                    let auth_result = auth_service
+                        .validate_join_request(room_id, user_id, None)
+                        .await?;
+
+                    if !auth_result.authorized {
+                        return Err(RepositoryError::Forbidden {
+                            reason: auth_result.reason.unwrap_or_else(|| "Cannot join room".to_string()),
+                        });
+                    }
                 },
             }
         }
@@ -1734,13 +1746,43 @@ impl MembershipRepository {
         Ok(None)
     }
 
-    /// Resolve membership conflicts using Matrix state resolution
+    /// Get current m.room.power_levels event for room as full Event object
+    /// 
+    /// This fetches the complete Event struct needed for state resolution,
+    /// not just the content field.
+    async fn get_power_levels_event_full(
+        &self,
+        room_id: &str,
+    ) -> Result<Option<Event>, RepositoryError> {
+        let query = "
+            SELECT * FROM event 
+            WHERE room_id = $room_id 
+            AND event_type = 'm.room.power_levels' 
+            AND state_key = ''
+            ORDER BY origin_server_ts DESC 
+            LIMIT 1
+        ";
+        
+        let mut result = self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await?;
+        
+        let events: Vec<Event> = result.take(0)?;
+        Ok(events.into_iter().next())
+    }
+
+    /// Resolve membership conflicts using Matrix State Resolution v2 algorithm
+    ///
+    /// Integrates with the complete StateResolver implementation to properly
+    /// handle state conflicts according to the Matrix specification.
     pub async fn resolve_membership_conflict(
         &self,
-        _room_id: &str,
-        _user_id: &str,
+        room_id: &str,
+        user_id: &str,
         conflicting_events: &[String],
     ) -> Result<MembershipState, RepositoryError> {
+        // Validate inputs
         if conflicting_events.is_empty() {
             return Err(RepositoryError::Validation {
                 field: "conflicting_events".to_string(),
@@ -1748,60 +1790,66 @@ impl MembershipRepository {
             });
         }
 
-        // Get event details for all conflicting events
-        let mut event_details = Vec::new();
+        // Step 1: Fetch conflicting events as Event objects (not JSON)
+        let mut events = Vec::new();
         for event_id in conflicting_events {
             let query = "
-                SELECT event_id, sender, origin_server_ts, depth, content
-                FROM event
+                SELECT * FROM event
                 WHERE event_id = $event_id
             ";
-            let mut result = self.db.query(query).bind(("event_id", event_id.clone())).await?;
-            let events: Vec<serde_json::Value> = result.take(0)?;
-            if let Some(event) = events.first() {
-                event_details.push(event.clone());
+            let mut result = self.db
+                .query(query)
+                .bind(("event_id", event_id.clone()))
+                .await?;
+            
+            let fetched: Vec<Event> = result.take(0)?;
+            if let Some(event) = fetched.into_iter().next() {
+                events.push(event);
             }
         }
 
-        if event_details.is_empty() {
+        if events.is_empty() {
             return Err(RepositoryError::NotFound {
                 entity_type: "Conflicting events".to_string(),
                 id: conflicting_events.join(", "),
             });
         }
 
-        // Simplified state resolution algorithm
-        // In practice, this would implement Matrix's full state resolution algorithm
+        // Step 2: Create repository instances from same database connection
+        let event_repo = Arc::new(EventRepository::new(self.db.clone()));
+        let room_repo = Arc::new(RoomRepository::new(self.db.clone()));
 
-        // 1. Sort by power level of sender (would need to look up power levels)
-        // 2. Sort by origin_server_ts (oldest first)
-        // 3. Sort by event_id lexicographically
+        // Step 3: Create StateResolver instance
+        let state_resolver = StateResolver::new(event_repo, room_repo);
 
-        let mut winning_event = &event_details[0];
-        for event in &event_details[1..] {
-            // Compare by timestamp first
-            let current_ts =
-                winning_event.get("origin_server_ts").and_then(|v| v.as_i64()).unwrap_or(0);
-            let candidate_ts = event.get("origin_server_ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        // Step 4: Get power levels event for conflict resolution
+        let power_event = self.get_power_levels_event_full(room_id).await?;
 
-            if candidate_ts < current_ts {
-                winning_event = event;
-            } else if candidate_ts == current_ts {
-                // Same timestamp, compare by event_id
-                let current_id =
-                    winning_event.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
-                let candidate_id = event.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
+        // Step 5: Resolve state using Matrix State Resolution v2 algorithm
+        let resolved_state = state_resolver
+            .resolve_state_v2(room_id, events, power_event)
+            .await
+            .map_err(|e| RepositoryError::StateResolution(e.to_string()))?;
 
-                if candidate_id < current_id {
-                    winning_event = event;
+        // Step 6: Extract the resolved membership event for this user
+        let membership_key = ("m.room.member".to_string(), user_id.to_string());
+        let resolved_event = resolved_state
+            .state_events
+            .get(&membership_key)
+            .ok_or_else(|| {
+                RepositoryError::NotFound {
+                    entity_type: "Resolved membership event".to_string(),
+                    id: format!("{}:{}", room_id, user_id),
                 }
-            }
-        }
+            })?;
 
-        // Extract membership state from winning event
-        if let Some(content) = winning_event.get("content")
-            && let Some(membership) = content.get("membership").and_then(|v| v.as_str()) {
-            let membership_state = match membership {
+        // Step 7: Extract membership state from event content
+        if let Some(membership_str) = resolved_event
+            .content
+            .get("membership")
+            .and_then(|v| v.as_str())
+        {
+            let membership_state = match membership_str {
                 "join" => MembershipState::Join,
                 "leave" => MembershipState::Leave,
                 "invite" => MembershipState::Invite,
@@ -1809,10 +1857,18 @@ impl MembershipRepository {
                 "knock" => MembershipState::Knock,
                 _ => MembershipState::Leave,
             };
+            
+            tracing::info!(
+                "State resolution completed for {}:{} - result: {:?}",
+                room_id,
+                user_id,
+                membership_state
+            );
+            
             return Ok(membership_state);
         }
 
-        // Default to leave if unable to determine
+        // Default to leave if unable to parse
         Ok(MembershipState::Leave)
     }
 
@@ -2524,7 +2580,12 @@ impl MembershipRepository {
     }
 
     /// Validate join permissions for federation
-    pub async fn validate_join_permissions(&self, room_id: &str, user_id: &str) -> Result<bool, RepositoryError> {
+    pub async fn validate_join_permissions(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        auth_service: &crate::repository::room_authorization::RoomAuthorizationService,
+    ) -> Result<bool, RepositoryError> {
         // Check if user is already a member
         let existing_membership = self.get_membership(room_id, user_id).await?;
         
@@ -2538,9 +2599,10 @@ impl MembershipRepository {
                 }
             },
             None => {
-                // Check room join rules - this would need room repository integration
-                // For now, assume public rooms allow join
-                Ok(true)
+                let auth_result = auth_service
+                    .validate_join_request(room_id, user_id, None)
+                    .await?;
+                Ok(auth_result.authorized)
             }
         }
     }
@@ -2564,20 +2626,30 @@ impl MembershipRepository {
     }
 
     /// Validate unban permissions
-    pub async fn validate_unban_permissions(&self, room_id: &str, unbanner_user_id: &str, target_user_id: &str) -> Result<bool, RepositoryError> {
+    pub async fn validate_unban_permissions(
+        &self,
+        room_id: &str,
+        unbanner_user_id: &str,
+        target_user_id: &str,
+        auth_service: &crate::repository::room_authorization::RoomAuthorizationService,
+    ) -> Result<bool, RepositoryError> {
         // Check if target user is actually banned
         let ban_status = self.get_room_ban_status(room_id, target_user_id).await?;
         if ban_status.is_none() {
             return Ok(false); // User is not banned
         }
 
-        // Check if unbanner has sufficient power level (would need power level repository integration)
-        // For now, check if unbanner is a member with join status
-        let unbanner_membership = self.get_membership(room_id, unbanner_user_id).await?;
-        match unbanner_membership {
-            Some(membership) => Ok(membership.membership == MembershipState::Join),
-            None => Ok(false),
-        }
+        // Validate using authorization service
+        let auth_result = auth_service
+            .validate_room_operation(
+                room_id,
+                unbanner_user_id,
+                "unban",
+                Some(target_user_id)
+            )
+            .await?;
+
+        Ok(auth_result.authorized)
     }
 
     /// Update membership for unban operation
@@ -2808,5 +2880,28 @@ impl MembershipRepository {
             .await?;
 
         Ok(response)
+    }
+
+    /// Get list of remote server names that have users in this room
+    pub async fn get_remote_servers_in_room(
+        &self,
+        room_id: &str,
+    ) -> Result<Vec<String>, RepositoryError> {
+        let memberships: Vec<Membership> = self.db
+            .query("SELECT * FROM membership WHERE room_id = $room_id AND membership = 'join'")
+            .bind(("room_id", room_id.to_string()))
+            .await?
+            .take(0)?;
+
+        // Extract server names from user IDs
+        let servers: std::collections::HashSet<String> = memberships
+            .iter()
+            .filter_map(|m| {
+                // user_id format: @localpart:server.name
+                m.user_id.split(':').nth(1).map(|s| s.to_string())
+            })
+            .collect();
+
+        Ok(servers.into_iter().collect())
     }
 }

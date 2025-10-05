@@ -10,12 +10,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
 use matryx_entity::types::{
-    Room,
-    SpaceHierarchyChildRoomsChunk,
-    SpaceHierarchyParentRoom,
-    SpaceHierarchyResponse,
+    Room, SpaceHierarchyChildRoomsChunk, SpaceHierarchyParentRoom, SpaceHierarchyResponse,
 };
-use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -202,8 +199,6 @@ async fn check_space_access_permission(
     Ok(world_readable || publicly_joinable)
 }
 
-
-
 /// Get space hierarchy for a room
 async fn get_space_hierarchy(
     state: &AppState,
@@ -233,7 +228,16 @@ async fn get_room_hierarchy_info(
     let membership_repo = MembershipRepository::new(state.db.clone());
 
     // Get room metadata from state events
-    let event_types = &["m.room.name", "m.room.topic", "m.room.avatar", "m.room.canonical_alias", "m.room.join_rules", "m.room.history_visibility", "m.room.guest_access", "m.room.create"];
+    let event_types = &[
+        "m.room.name",
+        "m.room.topic",
+        "m.room.avatar",
+        "m.room.canonical_alias",
+        "m.room.join_rules",
+        "m.room.history_visibility",
+        "m.room.guest_access",
+        "m.room.create",
+    ];
     let events = event_repo
         .get_room_state_by_types(room_id, event_types)
         .await
@@ -322,8 +326,6 @@ async fn get_room_hierarchy_info(
     })
 }
 
-
-
 /// Get child rooms for a space
 async fn get_space_children(
     state: &AppState,
@@ -364,7 +366,16 @@ async fn get_child_room_info(
     let membership_repo = MembershipRepository::new(state.db.clone());
 
     // Get room metadata from state events
-    let event_types = &["m.room.name", "m.room.topic", "m.room.avatar", "m.room.canonical_alias", "m.room.join_rules", "m.room.history_visibility", "m.room.guest_access", "m.room.create"];
+    let event_types = &[
+        "m.room.name",
+        "m.room.topic",
+        "m.room.avatar",
+        "m.room.canonical_alias",
+        "m.room.join_rules",
+        "m.room.history_visibility",
+        "m.room.guest_access",
+        "m.room.create",
+    ];
     let events = event_repo
         .get_room_state_by_types(room_id, event_types)
         .await

@@ -1,14 +1,14 @@
 use std::pin::Pin;
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Sse};
+use axum::response::Sse;
 use futures::stream::{Stream, StreamExt};
 
 use crate::auth::AuthenticatedUser;
 use crate::state::AppState;
 
-use super::super::types::{LiveSyncUpdate, SyncQuery};
 use super::super::filters::{apply_filter_to_update, create_live_filtered_stream, resolve_filter};
+use super::super::types::{LiveSyncUpdate, SyncQuery};
 use super::event_streams::{create_account_data_live_stream, create_event_live_stream};
 use super::membership_streams::create_enhanced_membership_stream;
 use super::presence_streams::create_presence_live_stream;
@@ -18,12 +18,13 @@ pub async fn get_sse_stream(
     state: AppState,
     auth: AuthenticatedUser,
     query: SyncQuery,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, axum::Error>>>, StatusCode> {
     let user_id = auth.user_id.clone();
 
     // Resolve filter parameter for streaming
     let applied_filter = if let Some(filter_param) = &query.filter {
-        resolve_filter(&state, filter_param, &user_id).await
+        resolve_filter(&state, filter_param, &user_id)
+            .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         None
@@ -35,17 +36,15 @@ pub async fn get_sse_stream(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Convert to SSE format
-    let sse_stream = combined_stream.map(|update_result| {
-        match update_result {
-            Ok(update) => {
-                let json_str = serde_json::to_string(&update).unwrap_or_else(|_| "{}".to_string());
-                Ok(axum::response::sse::Event::default().event("sync").data(json_str))
-            },
-            Err(e) => {
-                tracing::error!("SSE stream error: {:?}", e);
-                Err(axum::Error::new(e))
-            },
-        }
+    let sse_stream = combined_stream.map(|update_result| match update_result {
+        Ok(update) => {
+            let json_str = serde_json::to_string(&update).unwrap_or_else(|_| "{}".to_string());
+            Ok(axum::response::sse::Event::default().event("sync").data(json_str))
+        },
+        Err(e) => {
+            tracing::error!("SSE stream error: {:?}", e);
+            Err(axum::Error::new(e))
+        },
     });
 
     Ok(Sse::new(sse_stream).keep_alive(
@@ -71,7 +70,7 @@ async fn handle_live_sync_streams(
     } else {
         Box::pin(create_event_live_stream(state.clone(), user_id.clone()).await?)
     };
-    
+
     let account_data_stream =
         create_account_data_live_stream(state.clone(), user_id.clone()).await?;
     let presence_stream = create_presence_live_stream(state.clone(), user_id.clone()).await?;
@@ -111,7 +110,7 @@ async fn handle_live_sync_streams(
                     Ok(update) => {
                         // Apply filter to the sync update
                         apply_filter_to_update(update, &filter).await
-                    }
+                    },
                     Err(e) => Err(e),
                 }
             }

@@ -21,6 +21,9 @@ futures-util = "0.3.31"
 async-stream = "0.3.6"
 async-channel = "2.5.0"
 
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
 # Caching
 moka = { version = "0.12.11", features = ["future"] }
 
@@ -29,9 +32,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22.1"
 
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+
 # Logging & error handling
 tracing = "0.1.41"
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 anyhow = "1.0.100"
 
 # Time utilities
@@ -44,6 +50,9 @@ tokio-stream = "0.1.17"
 sha2 = "0.10.9"
 rand = "0.9.2"
 ed25519-dalek = "2.2.0"
+
+# System metrics
+sysinfo = "0.37"
 
 
 [dev-dependencies]

@@ -29,22 +29,18 @@ async fn sign_federation_post_request(
     validate_matrix_destination_parameter(destination)?;
 
     // Log request body size for audit trail
-    let body_size = serde_json::to_string(request_body)
-        .map(|s| s.len())
-        .unwrap_or(0);
+    let body_size = serde_json::to_string(request_body).map(|s| s.len()).unwrap_or(0);
     debug!("Federation POST request body size: {} bytes", body_size);
 
     // Create request builder with JSON body
-    let request_builder = state.http_client
-        .post(url)
-        .json(request_body);
+    let request_builder = state.http_client.post(url).json(request_body);
 
     // Sign the request using the existing federation signing infrastructure
     // Extract URI from full URL for signing
-    let uri = url.strip_prefix(&format!("https://{}", destination))
-        .unwrap_or(url);
+    let uri = url.strip_prefix(&format!("https://{}", destination)).unwrap_or(url);
     let content = serde_json::to_value(request_body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let signed_request = state.event_signer
+    let signed_request = state
+        .event_signer
         .sign_federation_request(request_builder, "POST", uri, destination, Some(content))
         .await
         .map_err(|e| {
@@ -86,10 +82,7 @@ use crate::state::AppState;
 use crate::utils::canonical_json::to_canonical_json;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    FederationRepository,
-    KeyServerRepository,
-    MembershipRepository,
+    EventRepository, FederationRepository, KeyServerRepository, MembershipRepository,
     RoomRepository,
 };
 
@@ -152,14 +145,9 @@ async fn fetch_identity_server_key(
     let uri = format!("/_matrix/identity/api/v1/pubkey/{}", key_id);
 
     info!("Signing federation request to {} for {}", identity_server, url);
-    let signed_request = state.event_signer
-        .sign_federation_request(
-            state.http_client.get(&url),
-            "GET",
-            &uri,
-            identity_server,
-            None
-        )
+    let signed_request = state
+        .event_signer
+        .sign_federation_request(state.http_client.get(&url), "GET", &uri, identity_server, None)
         .await
         .map_err(|e| {
             error!("Failed to sign federation request for identity server key: {:?}", e);
@@ -198,7 +186,8 @@ fn find_matching_public_key(public_keys: &[Value], key_id: &str) -> Option<Strin
             // Check if this key matches the key_id
             if let Some(key_name) = key_obj.get("key_id").and_then(|k| k.as_str())
                 && key_name == key_id
-                && let Some(public_key) = key_obj.get("public_key").and_then(|k| k.as_str()) {
+                && let Some(public_key) = key_obj.get("public_key").and_then(|k| k.as_str())
+            {
                 return Some(public_key.to_string());
             }
         }
@@ -217,12 +206,15 @@ async fn verify_third_party_invite_signature(
     let signature_data = extract_signature_data(signed_object, identity_server)?;
 
     // Comprehensive server validation per Matrix specification Section 11
-    validate_identity_server_authorization(state, &signature_data.server_name, identity_server).await?;
+    validate_identity_server_authorization(state, &signature_data.server_name, identity_server)
+        .await?;
 
     // Validate server name matches identity server for security
     if signature_data.server_name != identity_server {
-        error!("Server name mismatch: signature claims {} but identity server is {}",
-               signature_data.server_name, identity_server);
+        error!(
+            "Server name mismatch: signature claims {} but identity server is {}",
+            signature_data.server_name, identity_server
+        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -233,12 +225,14 @@ async fn verify_third_party_invite_signature(
     let public_key = match find_matching_public_key(public_keys, &signature_data.key_id) {
         Some(key) => key,
         None => {
-            info!("No local public key found for key_id: {} from server {}, fetching from identity server", 
-                  signature_data.key_id, signature_data.server_name);
-            
+            info!(
+                "No local public key found for key_id: {} from server {}, fetching from identity server",
+                signature_data.key_id, signature_data.server_name
+            );
+
             // Fetch identity server key using signed federation request
             fetch_identity_server_key(state, identity_server, &signature_data.key_id).await?
-        }
+        },
     };
 
     // Create canonical JSON without signatures
@@ -259,13 +253,17 @@ async fn verify_third_party_invite_signature(
         &public_key,
     ) {
         Ok(_) => {
-            info!("Third-party invite signature verified successfully for server {} with key {}", 
-                  signature_data.server_name, signature_data.key_id);
+            info!(
+                "Third-party invite signature verified successfully for server {} with key {}",
+                signature_data.server_name, signature_data.key_id
+            );
             Ok(true)
         },
         Err(e) => {
-            warn!("Third-party invite signature verification failed for server {}: {:?}", 
-                  signature_data.server_name, e);
+            warn!(
+                "Third-party invite signature verification failed for server {}: {:?}",
+                signature_data.server_name, e
+            );
             Ok(false)
         },
     }
@@ -641,20 +639,19 @@ async fn verify_room_third_party_invite_signature(
         .ok_or("Missing token in third-party invite")?;
 
     let federation_repo = FederationRepository::new(state.db.clone());
-    let event_content = federation_repo
-        .get_third_party_invite_event(room_id, token)
-        .await?;
+    let event_content = federation_repo.get_third_party_invite_event(room_id, token).await?;
 
     let event_content = event_content.ok_or("Third-party invite event not found")?;
 
     // Extract public keys from the original third-party invite event
-    let public_keys = if let Some(keys) = event_content.get("public_keys").and_then(|v| v.as_array()) {
-        keys.clone()
-    } else if let Some(key) = event_content.get("public_key").and_then(|v| v.as_str()) {
-        vec![json!({ "public_key": key })]
-    } else {
-        return Err("No public keys found in third-party invite event".into());
-    };
+    let public_keys =
+        if let Some(keys) = event_content.get("public_keys").and_then(|v| v.as_array()) {
+            keys.clone()
+        } else if let Some(key) = event_content.get("public_key").and_then(|v| v.as_str()) {
+            vec![json!({ "public_key": key })]
+        } else {
+            return Err("No public keys found in third-party invite event".into());
+        };
 
     // Get the signed object from third-party invite
     let signed_object = third_party_invite
@@ -687,7 +684,9 @@ async fn verify_room_third_party_invite_signature(
         .ok_or("No Ed25519 signatures found")?;
 
     // Verify the cryptographic signature
-    match verify_third_party_invite_signature(state, signed_object, identity_server, &public_keys).await {
+    match verify_third_party_invite_signature(state, signed_object, identity_server, &public_keys)
+        .await
+    {
         Ok(true) => {
             info!("Third-party invite signature verified successfully");
             Ok(true)
@@ -726,7 +725,9 @@ async fn check_invite_authorization(
         Some(membership) if membership.membership == MembershipState::Join => {
             // Check power levels for invite permission
             let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-            room_repo.check_invite_power_level(&room.room_id, sender).await
+            room_repo
+                .check_invite_power_level(&room.room_id, sender)
+                .await
                 .map_err(|e| format!("Failed to check invite power level: {}", e).into())
         },
         _ => {
@@ -735,8 +736,6 @@ async fn check_invite_authorization(
         },
     }
 }
-
-
 
 /// Create an invite event from a third-party invite exchange request
 async fn create_invite_event_from_third_party(
@@ -856,7 +855,8 @@ async fn validate_identity_server_authorization(
 ) -> Result<(), StatusCode> {
     // Validate identity server is in trusted list (if configured)
     if let Some(trusted_servers) = get_trusted_identity_servers(state).await
-        && !trusted_servers.contains(&identity_server.to_string()) {
+        && !trusted_servers.contains(&identity_server.to_string())
+    {
         warn!(
             "Identity server {} not in trusted server list for third-party invite from {}",
             identity_server, server_name
@@ -895,10 +895,7 @@ async fn validate_server_third_party_permissions(
 ) -> Result<(), StatusCode> {
     // Check server reputation/blocklist for third-party invite abuse
     if is_server_blocked_for_third_party_invites(state, server_name).await? {
-        warn!(
-            "Server {} is blocked from third-party invite processing",
-            server_name
-        );
+        warn!("Server {} is blocked from third-party invite processing", server_name);
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -907,31 +904,23 @@ async fn validate_server_third_party_permissions(
 
     // Check rate limiting for third-party invites from this server
     if is_server_rate_limited_for_third_party_invites(state, server_name).await? {
-        warn!(
-            "Server {} is rate limited for third-party invites",
-            server_name
-        );
+        warn!("Server {} is rate limited for third-party invites", server_name);
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    debug!(
-        "Server {} passed third-party invite permissions validation",
-        server_name
-    );
+    debug!("Server {} passed third-party invite permissions validation", server_name);
     Ok(())
 }
 
 /// Get list of trusted identity servers from configuration
-async fn get_trusted_identity_servers(
-    state: &AppState,
-) -> Option<Vec<String>> {
+async fn get_trusted_identity_servers(state: &AppState) -> Option<Vec<String>> {
     let federation_repo = FederationRepository::new(state.db.clone());
     match federation_repo.get_trusted_identity_servers().await {
         Ok(servers) => servers,
         Err(e) => {
             debug!("No trusted identity servers configuration found: {}", e);
             None
-        }
+        },
     }
 }
 
@@ -991,7 +980,7 @@ fn is_valid_matrix_server_name(server_name: &str) -> bool {
 
     // Handle IPv6 addresses in bracket notation per Matrix spec
     if hostname.starts_with('[') && hostname.ends_with(']') {
-        let ipv6_str = &hostname[1..hostname.len()-1];
+        let ipv6_str = &hostname[1..hostname.len() - 1];
         return ipv6_str.parse::<std::net::Ipv6Addr>().is_ok();
     }
 
@@ -1002,9 +991,12 @@ fn is_valid_matrix_server_name(server_name: &str) -> bool {
 
     // Check if it's a valid domain name format
     // Enhanced validation per Matrix specification
-    hostname.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'
-    }) && !hostname.starts_with('-') && !hostname.ends_with('-') && hostname.contains('.')
+    hostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+        && !hostname.starts_with('-')
+        && !hostname.ends_with('-')
+        && hostname.contains('.')
 }
 
 /// Validate identity server reachability
@@ -1017,29 +1009,33 @@ async fn validate_identity_server_reachability(
 
     // Log validation attempt for monitoring and security auditing
     info!("Validating identity server reachability: {}", identity_server);
-    
+
     // Use homeserver name from state for proper logging context
     let homeserver_name = &state.homeserver_name;
     debug!("Validating identity server {} for homeserver {}", identity_server, homeserver_name);
-    
+
     // Try to reach the identity server's status endpoint using configured HTTP client
     let url = format!("https://{}/_matrix/identity/api/v1/status", identity_server);
     let uri = "/_matrix/identity/api/v1/status";
 
     info!("Signing federation request to {} for {}", identity_server, url);
-    let signed_request_result = state.event_signer
+    let signed_request_result = state
+        .event_signer
         .sign_federation_request(
             state.http_client.get(&url).timeout(std::time::Duration::from_secs(10)),
             "GET",
             uri,
             identity_server,
-            None
+            None,
         )
         .await;
 
     let signed_request = match signed_request_result {
         Ok(req) => {
-            debug!("Federation request signed successfully for identity server reachability check to {}", identity_server);
+            debug!(
+                "Federation request signed successfully for identity server reachability check to {}",
+                identity_server
+            );
             req
         },
         Err(e) => {
@@ -1048,32 +1044,33 @@ async fn validate_identity_server_reachability(
             // For identity server status checks, continue with unsigned request as fallback
             // since this is not a critical federation operation requiring signatures
             state.http_client.get(&url).timeout(std::time::Duration::from_secs(10))
-        }
+        },
     };
 
     match signed_request.send().await {
         Ok(response) => {
             if response.status().is_success() {
-                info!("Identity server {} is reachable from homeserver {}", identity_server, homeserver_name);
+                info!(
+                    "Identity server {} is reachable from homeserver {}",
+                    identity_server, homeserver_name
+                );
                 Ok(())
             } else {
                 warn!(
                     "Identity server {} returned non-success status: {}",
-                    identity_server, response.status()
+                    identity_server,
+                    response.status()
                 );
                 Err(StatusCode::SERVICE_UNAVAILABLE)
             }
         },
         Err(e) => {
-            warn!(
-                "Failed to reach identity server {}: {}",
-                identity_server, e
-            );
+            warn!("Failed to reach identity server {}: {}", identity_server, e);
             // Don't fail hard on reachability - identity server might be temporarily down
             // but signature validation can still proceed with cached keys
             debug!("Continuing with cached identity server validation");
             Ok(())
-        }
+        },
     }
 }
 
@@ -1083,12 +1080,15 @@ async fn is_server_blocked_for_third_party_invites(
     server_name: &str,
 ) -> Result<bool, StatusCode> {
     let federation_repo = FederationRepository::new(state.db.clone());
-    match federation_repo.is_server_blocked_for_third_party_invites(server_name).await {
+    match federation_repo
+        .is_server_blocked_for_third_party_invites(server_name)
+        .await
+    {
         Ok(blocked) => Ok(blocked),
         Err(e) => {
             debug!("Error checking server blocklist: {}", e);
             Ok(false) // Assume not blocked if query fails
-        }
+        },
     }
 }
 
@@ -1101,10 +1101,7 @@ async fn validate_server_federation_config(
     let federation_repo = FederationRepository::new(state.db.clone());
     match federation_repo.check_server_federation_config(server_name).await {
         Ok(false) => {
-            warn!(
-                "Federation disabled for server {} in third-party invite context",
-                server_name
-            );
+            warn!("Federation disabled for server {} in third-party invite context", server_name);
             return Err(StatusCode::FORBIDDEN);
         },
         Ok(true) => {
@@ -1112,7 +1109,7 @@ async fn validate_server_federation_config(
         },
         Err(e) => {
             debug!("No federation config found for server {}: {}", server_name, e);
-        }
+        },
     }
 
     Ok(())
@@ -1124,11 +1121,14 @@ async fn is_server_rate_limited_for_third_party_invites(
     server_name: &str,
 ) -> Result<bool, StatusCode> {
     let federation_repo = FederationRepository::new(state.db.clone());
-    match federation_repo.is_server_rate_limited_for_third_party_invites(server_name).await {
+    match federation_repo
+        .is_server_rate_limited_for_third_party_invites(server_name)
+        .await
+    {
         Ok(is_rate_limited) => Ok(is_rate_limited),
         Err(e) => {
             debug!("Error checking third-party invite rate limit: {}", e);
             Ok(false)
-        }
+        },
     }
 }

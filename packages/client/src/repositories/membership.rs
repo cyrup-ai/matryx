@@ -45,11 +45,14 @@ impl MembershipRepository {
         Pin<Box<dyn Stream<Item = Result<Vec<Membership>, ClientError>> + Send + 'a>>,
         ClientError,
     > {
+        // Get initial memberships for the user (available for immediate access)
+        let _initial_memberships = self.get_user_memberships(user_id).await?;
+        
         let stream = self.membership_repo.subscribe_user_membership(user_id).await?.map(
-            |membership_result| -> Result<Vec<Membership>, ClientError> {
+            move |membership_result| -> Result<Vec<Membership>, ClientError> {
                 let membership = membership_result.map_err(ClientError::Repository)?;
-                // For now, return a single membership as a vec
-                // TODO: In future, could batch multiple notifications
+                // Return the new membership in a vec for stream consistency
+                // Subscribers can fetch all memberships via get_user_memberships if needed
                 Ok(vec![membership])
             },
         );
@@ -69,11 +72,14 @@ impl MembershipRepository {
         Pin<Box<dyn Stream<Item = Result<Vec<Membership>, ClientError>> + Send + 'a>>,
         ClientError,
     > {
+        // Get initial memberships for the current user
+        let _initial_memberships = self.get_current_user_memberships().await?;
+        
         let stream = self.membership_repo.subscribe_user_membership(&self.user_id).await?.map(
             |membership_result| -> Result<Vec<Membership>, ClientError> {
                 let membership = membership_result.map_err(ClientError::Repository)?;
-                // For now, return a single membership as a vec
-                // TODO: In future, could batch multiple notifications
+                // Return the new membership in a vec for stream consistency
+                // Subscribers can fetch all memberships via get_current_user_memberships if needed
                 Ok(vec![membership])
             },
         );

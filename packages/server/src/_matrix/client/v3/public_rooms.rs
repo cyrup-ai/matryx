@@ -12,7 +12,9 @@ use tracing::{error, info};
 
 use crate::auth::extract_matrix_auth;
 use crate::state::AppState;
-use matryx_surrealdb::repository::{PublicRoomsRepository, PublicRoomsFilter as RepoPublicRoomsFilter};
+use matryx_surrealdb::repository::{
+    PublicRoomsFilter as RepoPublicRoomsFilter, PublicRoomsRepository,
+};
 
 #[derive(Deserialize)]
 pub struct PublicRoomsFilter {
@@ -86,7 +88,10 @@ pub async fn get(
         third_party_instance_id: None,
     };
 
-    let public_rooms_response = match public_rooms_repo.get_public_rooms(filter.limit, filter.since.as_deref()).await {
+    let public_rooms_response = match public_rooms_repo
+        .get_public_rooms(filter.limit, filter.since.as_deref())
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             error!("Failed to get public rooms: {}", e);
@@ -95,25 +100,26 @@ pub async fn get(
     };
 
     // Convert to response format
-    let chunk: Vec<PublicRoom> = public_rooms_response.chunk
+    let chunk: Vec<PublicRoom> = public_rooms_response
+        .chunk
         .into_iter()
-        .map(|entry| {
-            PublicRoom {
-                room_id: entry.room_id,
-                name: entry.name,
-                topic: entry.topic,
-                canonical_alias: entry.canonical_alias,
-                num_joined_members: entry.num_joined_members as u64,
-                avatar_url: entry.avatar_url,
-                world_readable: entry.world_readable,
-                guest_can_join: entry.guest_can_join,
-                join_rule: Some(entry.join_rule),
-                room_type: entry.room_type,
-            }
+        .map(|entry| PublicRoom {
+            room_id: entry.room_id,
+            name: entry.name,
+            topic: entry.topic,
+            canonical_alias: entry.canonical_alias,
+            num_joined_members: entry.num_joined_members as u64,
+            avatar_url: entry.avatar_url,
+            world_readable: entry.world_readable,
+            guest_can_join: entry.guest_can_join,
+            join_rule: Some(entry.join_rule),
+            room_type: entry.room_type,
         })
         .collect();
 
-    let total_count = public_rooms_response.total_room_count_estimate.unwrap_or(chunk.len() as u64);
+    let total_count = public_rooms_response
+        .total_room_count_estimate
+        .unwrap_or(chunk.len() as u64);
 
     Ok(Json(PublicRoomsResponse {
         chunk,
@@ -145,17 +151,22 @@ pub async fn post(
     // Handle Matrix specification federation parameters
     let include_federated = filter.include_all_known_networks.unwrap_or(false);
     let third_party_filter = filter.third_party_instance_id.as_deref();
-    
-    info!("Public rooms query - federated: {}, third_party_filter: {:?}", 
-          include_federated, third_party_filter);
+
+    info!(
+        "Public rooms query - federated: {}, third_party_filter: {:?}",
+        include_federated, third_party_filter
+    );
 
     // Use PublicRoomsRepository for room search
     let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
-    
+
     let search_response = if let Some(room_filter) = &filter.filter {
         if let Some(search_term) = &room_filter.generic_search_term {
             // Search with term
-            match public_rooms_repo.search_public_rooms(search_term, Some(limit as u32)).await {
+            match public_rooms_repo
+                .search_public_rooms(search_term, Some(limit as u32))
+                .await
+            {
                 Ok(mut response) => {
                     // Apply room type filtering post-query (Matrix spec: filter by room types like m.space)
                     if let Some(allowed_room_types) = &room_filter.room_types {
@@ -177,7 +188,10 @@ pub async fn post(
             }
         } else {
             // No search term, get regular public rooms with filtering
-            match public_rooms_repo.get_public_rooms(Some(limit as u32), filter.since.as_deref()).await {
+            match public_rooms_repo
+                .get_public_rooms(Some(limit as u32), filter.since.as_deref())
+                .await
+            {
                 Ok(mut response) => {
                     // Apply room type filtering post-query
                     if let Some(allowed_room_types) = &room_filter.room_types {
@@ -199,7 +213,10 @@ pub async fn post(
         }
     } else {
         // No filter, get regular public rooms
-        match public_rooms_repo.get_public_rooms(Some(limit as u32), filter.since.as_deref()).await {
+        match public_rooms_repo
+            .get_public_rooms(Some(limit as u32), filter.since.as_deref())
+            .await
+        {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to get public rooms: {}", e);
@@ -209,21 +226,20 @@ pub async fn post(
     };
 
     // Convert to response format
-    let chunk: Vec<PublicRoom> = search_response.chunk
+    let chunk: Vec<PublicRoom> = search_response
+        .chunk
         .into_iter()
-        .map(|entry| {
-            PublicRoom {
-                room_id: entry.room_id,
-                name: entry.name,
-                topic: entry.topic,
-                canonical_alias: entry.canonical_alias,
-                num_joined_members: entry.num_joined_members as u64,
-                avatar_url: entry.avatar_url,
-                world_readable: entry.world_readable,
-                guest_can_join: entry.guest_can_join,
-                join_rule: Some(entry.join_rule),
-                room_type: entry.room_type,
-            }
+        .map(|entry| PublicRoom {
+            room_id: entry.room_id,
+            name: entry.name,
+            topic: entry.topic,
+            canonical_alias: entry.canonical_alias,
+            num_joined_members: entry.num_joined_members as u64,
+            avatar_url: entry.avatar_url,
+            world_readable: entry.world_readable,
+            guest_can_join: entry.guest_can_join,
+            join_rule: Some(entry.join_rule),
+            room_type: entry.room_type,
         })
         .collect();
 

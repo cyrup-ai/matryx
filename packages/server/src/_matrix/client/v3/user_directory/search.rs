@@ -5,7 +5,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-
 use crate::AppState;
 use matryx_surrealdb::repository::user::{UserRepository, UserSearchResult};
 
@@ -14,8 +13,6 @@ pub struct UserSearchRequest {
     pub search_term: String,
     pub limit: Option<u32>,
 }
-
-
 
 #[derive(Serialize)]
 pub struct UserSearchResponse {

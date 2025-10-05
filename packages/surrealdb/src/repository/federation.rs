@@ -1,6 +1,9 @@
 use crate::repository::error::RepositoryError;
+use base64::{Engine, engine::general_purpose};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use matryx_entity::types::Event;
+use matryx_entity::utils::canonical_json::canonical_json_for_signing;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
@@ -117,6 +120,10 @@ pub struct FederationRepository {
 impl FederationRepository {
     pub fn new(db: Surreal<Any>) -> Self {
         Self { db }
+    }
+
+    pub fn get_db(&self) -> &Surreal<Any> {
+        &self.db
     }
 
     /// Get room hierarchy for federation
@@ -314,21 +321,78 @@ impl FederationRepository {
         event: &Event,
         origin: &str,
     ) -> Result<bool, RepositoryError> {
-        // Get server keys for origin
-        let keys = self.get_server_keys(origin).await?;
+        // Check if event has signatures from origin server
+        let signatures = match &event.signatures {
+            Some(sigs) => sigs,
+            None => return Ok(false),
+        };
 
-        if keys.is_empty() {
-            return Ok(false);
+        let origin_sigs = match signatures.get(origin) {
+            Some(sigs) => sigs,
+            None => return Ok(false),
+        };
+
+        // Get all keys for the origin server
+        let server_keys = match self.get_server_keys(origin).await {
+            Ok(keys) => keys,
+            Err(_) => return Ok(false),
+        };
+
+        // Try each signature until one verifies
+        for (key_id, signature_b64) in origin_sigs {
+            // Find the matching public key
+            let public_key = match server_keys.iter().find(|k| &k.key_id == key_id) {
+                Some(key) => &key.verify_key,
+                None => continue,
+            };
+
+            // Decode signature and public key from base64
+            let sig_bytes = match general_purpose::STANDARD.decode(signature_b64) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let key_bytes = match general_purpose::STANDARD.decode(public_key) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            // Verify signature
+            if sig_bytes.len() == 64 && key_bytes.len() == 32 {
+                let key_array: [u8; 32] = match key_bytes.try_into() {
+                    Ok(arr) => arr,
+                    Err(_) => continue,
+                };
+                let sig_array: [u8; 64] = match sig_bytes.try_into() {
+                    Ok(arr) => arr,
+                    Err(_) => continue,
+                };
+
+                match VerifyingKey::from_bytes(&key_array) {
+                    Ok(verifying_key) => {
+                        let signature_obj = Signature::from_bytes(&sig_array);
+
+                        // Get canonical JSON of event
+                        let event_value = match serde_json::to_value(event) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        let canonical = match canonical_json_for_signing(&event_value) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+
+                        if verifying_key.verify(canonical.as_bytes(), &signature_obj).is_ok() {
+                            return Ok(true); // Valid signature found
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
         }
 
-        // In a real implementation, this would verify the actual cryptographic signature
-        // For now, we'll check if the event has signatures from the origin server
-        if let Some(signatures) = &event.signatures
-            && signatures.contains_key(origin) {
-                return Ok(true);
-            }
-
-        Ok(false)
+        Ok(false) // No valid signatures found
     }
 
     /// Get room state for federation
@@ -962,7 +1026,7 @@ impl FederationRepository {
         content_hash: &str,
     ) -> Result<Option<Event>, RepositoryError> {
         let query = "
-            SELECT * FROM events 
+            SELECT * FROM event 
             WHERE room_id = $room_id 
               AND content_hash = $content_hash 
             LIMIT 1
@@ -999,7 +1063,7 @@ impl FederationRepository {
         state_key: &str,
     ) -> Result<Option<Event>, RepositoryError> {
         let query = "
-            SELECT * FROM events 
+            SELECT * FROM event 
             WHERE room_id = $room_id 
               AND event_type = $event_type 
               AND state_key = $state_key 
@@ -1045,7 +1109,7 @@ impl FederationRepository {
         let limit_clause = limit.unwrap_or(5);
         let query = format!(
             "
-            SELECT * FROM events 
+            SELECT * FROM event 
             WHERE room_id = $room_id 
               AND sender = $sender 
               AND event_type = $event_type 

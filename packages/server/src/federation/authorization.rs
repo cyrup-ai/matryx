@@ -37,9 +37,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use matryx_entity::types::{Event, MembershipState};
-use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
 use crate::federation::client::FederationClient;
+use matryx_entity::types::{Event, MembershipState};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Errors that can occur during event authorization
 #[derive(Debug, thiserror::Error)]
@@ -93,14 +93,20 @@ pub struct AuthorizationEngine {
 
 impl AuthorizationEngine {
     /// Create new authorization engine with repository dependencies
-    pub fn new(event_repo: Arc<EventRepository>, room_repo: Arc<RoomRepository>, membership_repo: Arc<MembershipRepository>, federation_client: Arc<FederationClient>, homeserver_name: String) -> Self {
+    pub fn new(
+        event_repo: Arc<EventRepository>,
+        room_repo: Arc<RoomRepository>,
+        membership_repo: Arc<MembershipRepository>,
+        federation_client: Arc<FederationClient>,
+        homeserver_name: String,
+    ) -> Self {
         // Clone values needed for components before moving into Self
         let homeserver_name_clone1 = homeserver_name.clone();
         let homeserver_name_clone2 = homeserver_name.clone();
         let federation_client_clone1 = federation_client.clone();
         let federation_client_clone2 = federation_client.clone();
         let membership_repo_clone = membership_repo.clone();
-        
+
         Self {
             event_repo: event_repo.clone(),
             room_repo: room_repo.clone(),
@@ -143,7 +149,8 @@ impl AuthorizationEngine {
         if let Ok(existing_event) = self.event_repo.get_by_id(&event.event_id).await {
             debug!("Event {} already exists in database", event.event_id);
             if let Some(existing) = existing_event
-                && existing.sender != event.sender {
+                && existing.sender != event.sender
+            {
                 warn!("Event ID collision: different senders for same event ID");
                 return Err(AuthorizationError::EventIdCollision);
             }
@@ -151,7 +158,8 @@ impl AuthorizationEngine {
 
         // Validate room exists and get room information for authorization context
         if let Ok(room_info) = self.room_repo.get_by_id(&event.room_id).await
-            && let Some(room) = room_info {
+            && let Some(room) = room_info
+        {
             debug!("Authorizing event for room version: {}", room.room_version);
         }
 
@@ -197,14 +205,14 @@ impl AuthorizationEngine {
         room_id: &str,
     ) -> AuthorizationResult<MembershipState> {
         // 1. Extract server from user_id
-        let (_, user_server) = user_id.split_once(':')
-            .ok_or_else(|| AuthorizationError::InvalidContent {
-                reason: "Invalid user ID format".to_string(),
-            })?;
+        let (_, user_server) = user_id.split_once(':').ok_or_else(|| {
+            AuthorizationError::InvalidContent { reason: "Invalid user ID format".to_string() }
+        })?;
 
         // 2. For local server users, use direct repository access
         if user_server == self.homeserver_name {
-            let membership = self.membership_repo
+            let membership = self
+                .membership_repo
                 .get_by_room_user(room_id, user_id)
                 .await
                 .map_err(|e| AuthorizationError::DatabaseError(Box::new(e)))?;
@@ -213,7 +221,11 @@ impl AuthorizationEngine {
         }
 
         // 3. For remote server users, use federation query
-        match self.federation_client.query_user_membership(user_server, room_id, user_id).await {
+        match self
+            .federation_client
+            .query_user_membership(user_server, room_id, user_id)
+            .await
+        {
             Ok(membership_response) => {
                 // Convert federation response to MembershipState
                 let membership_state = match membership_response.membership.as_str() {
@@ -227,10 +239,13 @@ impl AuthorizationEngine {
                 Ok(membership_state)
             },
             Err(federation_error) => {
-                warn!("Federation membership query failed for user {} in room {}: {}", user_id, room_id, federation_error);
+                warn!(
+                    "Federation membership query failed for user {} in room {}: {}",
+                    user_id, room_id, federation_error
+                );
                 // Return Leave state on federation error
                 Ok(MembershipState::Leave)
-            }
+            },
         }
     }
 
@@ -242,19 +257,35 @@ impl AuthorizationEngine {
         required_membership: MembershipState,
     ) -> AuthorizationResult<bool> {
         let actual_membership = self.check_user_membership_status(user_id, room_id).await?;
-        
+
         let has_access = match required_membership {
             MembershipState::Join => actual_membership == MembershipState::Join,
-            MembershipState::Invite => matches!(actual_membership, MembershipState::Join | MembershipState::Invite),
-            MembershipState::Knock => matches!(actual_membership, MembershipState::Join | MembershipState::Invite | MembershipState::Knock),
+            MembershipState::Invite => {
+                matches!(actual_membership, MembershipState::Join | MembershipState::Invite)
+            },
+            MembershipState::Knock => matches!(
+                actual_membership,
+                MembershipState::Join | MembershipState::Invite | MembershipState::Knock
+            ),
             MembershipState::Leave => true, // Anyone can have leave access
             MembershipState::Ban => actual_membership == MembershipState::Ban,
         };
 
         if has_access {
-            debug!("User {} has {} access to room {}", user_id, format!("{:?}", required_membership), room_id);
+            debug!(
+                "User {} has {} access to room {}",
+                user_id,
+                format!("{:?}", required_membership),
+                room_id
+            );
         } else {
-            debug!("User {} denied {} access to room {} (has {:?})", user_id, format!("{:?}", required_membership), room_id, actual_membership);
+            debug!(
+                "User {} denied {} access to room {} (has {:?})",
+                user_id,
+                format!("{:?}", required_membership),
+                room_id,
+                actual_membership
+            );
         }
 
         Ok(has_access)
@@ -291,7 +322,8 @@ impl AuthorizationEngine {
 
         // Validate depth is non-negative
         if let Some(depth) = event.depth
-            && depth < 0 {
+            && depth < 0
+        {
             return Err(AuthorizationError::InvalidContent {
                 reason: "Event depth cannot be negative".to_string(),
             });
@@ -528,10 +560,14 @@ impl PowerLevelValidator {
     ) -> AuthorizationResult<()> {
         // For complex power level validation, check if there are recent power level changes
         if event.event_type == "m.room.power_levels"
-            && let Ok(recent_power_events) = self.event_repo.get_room_state_by_type(&event.room_id, "m.room.power_levels").await
-                && recent_power_events.len() > 2 {
-                debug!("Multiple recent power level changes detected in room {}", event.room_id);
-            }
+            && let Ok(recent_power_events) = self
+                .event_repo
+                .get_room_state_by_type(&event.room_id, "m.room.power_levels")
+                .await
+            && recent_power_events.len() > 2
+        {
+            debug!("Multiple recent power level changes detected in room {}", event.room_id);
+        }
 
         // Get user's current power level
         let user_power_level = auth_state.get_user_power_level(&event.sender);
@@ -569,11 +605,13 @@ impl PowerLevelValidator {
         auth_state: &AuthState,
         sender_power_level: i64,
     ) -> AuthorizationResult<()> {
-        let new_content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Power levels content must be object".to_string(),
-            }
-        })?;
+        let new_content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Power levels content must be object".to_string(),
+                })?;
 
         // Users can only grant power levels up to their own level
         if let Some(users) = new_content.get("users").and_then(|u| u.as_object()) {
@@ -603,8 +641,8 @@ impl PowerLevelValidator {
             if let Some(new_level) = value.as_i64() {
                 match key.as_str() {
                     "users" => {}, // Already validated above
-                    "users_default" | "events_default" | "state_default" | "invite" | "kick" |
-                    "ban" | "redact" => {
+                    "users_default" | "events_default" | "state_default" | "invite" | "kick"
+                    | "ban" | "redact" => {
                         if new_level > sender_power_level {
                             return Err(AuthorizationError::InsufficientPowerLevel {
                                 required: new_level,
@@ -662,8 +700,12 @@ impl AuthEventsSelector {
         debug!("Selecting auth events for {} in room {}", event.event_type, event.room_id);
 
         // Check if we can find required auth events in the repository
-        if let Ok(create_event) = self.event_repo.get_room_state_by_type_and_key(&event.room_id, "m.room.create", "").await
-            && create_event.is_none() {
+        if let Ok(create_event) = self
+            .event_repo
+            .get_room_state_by_type_and_key(&event.room_id, "m.room.create", "")
+            .await
+            && create_event.is_none()
+        {
             warn!("No m.room.create event found for room {} - required for auth", event.room_id);
         }
 
@@ -674,17 +716,24 @@ impl AuthEventsSelector {
                     debug!("Validated auth event {} exists in repository", event_ref.event_id);
                 },
                 Ok(None) => {
-                    warn!("Auth event {} not found in repository during validation", event_ref.event_id);
+                    warn!(
+                        "Auth event {} not found in repository during validation",
+                        event_ref.event_id
+                    );
                 },
                 Err(e) => {
-                    warn!("Error validating auth event {} in repository: {:?}", event_ref.event_id, e);
+                    warn!(
+                        "Error validating auth event {} in repository: {:?}",
+                        event_ref.event_id, e
+                    );
                 },
             }
         }
 
         // 1. m.room.create event (room version dependent)
         if self.should_include_create_event(room_version)
-            && let Some(create_event) = &auth_state.create_event {
+            && let Some(create_event) = &auth_state.create_event
+        {
             auth_events.push(create_event.event_id.clone());
         }
 
@@ -727,17 +776,21 @@ impl AuthEventsSelector {
         auth_state: &AuthState,
         auth_events: &mut Vec<String>,
     ) -> AuthorizationResult<()> {
-        let target_user_id = event.state_key.as_ref().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Membership event must have state_key".to_string(),
-            }
-        })?;
+        let target_user_id =
+            event
+                .state_key
+                .as_ref()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Membership event must have state_key".to_string(),
+                })?;
 
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Membership event content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Membership event content must be object".to_string(),
+                })?;
 
         let membership = content.get("membership").and_then(|m| m.as_str()).ok_or_else(|| {
             AuthorizationError::InvalidContent {
@@ -755,7 +808,8 @@ impl AuthEventsSelector {
 
         // Join rules for join/invite/knock
         if matches!(membership, "join" | "invite" | "knock")
-            && let Some(join_rules_event) = &auth_state.join_rules_event {
+            && let Some(join_rules_event) = &auth_state.join_rules_event
+        {
             auth_events.push(join_rules_event.event_id.clone());
         }
 
@@ -766,23 +820,23 @@ impl AuthEventsSelector {
                 .get("signed")
                 .and_then(|s| s.get("token"))
                 .and_then(|t| t.as_str())
-                && let Some(tpi_event) = auth_state
-                    .state_map
-                    .get(&("m.room.third_party_invite".to_string(), token.to_string()))
-                {
-                    auth_events.push(tpi_event.event_id.clone());
-                }
+            && let Some(tpi_event) = auth_state
+                .state_map
+                .get(&("m.room.third_party_invite".to_string(), token.to_string()))
+        {
+            auth_events.push(tpi_event.event_id.clone());
+        }
 
         // Restricted room join authorization
         if membership == "join"
             && let Some(authorised_server) =
                 content.get("join_authorised_via_users_server").and_then(|s| s.as_str())
-                && let Some(auth_member_event) = auth_state
-                    .state_map
-                    .get(&("m.room.member".to_string(), authorised_server.to_string()))
-                {
-                    auth_events.push(auth_member_event.event_id.clone());
-                }
+            && let Some(auth_member_event) = auth_state
+                .state_map
+                .get(&("m.room.member".to_string(), authorised_server.to_string()))
+        {
+            auth_events.push(auth_member_event.event_id.clone());
+        }
 
         Ok(())
     }
@@ -868,11 +922,13 @@ impl EventTypeValidator {
         }
 
         // Validate create event content
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Create event content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Create event content must be object".to_string(),
+                })?;
 
         if !content.contains_key("creator") {
             return Err(AuthorizationError::InvalidContent {
@@ -891,17 +947,21 @@ impl EventTypeValidator {
         auth_state: &AuthState,
         _room_version: &str,
     ) -> AuthorizationResult<()> {
-        let target_user_id = event.state_key.as_ref().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Membership event must have state_key".to_string(),
-            }
-        })?;
+        let target_user_id =
+            event
+                .state_key
+                .as_ref()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Membership event must have state_key".to_string(),
+                })?;
 
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Membership event content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Membership event content must be object".to_string(),
+                })?;
 
         let new_membership =
             content.get("membership").and_then(|m| m.as_str()).ok_or_else(|| {
@@ -932,7 +992,8 @@ impl EventTypeValidator {
             current_membership,
             new_membership,
             auth_state,
-        ).await?;
+        )
+        .await?;
 
         debug!(
             "Membership event validation passed: {} -> {} for user {}",
@@ -1036,14 +1097,19 @@ impl EventTypeValidator {
                         "knock" => true,
                         "knock_restricted" => {
                             // For knock_restricted rooms, validate against allow conditions
-                            if let Some(allow_array) = auth_state.join_rules_event.as_ref()
-                                .and_then(|event| event.content.get("allow")) {
-                                if let Some(conditions) = allow_array.as_array() {
-                                    // Validate each allow condition
-                                    for condition in conditions {
-                                        if let Ok(Some(_room_id)) = self.room_version_handler.validate_allow_condition(condition) {
-                                            return true; // Allow if any condition is valid
-                                        }
+                            if let Some(allow_array) = auth_state
+                                .join_rules_event
+                                .as_ref()
+                                .and_then(|event| event.content.get("allow"))
+                                && let Some(conditions) = allow_array.as_array()
+                            {
+                                // Validate each allow condition
+                                for condition in conditions {
+                                    if let Ok(Some(_room_id)) = self
+                                        .room_version_handler
+                                        .validate_allow_condition(condition)
+                                    {
+                                        return true; // Allow if any condition is valid
                                     }
                                 }
                             }
@@ -1088,7 +1154,11 @@ impl EventTypeValidator {
     }
 
     /// Validate join authorization based on join rules
-    async fn validate_join_authorization(&self, event: &Event, auth_state: &AuthState) -> AuthorizationResult<()> {
+    async fn validate_join_authorization(
+        &self,
+        event: &Event,
+        auth_state: &AuthState,
+    ) -> AuthorizationResult<()> {
         let join_rule = auth_state
             .join_rules_event
             .as_ref()
@@ -1114,40 +1184,50 @@ impl EventTypeValidator {
             },
             "restricted" => {
                 // 1. Get join_rules_event from auth_state
-                let join_rules_event = auth_state.join_rules_event.as_ref()
-                    .ok_or_else(|| AuthorizationError::InvalidContent {
+                let join_rules_event = auth_state.join_rules_event.as_ref().ok_or_else(|| {
+                    AuthorizationError::InvalidContent {
                         reason: "Missing join_rules state for restricted room".to_string(),
-                    })?;
-                
+                    }
+                })?;
+
                 // 2. Extract allow conditions from join_rules content
-                let allow_conditions = join_rules_event.content
+                let allow_conditions = join_rules_event
+                    .content
                     .get("allow")
                     .and_then(|v| v.as_array())
                     .ok_or_else(|| AuthorizationError::InvalidContent {
                         reason: "Restricted room missing allow conditions".to_string(),
                     })?;
-                
+
                 // 3. Check if user meets any allow condition using helper method
                 for condition in allow_conditions {
                     // Use validate_allow_condition helper to extract room_id
                     match self.room_version_handler.validate_allow_condition(condition) {
                         Ok(Some(allowed_room_id)) => {
                             // Check user membership in allowed room via federation
-                            match self.validate_cross_server_membership(
-                                &event.sender,
-                                &allowed_room_id,
-                                auth_state
-                            ).await {
+                            match self
+                                .validate_cross_server_membership(
+                                    &event.sender,
+                                    &allowed_room_id,
+                                    auth_state,
+                                )
+                                .await
+                            {
                                 Ok(true) => {
-                                    debug!("Restricted join approved for {} via membership in {}",
-                                           event.sender, allowed_room_id);
+                                    debug!(
+                                        "Restricted join approved for {} via membership in {}",
+                                        event.sender, allowed_room_id
+                                    );
                                     return Ok(());
                                 },
                                 Ok(false) => continue, // Try next allow condition
                                 Err(e) => {
-                                    warn!("Failed to validate membership in {}: {}", allowed_room_id, e);
+                                    warn!(
+                                        "Failed to validate membership in {}: {}",
+                                        allowed_room_id, e
+                                    );
                                     continue; // Continue to other allow conditions
-                                }
+                                },
                             }
                         },
                         Ok(None) => {
@@ -1157,20 +1237,18 @@ impl EventTypeValidator {
                         Err(e) => {
                             warn!("Invalid allow condition in restricted room: {}", e);
                             continue; // Continue to other allow conditions
-                        }
+                        },
                     }
                 }
-                
+
                 // No allow conditions satisfied
                 Err(AuthorizationError::Forbidden {
                     reason: format!("User {} not authorized for restricted room", event.sender),
                 })
             },
-            _ => {
-                Err(AuthorizationError::InvalidContent {
-                    reason: format!("Unknown join rule: {}", join_rule),
-                })
-            },
+            _ => Err(AuthorizationError::InvalidContent {
+                reason: format!("Unknown join rule: {}", join_rule),
+            }),
         }
     }
 
@@ -1180,11 +1258,13 @@ impl EventTypeValidator {
         event: &Event,
         _auth_state: &AuthState,
     ) -> AuthorizationResult<()> {
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Power levels content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Power levels content must be object".to_string(),
+                })?;
 
         // Validate that all power level values are integers
         for (key, value) in content {
@@ -1230,8 +1310,8 @@ impl EventTypeValidator {
                         });
                     }
                 },
-                "users_default" | "events_default" | "state_default" | "invite" | "kick" |
-                "ban" | "redact" => {
+                "users_default" | "events_default" | "state_default" | "invite" | "kick"
+                | "ban" | "redact" => {
                     if !value.is_i64() {
                         return Err(AuthorizationError::InvalidContent {
                             reason: format!("Power level {} must be integer", key),
@@ -1255,11 +1335,13 @@ impl EventTypeValidator {
         event: &Event,
         _auth_state: &AuthState,
     ) -> AuthorizationResult<()> {
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Join rules content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Join rules content must be object".to_string(),
+                })?;
 
         let join_rule = content.get("join_rule").and_then(|jr| jr.as_str()).ok_or_else(|| {
             AuthorizationError::InvalidContent {
@@ -1283,20 +1365,19 @@ impl EventTypeValidator {
         event: &Event,
         _auth_state: &AuthState,
     ) -> AuthorizationResult<()> {
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "History visibility content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "History visibility content must be object".to_string(),
+                })?;
 
         let history_visibility = content
             .get("history_visibility")
             .and_then(|hv| hv.as_str())
-            .ok_or_else(|| {
-                AuthorizationError::InvalidContent {
-                    reason: "History visibility event must have history_visibility field"
-                        .to_string(),
-                }
+            .ok_or_else(|| AuthorizationError::InvalidContent {
+                reason: "History visibility event must have history_visibility field".to_string(),
             })?;
 
         if !matches!(history_visibility, "invited" | "joined" | "shared" | "world_readable") {
@@ -1347,25 +1428,25 @@ impl EventTypeValidator {
         event: &Event,
         _auth_state: &AuthState,
     ) -> AuthorizationResult<()> {
-        let content = event.content.as_object().ok_or_else(|| {
-            AuthorizationError::InvalidContent {
-                reason: "Aliases content must be object".to_string(),
-            }
-        })?;
+        let content =
+            event
+                .content
+                .as_object()
+                .ok_or_else(|| AuthorizationError::InvalidContent {
+                    reason: "Aliases content must be object".to_string(),
+                })?;
 
         if let Some(aliases) = content.get("aliases") {
-            let aliases_array = aliases.as_array().ok_or_else(|| {
-                AuthorizationError::InvalidContent {
+            let aliases_array =
+                aliases.as_array().ok_or_else(|| AuthorizationError::InvalidContent {
                     reason: "Aliases field must be array".to_string(),
-                }
-            })?;
+                })?;
 
             for alias in aliases_array {
-                let alias_str = alias.as_str().ok_or_else(|| {
-                    AuthorizationError::InvalidContent {
+                let alias_str =
+                    alias.as_str().ok_or_else(|| AuthorizationError::InvalidContent {
                         reason: "Alias must be string".to_string(),
-                    }
-                })?;
+                    })?;
 
                 if !alias_str.starts_with('#') || !alias_str.contains(':') {
                     return Err(AuthorizationError::InvalidContent {
@@ -1388,20 +1469,20 @@ impl EventTypeValidator {
     ) -> AuthorizationResult<bool> {
         // First check if user is in current room's auth state
         let membership_key = ("m.room.member".to_string(), user_id.to_string());
-        if let Some(membership_event) = auth_state.state_map.get(&membership_key) {
-            if let Some(membership) = membership_event.content.get("membership").and_then(|m| m.as_str()) {
-                if membership == "join" {
-                    debug!("User {} has valid membership in room {}", user_id, room_id);
-                    return Ok(true);
-                }
-            }
+        if let Some(membership_event) = auth_state.state_map.get(&membership_key)
+            && let Some(membership) =
+                membership_event.content.get("membership").and_then(|m| m.as_str())
+            && membership == "join"
+        {
+            debug!("User {} has valid membership in room {}", user_id, room_id);
+            return Ok(true);
         }
 
         // Use room version handler for federation validation
-        self.room_version_handler.validate_cross_server_membership(user_id, room_id, auth_state).await
+        self.room_version_handler
+            .validate_cross_server_membership(user_id, room_id, auth_state)
+            .await
     }
-
-
 }
 
 /// Room version specific authorization rule variants
@@ -1527,17 +1608,17 @@ impl RoomVersionHandler {
         &self,
         user_id: &str,
         allowed_room_id: &str,
-        _auth_state: &AuthState
+        _auth_state: &AuthState,
     ) -> AuthorizationResult<bool> {
         // 1. Extract server from user_id
-        let (_, user_server) = user_id.split_once(':')
-            .ok_or_else(|| AuthorizationError::InvalidContent {
-                reason: "Invalid user ID format".to_string(),
-            })?;
+        let (_, user_server) = user_id.split_once(':').ok_or_else(|| {
+            AuthorizationError::InvalidContent { reason: "Invalid user ID format".to_string() }
+        })?;
 
         // 2. For local server, use direct repository access
         if user_server == self.homeserver_name {
-            let membership = self.membership_repo
+            let membership = self
+                .membership_repo
                 .get_by_room_user(allowed_room_id, user_id)
                 .await
                 .map_err(|e| AuthorizationError::DatabaseError(Box::new(e)))?;
@@ -1546,55 +1627,67 @@ impl RoomVersionHandler {
         }
 
         // 3. For remote server, use federation query
-        match self.federation_client.query_user_membership(user_server, allowed_room_id, user_id).await {
+        match self
+            .federation_client
+            .query_user_membership(user_server, allowed_room_id, user_id)
+            .await
+        {
             Ok(membership_response) => {
                 // Check if user is joined in the allowed room
                 Ok(membership_response.membership == "join")
             },
             Err(federation_error) => {
-                warn!("Federation query failed for user {} in room {}: {}", user_id, allowed_room_id, federation_error);
+                warn!(
+                    "Federation query failed for user {} in room {}: {}",
+                    user_id, allowed_room_id, federation_error
+                );
                 // Return false on federation error to deny access rather than fail authorization
                 Ok(false)
-            }
+            },
         }
     }
 
     /// Validate allow rule format and extract room_id
     #[allow(dead_code)] // Used in knock authorization logic but compiler doesn't detect it
-    fn validate_allow_condition(&self, condition: &serde_json::Value) -> AuthorizationResult<Option<String>> {
-        let condition_obj = condition.as_object()
-            .ok_or_else(|| AuthorizationError::InvalidContent {
+    fn validate_allow_condition(
+        &self,
+        condition: &serde_json::Value,
+    ) -> AuthorizationResult<Option<String>> {
+        let condition_obj =
+            condition.as_object().ok_or_else(|| AuthorizationError::InvalidContent {
                 reason: "Allow condition must be object".to_string(),
             })?;
-        
+
         // Currently only support m.room_membership type
-        let condition_type = condition_obj.get("type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AuthorizationError::InvalidContent {
-                reason: "Allow condition missing type".to_string(),
+        let condition_type =
+            condition_obj.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
+                AuthorizationError::InvalidContent {
+                    reason: "Allow condition missing type".to_string(),
+                }
             })?;
-        
+
         match condition_type {
             "m.room_membership" => {
-                let room_id = condition_obj.get("room_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| AuthorizationError::InvalidContent {
-                        reason: "m.room_membership condition missing room_id".to_string(),
+                let room_id =
+                    condition_obj.get("room_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                        AuthorizationError::InvalidContent {
+                            reason: "m.room_membership condition missing room_id".to_string(),
+                        }
                     })?;
-                
+
                 // Validate room ID format
                 if !room_id.starts_with('!') || !room_id.contains(':') {
                     return Err(AuthorizationError::InvalidContent {
                         reason: format!("Invalid room ID in allow condition: {}", room_id),
                     });
                 }
-                
+
                 Ok(Some(room_id.to_string()))
             },
             _ => {
                 warn!("Unsupported allow condition type: {}", condition_type);
                 Ok(None) // Skip unsupported types
-            }
+            },
         }
     }
 }
@@ -1619,9 +1712,8 @@ fn default_allow_ip_literals() -> bool {
     true
 }
 
-impl ServerAcl {
-    /// Create a new default ACL that allows all servers
-    pub fn new() -> Self {
+impl Default for ServerAcl {
+    fn default() -> Self {
         Self {
             allow: vec!["*".to_string()],
             deny: vec![],
@@ -1630,21 +1722,31 @@ impl ServerAcl {
     }
 }
 
+impl ServerAcl {
+    /// Create a new default ACL that allows all servers
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Server pattern matching for Matrix server ACL rules
-/// Supports wildcard matching with * for subdomains
+/// Spec-compliant glob pattern matching supporting * and ? wildcards
+/// Spec: ./spec/server/20-server-acls.md
 pub fn matches_server_pattern(server_name: &str, pattern: &str) -> bool {
-    // Handle exact matches first
-    if server_name == pattern {
-        return true;
+    match globset::Glob::new(pattern) {
+        Ok(glob) => {
+            let matcher = glob.compile_matcher();
+            matcher.is_match(server_name)
+        }
+        Err(e) => {
+            // Invalid glob pattern - fall back to literal match
+            tracing::warn!(
+                "Invalid Server ACL pattern '{}': {}. Using literal match.",
+                pattern, e
+            );
+            server_name == pattern
+        }
     }
-
-    // Handle wildcard patterns
-    if pattern.starts_with("*.") {
-        let domain_suffix = &pattern[2..]; // Remove "*."
-        return server_name.ends_with(domain_suffix) && server_name != domain_suffix;
-    }
-
-    false
 }
 
 /// Check if a server name is an IP literal
@@ -1659,7 +1761,7 @@ pub fn is_ip_literal(server_name: &str) -> bool {
 
     // Check for IPv6 (may be enclosed in brackets)
     let ipv6_host = if host.starts_with('[') && host.ends_with(']') {
-        &host[1..host.len()-1]
+        &host[1..host.len() - 1]
     } else {
         host
     };
@@ -1705,9 +1807,15 @@ pub fn validate_server_against_acl(server_name: &str, acl: &ServerAcl) -> bool {
 impl AuthorizationEngine {
     /// Validate federation join against server ACL rules
     /// Validates that a remote server is allowed to join events for a room
-    pub async fn validate_federation_join_allowed(&self, room: &matryx_entity::types::Room, origin_server: &str) -> AuthorizationResult<bool> {
-        debug!("Validating federation join for server {} in room {} (version {})",
-               origin_server, room.room_id, room.room_version);
+    pub async fn validate_federation_join_allowed(
+        &self,
+        room: &matryx_entity::types::Room,
+        origin_server: &str,
+    ) -> AuthorizationResult<bool> {
+        debug!(
+            "Validating federation join for server {} in room {} (version {})",
+            origin_server, room.room_id, room.room_version
+        );
 
         // Basic validation: reject if room version is too old for federation
         if room.room_version.as_str() < "1" {
@@ -1716,35 +1824,44 @@ impl AuthorizationEngine {
         }
 
         // Get server ACL state event for the room
-        match self.event_repo.get_room_state_by_type_and_key(&room.room_id, "m.room.server_acl", "").await {
+        match self
+            .event_repo
+            .get_room_state_by_type_and_key(&room.room_id, "m.room.server_acl", "")
+            .await
+        {
             Ok(Some(acl_event)) => {
                 // Parse ACL from event content
                 let content_value = serde_json::to_value(&acl_event.content).map_err(|e| {
-                    AuthorizationError::InvalidContent { reason: format!("Failed to serialize event content: {}", e) }
+                    AuthorizationError::InvalidContent {
+                        reason: format!("Failed to serialize event content: {}", e),
+                    }
                 })?;
                 match serde_json::from_value::<ServerAcl>(content_value) {
                     Ok(acl) => {
                         let allowed = validate_server_against_acl(origin_server, &acl);
                         debug!("Server ACL validation for {}: {}", origin_server, allowed);
                         Ok(allowed)
-                    }
+                    },
                     Err(e) => {
                         warn!("Failed to parse server ACL for room {}: {}", room.room_id, e);
                         // Default to allow if ACL is malformed
                         Ok(true)
-                    }
+                    },
                 }
-            }
+            },
             Ok(None) => {
                 // No server ACL configured, allow by default
-                debug!("No server ACL configured for room {}, allowing server {}", room.room_id, origin_server);
+                debug!(
+                    "No server ACL configured for room {}, allowing server {}",
+                    room.room_id, origin_server
+                );
                 Ok(true)
-            }
+            },
             Err(e) => {
                 warn!("Failed to retrieve server ACL for room {}: {}", room.room_id, e);
                 // Default to allow on database error to avoid breaking federation
                 Ok(true)
-            }
+            },
         }
     }
 }
@@ -1756,9 +1873,14 @@ impl AuthorizationEngine {
 /// For complete server ACL checking with state event parsing, use:
 /// `AuthorizationEngine::validate_federation_join_allowed()` which implements
 /// full Matrix specification compliance including m.room.server_acl state events.
-pub fn validate_federation_join_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> bool {
-    debug!("Validating federation join for server {} in room {} (version {})",
-           origin_server, room.room_id, room.room_version);
+pub fn validate_federation_join_allowed(
+    room: &matryx_entity::types::Room,
+    origin_server: &str,
+) -> bool {
+    debug!(
+        "Validating federation join for server {} in room {} (version {})",
+        origin_server, room.room_id, room.room_version
+    );
 
     // Basic validation: reject if room version is too old for federation
     if room.room_version.as_str() < "1" {
@@ -1767,11 +1889,11 @@ pub fn validate_federation_join_allowed(room: &matryx_entity::types::Room, origi
     }
 
     // Basic federation check: honor room's federate flag
-    if let Some(federate) = room.federate {
-        if !federate {
-            debug!("Federation join denied for {} - room has federation disabled", origin_server);
-            return false;
-        }
+    if let Some(federate) = room.federate
+        && !federate
+    {
+        debug!("Federation join denied for {} - room has federation disabled", origin_server);
+        return false;
     }
 
     // IP literal basic validation if needed
@@ -1783,25 +1905,33 @@ pub fn validate_federation_join_allowed(room: &matryx_entity::types::Room, origi
 
     // Allow join by default - production systems should use
     // AuthorizationEngine::validate_federation_join_allowed() for complete ACL checking
-    debug!("Federation join allowed for {} (basic validation - use async method for full ACL)", origin_server);
+    debug!(
+        "Federation join allowed for {} (basic validation - use async method for full ACL)",
+        origin_server
+    );
     true
 }
 
 /// Federation leave validation according to Matrix specification
 /// Validates that a remote server is allowed to send leave events for a room
-pub fn validate_federation_leave_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> bool {
+pub fn validate_federation_leave_allowed(
+    room: &matryx_entity::types::Room,
+    origin_server: &str,
+) -> bool {
     // Per Matrix spec: Check room's federation settings for leave operations
     // Leave operations are generally more permissive than joins
-    
-    debug!("Validating federation leave for server {} in room {} (version {})", 
-           origin_server, room.room_id, room.room_version);
-    
+
+    debug!(
+        "Validating federation leave for server {} in room {} (version {})",
+        origin_server, room.room_id, room.room_version
+    );
+
     // Basic validation: reject if room version is unsupported
     if room.room_version.is_empty() {
         warn!("Rejecting federation leave: invalid room version");
         return false;
     }
-    
+
     // Allow leave by default (follows Matrix specification guidelines)
     true
 }
@@ -1811,20 +1941,20 @@ pub fn validate_federation_leave_allowed(room: &matryx_entity::types::Room, orig
 pub fn validate_room_knock_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> bool {
     // Per Matrix spec: Check room's join rules and knock permissions
     // Knocking is only allowed in rooms with appropriate join rules
-    
-    debug!("Validating room knock for server {} in room {} (version {})", 
-           origin_server, room.room_id, room.room_version);
-    
+
+    debug!(
+        "Validating room knock for server {} in room {} (version {})",
+        origin_server, room.room_id, room.room_version
+    );
+
     // Basic validation: ensure room version supports knocking (v7+)
-    let version_num = room.room_version.chars().next()
-        .and_then(|c| c.to_digit(10))
-        .unwrap_or(1);
-        
+    let version_num = room.room_version.chars().next().and_then(|c| c.to_digit(10)).unwrap_or(1);
+
     if version_num < 7 {
         warn!("Rejecting room knock: room version {} doesn't support knocking", room.room_version);
         return false;
     }
-    
+
     // Allow knock by default (production systems should check join_rules state)
     true
 }

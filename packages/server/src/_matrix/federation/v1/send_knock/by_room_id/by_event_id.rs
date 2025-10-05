@@ -129,10 +129,13 @@ pub async fn put(
         })?;
 
     // Validate room allows knocking per Matrix specification
-    if !validate_room_knock_allowed(&room, &x_matrix_auth.origin).await.map_err(|e| {
-        error!("Failed to validate knock permissions for room {}: {}", room_id, e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })? {
+    if !validate_room_knock_allowed(&room, &x_matrix_auth.origin)
+        .await
+        .map_err(|e| {
+            error!("Failed to validate knock permissions for room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    {
         warn!(
             "Knock denied for server {} in room {} - room join rules don't permit knocking",
             x_matrix_auth.origin, room_id
@@ -141,9 +144,7 @@ pub async fn put(
     }
 
     // Check room version compatibility for knock support
-    let version_num = room.room_version.chars().next()
-        .and_then(|c| c.to_digit(10))
-        .unwrap_or(1);
+    let version_num = room.room_version.chars().next().and_then(|c| c.to_digit(10)).unwrap_or(1);
     if version_num < 7 {
         warn!(
             "Knock not supported in room {} with version {} - knocking requires room version 7+",
@@ -445,7 +446,9 @@ async fn check_room_allows_knocking(
     room_id: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let allows_knocking = room_repo.check_room_allows_knocking(room_id).await
+    let allows_knocking = room_repo
+        .check_room_allows_knocking(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(allows_knocking)
 }
@@ -457,12 +460,12 @@ async fn check_server_acls(
     server_name: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let server_allowed = room_repo.check_server_acls(room_id, server_name).await
+    let server_allowed = room_repo
+        .check_server_acls(room_id, server_name)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(server_allowed)
 }
-
-
 
 /// Validate event signatures
 async fn validate_event_signatures(
@@ -591,7 +594,9 @@ async fn check_knock_authorization(
     _event: &Value,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let authorized = event_repo.check_knock_authorization(room_id, user_id).await
+    let authorized = event_repo
+        .check_knock_authorization(room_id, user_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(authorized)
 }
@@ -602,7 +607,9 @@ async fn get_room_state_for_knock(
     room_id: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let state_events = event_repo.get_room_state_for_knock(room_id).await
+    let state_events = event_repo
+        .get_room_state_for_knock(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(state_events)
 }

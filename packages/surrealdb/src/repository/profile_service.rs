@@ -1,5 +1,6 @@
 use crate::repository::{
     AccountDataRepository,
+    DeviceRepository,
     ReportsRepository,
     TagsRepository,
     ThirdPartyRepository,
@@ -26,6 +27,10 @@ pub struct ProfileManagementService {
     tags_repo: TagsRepository,
     reports_repo: ReportsRepository<surrealdb::engine::any::Any>,
     third_party_repo: ThirdPartyRepository<surrealdb::engine::any::Any>,
+    device_repo: DeviceRepository,
+    membership_repo: crate::repository::membership::MembershipRepository,
+    room_repo: crate::repository::room::RoomRepository,
+    event_repo: crate::repository::event::EventRepository,
 }
 
 impl ProfileManagementService {
@@ -35,7 +40,11 @@ impl ProfileManagementService {
             account_data_repo: AccountDataRepository::new(db.clone()),
             tags_repo: TagsRepository::new(db.clone()),
             reports_repo: ReportsRepository::new(db.clone()),
-            third_party_repo: ThirdPartyRepository::new(db),
+            third_party_repo: ThirdPartyRepository::new(db.clone()),
+            device_repo: DeviceRepository::new(db.clone()),
+            membership_repo: crate::repository::membership::MembershipRepository::new(db.clone()),
+            room_repo: crate::repository::room::RoomRepository::new(db.clone()),
+            event_repo: crate::repository::event::EventRepository::new(db),
         }
     }
 
@@ -163,7 +172,19 @@ impl ProfileManagementService {
     ) -> Result<(), RepositoryError> {
         let _report = self
             .reports_repo
-            .create_user_report(reporter_id, reported_user_id, reason, content)
+            .create_user_report(
+                crate::repository::reports::CreateReportParams {
+                    reporter_id,
+                    reported_user_id,
+                    reason,
+                    content,
+                },
+                crate::repository::reports::ReportRepositories {
+                    membership_repo: &self.membership_repo,
+                    room_repo: &self.room_repo,
+                    event_repo: &self.event_repo,
+                },
+            )
             .await?;
         Ok(())
     }
@@ -178,13 +199,30 @@ impl ProfileManagementService {
     }
 
     /// Get whoami information
-    pub async fn get_whoami_info(&self, user_id: &str) -> Result<WhoAmIResponse, RepositoryError> {
+    pub async fn get_whoami_info(
+        &self,
+        user_id: &str,
+        device_id: Option<&str>,
+    ) -> Result<WhoAmIResponse, RepositoryError> {
         // Verify user exists and get basic info
         let user_info = self.user_repo.get_user_info(user_id).await?;
 
-        // For now, we don't track device info in this service
-        // In a full implementation, we'd also query device repository
-        Ok(WhoAmIResponse::user(user_info.user_id))
+        // Get device information if device_id is provided
+        let device_info = if let Some(dev_id) = device_id {
+            self.device_repo.get_device_info(user_id, dev_id).await.ok().flatten()
+        } else {
+            None
+        };
+
+        // Create response with device information
+        let mut response = WhoAmIResponse::user(user_info.user_id);
+        
+        // Add device_id to response if available
+        if let Some(device) = device_info {
+            response.device_id = Some(device.device_id);
+        }
+
+        Ok(response)
     }
 
     /// Manage third-party identifiers

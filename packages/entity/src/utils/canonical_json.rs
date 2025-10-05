@@ -151,7 +151,7 @@ mod tests {
             "m_middle": "value_m"
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, r#"{"a_first":"value_a","m_middle":"value_m","z_last":"value_z"}"#);
     }
 
@@ -165,7 +165,7 @@ mod tests {
             "a_key": "value"
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, r#"{"a_key":"value","outer":{"a_nested":true,"z_nested":123}}"#);
     }
 
@@ -176,7 +176,7 @@ mod tests {
             "numbers": [3, 1, 2]
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, r#"{"array":["z","a","m"],"numbers":[3,1,2]}"#);
     }
 
@@ -189,7 +189,7 @@ mod tests {
             "null_value": null
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, r#"{"boolean":true,"null_value":null,"number":42,"string":"test"}"#);
     }
 
@@ -208,7 +208,7 @@ mod tests {
             }
         });
 
-        let result = canonical_json_for_signing(&event).unwrap();
+        let result = canonical_json_for_signing(&event).expect("Failed to canonicalize test JSON");
         assert!(!result.contains("signatures"));
         assert!(!result.contains("unsigned"));
         assert!(result.contains("event_id"));
@@ -220,21 +220,21 @@ mod tests {
         let canonical = r#"{"a":"first","z":"last"}"#;
         let non_canonical = r#"{"z":"last","a":"first"}"#;
 
-        assert!(is_canonical_json(canonical).unwrap());
-        assert!(!is_canonical_json(non_canonical).unwrap());
+        assert!(is_canonical_json(canonical).expect("Canonical JSON validation failed"));
+        assert!(!is_canonical_json(non_canonical).expect("Canonical JSON validation failed"));
     }
 
     #[test]
     fn test_canonical_json_empty_object() {
         let data = json!({});
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, "{}");
     }
 
     #[test]
     fn test_canonical_json_empty_array() {
         let data = json!([]);
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         assert_eq!(result, "[]");
     }
 
@@ -244,7 +244,7 @@ mod tests {
             "escaped": "line1\nline2\ttab\"quote\\backslash"
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         // Verify proper JSON escaping is preserved
         assert!(result.contains(r#""escaped":"line1\nline2\ttab\"quote\\backslash""#));
     }
@@ -256,7 +256,7 @@ mod tests {
             "émoji": "café"
         });
 
-        let result = canonical_json(&data).unwrap();
+        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
         // Should preserve Unicode characters properly
         assert!(result.contains("👋"));
         assert!(result.contains("🌍"));

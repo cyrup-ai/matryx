@@ -6,12 +6,12 @@ use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use tracing::{debug, warn};
 
+use crate::utils::response_helpers::{
+    MediaContent, MultipartMediaResponse, build_multipart_media_response,
+};
 use crate::{AppState, error::MatrixError};
-use crate::utils::response_helpers::{build_multipart_media_response, MultipartMediaResponse, MediaContent};
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
 
@@ -61,7 +61,7 @@ pub async fn get(
     // Apply timeout to MediaService call
     let download_result = tokio::time::timeout(
         timeout_duration,
-        media_service.download_media(&media_id, &server_name, "anonymous")
+        media_service.download_media(&media_id, &server_name, "anonymous"),
     )
     .await
     .map_err(|_| MatrixError::NotYetUploaded)? // Timeout = content not ready
@@ -85,11 +85,10 @@ pub async fn get(
         },
     };
 
-    let response = build_multipart_media_response(multipart_response)
-        .map_err(|e| {
-            debug!("Failed to build multipart response: {}", e);
-            MatrixError::Unknown
-        })?;
+    let response = build_multipart_media_response(multipart_response).map_err(|e| {
+        debug!("Failed to build multipart response: {}", e);
+        MatrixError::Unknown
+    })?;
 
     debug!("Successfully serving media: {}", media_id);
     Ok(response)

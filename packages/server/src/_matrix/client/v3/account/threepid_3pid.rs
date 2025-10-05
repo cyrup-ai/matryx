@@ -156,7 +156,7 @@ pub async fn add_threepid(
             Ok(_) => {
                 info!("UIA authentication successful for 3PID addition");
                 // Authentication passed, continue with 3PID addition
-            },
+            }
             Err(uia_error) => {
                 warn!("UIA authentication failed for 3PID addition: {:?}", uia_error);
                 // Return UIA error response per Matrix spec
@@ -191,15 +191,18 @@ pub async fn add_threepid(
         ];
 
         // Start UIA session
-        let session = uia_service.start_session(
-            Some(&token_info.user_id),
-            None, // device_id not required for 3PID operations
-            flows.clone(),
-            std::collections::HashMap::new(),
-        ).await.map_err(|e| {
-            error!("Failed to start UIA session: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let session = uia_service
+            .start_session(
+                Some(&token_info.user_id),
+                None, // device_id not required for 3PID operations
+                flows.clone(),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to start UIA session: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // Return UIA challenge per Matrix spec
         return Ok(Json(json!({
@@ -253,7 +256,6 @@ async fn create_3pid_session(
     client_secret: &str,
     state: &AppState,
 ) -> Result<ThirdPartyValidationSession, StatusCode> {
-
     // Generate unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -261,7 +263,7 @@ async fn create_3pid_session(
     let verification_token = match medium {
         "email" => generate_verification_token(), // Long secure token for email
         "msisdn" => generate_verification_code(), // Short numeric code for SMS
-        _ => generate_verification_token(), // Default to secure token
+        _ => generate_verification_token(),       // Default to secure token
     };
 
     // Session expires in 1 hour
@@ -375,7 +377,7 @@ async fn send_verification_email(
     state: &AppState,
 ) -> Result<(), StatusCode> {
     use lettre::transport::smtp::authentication::Credentials;
-    use lettre::{Message, SmtpTransport, Transport};
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
     let config = &state.config.email_config;
 
@@ -432,22 +434,18 @@ async fn send_verification_email(
     // Configure SMTP transport
     let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
 
-    let mailer = SmtpTransport::relay(&config.smtp_server)
-        .map_err(|e| {
-            error!("Failed to create SMTP transport: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .port(config.smtp_port)
-        .credentials(creds)
-        .build();
+    let mailer: AsyncSmtpTransport<Tokio1Executor> =
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_server)
+            .map_err(|e| {
+                error!("Failed to create async SMTP transport: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .port(config.smtp_port)
+            .credentials(creds)
+            .build();
 
-    // Send email
-    tokio::task::spawn_blocking(move || mailer.send(&email_message))
-        .await
-        .map_err(|e| {
-            error!("Failed to spawn email sending task: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
+    // Send email asynchronously
+    mailer.send(email_message).await
         .map_err(|e| {
             error!("Failed to send verification email: {:?}", e);
             StatusCode::SERVICE_UNAVAILABLE

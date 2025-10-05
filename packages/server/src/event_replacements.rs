@@ -5,12 +5,10 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use crate::state::AppState;
-use matryx_surrealdb::repository::{
-    event::EventRepository,
-    event_replacement::EventReplacementRepository,
-    error::RepositoryError,
-};
 use matryx_entity::types::Event;
+use matryx_surrealdb::repository::{
+    error::RepositoryError, event::EventRepository, event_replacement::EventReplacementRepository,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplacementError {
@@ -119,9 +117,7 @@ impl ReplacementValidator {
         &self,
         original_event_id: &str,
     ) -> Result<Vec<Event>, ReplacementError> {
-        let events = self.replacement_repo
-            .get_replacement_history(original_event_id)
-            .await?;
+        let events = self.replacement_repo.get_replacement_history(original_event_id).await?;
 
         Ok(events)
     }
@@ -131,9 +127,7 @@ impl ReplacementValidator {
         &self,
         event_id: &str,
     ) -> Result<Option<Event>, ReplacementError> {
-        let event = self.replacement_repo
-            .get_latest_replacement(event_id)
-            .await?;
+        let event = self.replacement_repo.get_latest_replacement(event_id).await?;
 
         Ok(event)
     }
@@ -145,7 +139,7 @@ impl ReplacementValidator {
             None => {
                 error!("Original event {} not found", event_id);
                 Err(ReplacementError::OriginalEventNotFound)
-            }
+            },
         }
     }
 

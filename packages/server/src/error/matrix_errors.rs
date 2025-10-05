@@ -3,10 +3,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use matryx_surrealdb::repository::media_service::MediaError;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use thiserror::Error;
-use matryx_surrealdb::repository::media_service::MediaError;
 
 /// Complete Matrix error code system following Matrix specification
 #[derive(Error, Debug)]
@@ -186,9 +186,7 @@ impl MatrixError {
                 };
                 (status, "M_TOO_LARGE", self.to_string(), None)
             },
-            MatrixError::Unknown => {
-                (StatusCode::BAD_REQUEST, "M_UNKNOWN", self.to_string(), None)
-            },
+            MatrixError::Unknown => (StatusCode::BAD_REQUEST, "M_UNKNOWN", self.to_string(), None),
         }
     }
 }
@@ -202,21 +200,22 @@ impl IntoResponse for MatrixError {
         });
 
         if let Some(extra_fields) = extra
-            && let serde_json::Value::Object(ref mut map) = response {
-                for (key, value) in extra_fields {
-                    map.insert(key, value);
-                }
+            && let serde_json::Value::Object(ref mut map) = response
+        {
+            for (key, value) in extra_fields {
+                map.insert(key, value);
             }
+        }
 
         let mut http_response = (status, Json(response)).into_response();
 
         // Add Retry-After header for rate limiting (Matrix v1.10+ requirement)
-        if let MatrixError::LimitExceeded { retry_after_ms } = self {
-            if let Some(retry_ms) = retry_after_ms {
-                let retry_seconds = (retry_ms / 1000).max(1); // Convert to seconds, minimum 1
-                if let Ok(header_value) = retry_seconds.to_string().parse() {
-                    http_response.headers_mut().insert("Retry-After", header_value);
-                }
+        if let MatrixError::LimitExceeded { retry_after_ms } = self
+            && let Some(retry_ms) = retry_after_ms
+        {
+            let retry_seconds = (retry_ms / 1000).max(1); // Convert to seconds, minimum 1
+            if let Ok(header_value) = retry_seconds.to_string().parse() {
+                http_response.headers_mut().insert("Retry-After", header_value);
             }
         }
 
@@ -259,9 +258,7 @@ impl From<MediaError> for MatrixError {
         match media_error {
             MediaError::NotFound => MatrixError::NotFound,
             MediaError::NotYetUploaded => MatrixError::NotYetUploaded,
-            MediaError::TooLarge => MatrixError::TooLargeFor {
-                action: "serve".to_string()
-            },
+            MediaError::TooLarge => MatrixError::TooLargeFor { action: "serve".to_string() },
             MediaError::UnsupportedFormat => MatrixError::Unknown,
             MediaError::AccessDenied(_) => MatrixError::Forbidden,
             MediaError::InvalidOperation(_) => MatrixError::Unknown,

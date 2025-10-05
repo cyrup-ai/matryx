@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
 use matryx_entity::types::Room;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Query parameters for state request
 #[derive(Debug, Deserialize)]
@@ -215,11 +215,9 @@ async fn check_state_permission(
         .is_room_world_readable(&room.room_id)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    
+
     Ok(world_readable)
 }
-
-
 
 /// Get room state at a specific event using repository
 async fn get_room_state_at_event(

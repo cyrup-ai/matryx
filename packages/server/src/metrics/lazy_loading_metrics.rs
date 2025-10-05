@@ -35,6 +35,11 @@ impl LazyLoadingMetrics {
         }
     }
 
+    /// Get reference to performance repository for direct queries
+    pub fn get_performance_repo(&self) -> &Arc<PerformanceRepository<Any>> {
+        &self.performance_repo
+    }
+
     /// Record a lazy loading operation
     pub async fn record_operation(
         &self,
@@ -144,10 +149,11 @@ impl LazyLoadingMetrics {
 
         // Update database-specific metrics using the duration_us
         // Log slow database queries for performance monitoring
-        if duration_us > 50_000 { // 50ms threshold
+        if duration_us > 50_000 {
+            // 50ms threshold
             tracing::warn!("Slow database query detected: {}μs", duration_us);
         }
-        
+
         // Record the duration for database query metrics
         tracing::debug!("Database query completed in {}μs", duration_us);
     }
@@ -208,8 +214,10 @@ impl LazyLoadingMetrics {
     /// Record the start of a lazy loading request
     pub fn record_request_start(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!("Lazy loading request started, total requests: {}",
-            self.total_requests.load(Ordering::Relaxed));
+        tracing::debug!(
+            "Lazy loading request started, total requests: {}",
+            self.total_requests.load(Ordering::Relaxed)
+        );
     }
 
     /// Record a cache hit with processing time
@@ -229,8 +237,11 @@ impl LazyLoadingMetrics {
 
         self.db_queries_avoided.fetch_add(1, Ordering::Relaxed);
 
-        tracing::debug!("Cache hit recorded: {}ms processing time, total hits: {}",
-            processing_time_ms, self.cache_hits.load(Ordering::Relaxed));
+        tracing::debug!(
+            "Cache hit recorded: {}ms processing time, total hits: {}",
+            processing_time_ms,
+            self.cache_hits.load(Ordering::Relaxed)
+        );
     }
 
     /// Record successful processing completion
@@ -248,18 +259,25 @@ impl LazyLoadingMetrics {
         self.avg_processing_time_us.store(new_avg, Ordering::Relaxed);
 
         // Track members that were successfully processed
-        self.members_filtered_out.fetch_add(members_count as u64, Ordering::Relaxed);
+        self.members_filtered_out
+            .fetch_add(members_count as u64, Ordering::Relaxed);
 
         // Record cache miss since this is a full processing operation
         self.cache_misses.fetch_add(1, Ordering::Relaxed);
 
-        tracing::debug!("Successful processing recorded: {}ms, {} members processed",
-            processing_time_ms, members_count);
+        tracing::debug!(
+            "Successful processing recorded: {}ms, {} members processed",
+            processing_time_ms,
+            members_count
+        );
 
         // Log performance warning if processing took too long
         if processing_time_ms > 100 {
-            tracing::warn!("Slow lazy loading processing: {}ms for {} members",
-                processing_time_ms, members_count);
+            tracing::warn!(
+                "Slow lazy loading processing: {}ms for {} members",
+                processing_time_ms,
+                members_count
+            );
         }
     }
 
@@ -354,7 +372,8 @@ impl LazyLoadingPerformanceMonitor {
         let duration_clone = duration;
         let cache_hit = self.cache_hit;
         tokio::spawn(async move {
-            let _ = record_lazy_loading_operation(duration_clone, cache_hit, filtered_count as u64).await;
+            let _ = record_lazy_loading_operation(duration_clone, cache_hit, filtered_count as u64)
+                .await;
         });
 
         // Log performance warnings if thresholds are exceeded

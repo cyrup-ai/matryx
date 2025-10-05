@@ -17,9 +17,9 @@ use crate::auth::{
 use crate::error::matrix_errors::MatrixError;
 use crate::state::AppState;
 
-use x509_parser::prelude::*;
-use x509_parser::extensions::GeneralName;
 use std::net::IpAddr;
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::*;
 
 /// Middleware to extract and validate Matrix authentication
 pub async fn auth_middleware(
@@ -40,7 +40,7 @@ pub async fn auth_middleware(
     let matrix_auth = if let Some(auth_header) = auth_header {
         if auth_header.starts_with("Bearer ") {
             // Use secure authentication validation
-            match extract_matrix_auth(request.headers(), &session_service).await {
+            match extract_matrix_auth(request.headers(), session_service).await {
                 Ok(auth) => auth,
                 Err(e) => {
                     tracing::warn!("Authentication failed: {}", e);
@@ -64,11 +64,25 @@ pub async fn auth_middleware(
 
         // Extract required values from request to avoid Send trait issues
         let request_method = new_request.method().as_str().to_string();
-        let request_uri = new_request.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
+        let request_uri = new_request
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/")
+            .to_string();
         let request_headers = new_request.headers().clone();
-        
+
         // Pass extracted values instead of request reference
-        let result = match validate_server_signature(&x_matrix_header, &request_method, &request_uri, &request_headers, &body_bytes, &session_service).await {
+        let result = match validate_server_signature(
+            &x_matrix_header,
+            &request_method,
+            &request_uri,
+            &request_headers,
+            &body_bytes,
+            session_service,
+        )
+        .await
+        {
             Ok(auth) => auth,
             Err(_) => return MatrixError::Unauthorized.into_response(),
         };
@@ -88,8 +102,21 @@ pub async fn auth_middleware(
         return MatrixError::Unauthorized.into_response();
     }
 
-    // For now, allow access to all resources (this could be enhanced per endpoint)
+    // Check resource-based authorization per endpoint
     let request_uri = request.uri().path();
+    let request_method = request.method().as_str();
+    
+    // Check endpoint-specific permissions
+    if !check_endpoint_authorization(&matrix_auth, request_uri, request_method, &app_state).await {
+        tracing::warn!(
+            "Authorization denied for {} {} - insufficient permissions",
+            request_method,
+            request_uri
+        );
+        return MatrixError::Forbidden.into_response();
+    }
+
+    // Basic access check
     if !matrix_auth.can_access(request_uri) {
         tracing::warn!("Authentication denied access to resource: {}", request_uri);
         return MatrixError::Forbidden.into_response();
@@ -132,8 +159,10 @@ async fn validate_server_signature(
     if let Some(destination) = &x_matrix_auth.destination {
         let homeserver_name = session_service.get_homeserver_name();
         if destination != homeserver_name {
-            warn!("X-Matrix destination mismatch: got '{}', expected '{}'",
-                  destination, homeserver_name);
+            warn!(
+                "X-Matrix destination mismatch: got '{}', expected '{}'",
+                destination, homeserver_name
+            );
             return Err(MatrixError::Unauthorized.into_response());
         }
         info!("X-Matrix destination validated: {}", destination);
@@ -145,23 +174,29 @@ async fn validate_server_signature(
     debug!("Validating X-Matrix auth for server: {}", origin);
 
     // Enhanced federation security: verify client certificate if available
-    let cert_valid = verify_client_certificate(request_headers, origin).await
+    let cert_valid = verify_client_certificate(request_headers, origin)
+        .await
         .unwrap_or_else(|e| {
             debug!("Certificate validation failed for {}: {}", origin, e);
             false
         });
-    
+
     if cert_valid {
         info!("Client certificate validated successfully for server: {}", origin);
     } else {
-        debug!("No valid client certificate found for server: {} (proceeding with key-only validation)", origin);
+        debug!(
+            "No valid client certificate found for server: {} (proceeding with key-only validation)",
+            origin
+        );
     }
 
     // Use the actual request body bytes for signature verification
 
     // Log authentication attempt for audit trail
-    info!("X-Matrix auth attempt: server={}, key={}, method={}, uri={}, cert_valid={}", 
-          origin, key_id, request_method, request_uri, cert_valid);
+    info!(
+        "X-Matrix auth attempt: server={}, key={}, method={}, uri={}, cert_valid={}",
+        origin, key_id, request_method, request_uri, cert_valid
+    );
 
     // Validate server signature using session service for Matrix federation
     let _signature_result = session_service
@@ -181,7 +216,7 @@ async fn validate_server_signature(
 
     // Parse request body as JSON for signature verification per Matrix spec
     let body_json = serde_json::from_slice(request_body).unwrap_or(serde_json::Value::Null);
-    
+
     let homeserver_name = session_service.get_homeserver_name();
 
     // Validate that the origin server is not our own homeserver (prevent self-auth loops)
@@ -191,35 +226,41 @@ async fn validate_server_signature(
     }
 
     // Log the request details for Matrix federation audit trail
-    debug!("Processing X-Matrix federation request - origin: {}, homeserver: {}, body_type: {}",
-           origin, homeserver_name, if body_json.is_null() { "empty" } else { "json" });
+    debug!(
+        "Processing X-Matrix federation request - origin: {}, homeserver: {}, body_type: {}",
+        origin,
+        homeserver_name,
+        if body_json.is_null() { "empty" } else { "json" }
+    );
 
     // Matrix federation signature validation already passed via validate_server_signature() above
     info!("X-Matrix federation auth successful for server: {}", origin);
 
     // Check for X-Matrix-Token header for additional authentication (optional)
     if let Some(server_token) = request_headers.get("X-Matrix-Token") {
-        let token_str = server_token.to_str()
-            .map_err(|_| {
-                warn!("Invalid X-Matrix-Token header format");
-                MatrixError::Unauthorized.into_response()
-            })?;
-        
+        let token_str = server_token.to_str().map_err(|_| {
+            warn!("Invalid X-Matrix-Token header format");
+            MatrixError::Unauthorized.into_response()
+        })?;
+
         // Validate server token
         match session_service.validate_token(token_str) {
             Ok(token_claims) => {
                 // Verify token matches origin server
                 if token_claims.matrix_server_name.as_deref() != Some(origin) {
-                    warn!("Token server_name mismatch: expected {}, got {:?}", origin, token_claims.matrix_server_name);
+                    warn!(
+                        "Token server_name mismatch: expected {}, got {:?}",
+                        origin, token_claims.matrix_server_name
+                    );
                     return Err(MatrixError::Unauthorized.into_response());
                 }
-                
+
                 info!("Server token validated for origin: {}", origin);
-            }
+            },
             Err(e) => {
                 warn!("Server token validation failed: {:?}", e);
                 return Err(MatrixError::Unauthorized.into_response());
-            }
+            },
         }
     } else {
         debug!("No X-Matrix-Token header present (optional for backward compatibility)");
@@ -233,12 +274,16 @@ async fn validate_server_signature(
         expires_at: None,
     };
 
-    info!("Server signature validated for origin: {} key_id: {} method: {}",
-          origin, key_id, request_method);
+    info!(
+        "Server signature validated for origin: {} key_id: {} method: {}",
+        origin, key_id, request_method
+    );
 
     // Store signature for potential re-validation
-    info!("Stored signature {} for server {} for future validation", 
-          &server_auth.signature, &server_auth.server_name);
+    info!(
+        "Stored signature {} for server {} for future validation",
+        &server_auth.signature, &server_auth.server_name
+    );
 
     Ok(MatrixAuth::Server(server_auth))
 }
@@ -277,8 +322,7 @@ pub async fn verify_client_certificate(
 
     // For load balancer scenarios, check X-Forwarded-Client-Cert header
     if let Some(cert_header) = headers.get("x-forwarded-client-cert") {
-        let cert_data = cert_header.to_str()
-            .map_err(|_| "Invalid certificate header")?;
+        let cert_data = cert_header.to_str().map_err(|_| "Invalid certificate header")?;
 
         // Parse and validate certificate matches server name
         validate_certificate_matches_server(cert_data, peer_server_name)
@@ -314,13 +358,15 @@ fn validate_ip_address(cert: &X509Certificate, ip: IpAddr) -> Result<bool, Strin
                     match (ip, cert_ip_bytes.len()) {
                         (IpAddr::V4(ipv4), 4) => {
                             let cert_ipv4 = std::net::Ipv4Addr::from([
-                                cert_ip_bytes[0], cert_ip_bytes[1],
-                                cert_ip_bytes[2], cert_ip_bytes[3]
+                                cert_ip_bytes[0],
+                                cert_ip_bytes[1],
+                                cert_ip_bytes[2],
+                                cert_ip_bytes[3],
                             ]);
                             if ipv4 == cert_ipv4 {
                                 return Ok(true);
                             }
-                        }
+                        },
                         (IpAddr::V6(ipv6), 16) => {
                             let mut bytes = [0u8; 16];
                             bytes.copy_from_slice(cert_ip_bytes);
@@ -328,7 +374,7 @@ fn validate_ip_address(cert: &X509Certificate, ip: IpAddr) -> Result<bool, Strin
                             if ipv6 == cert_ipv6 {
                                 return Ok(true);
                             }
-                        }
+                        },
                         _ => continue,
                     }
                 }
@@ -348,10 +394,10 @@ fn validate_hostname(cert: &X509Certificate, hostname: &str) -> Result<bool, Str
     for ext in cert.extensions() {
         if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
             for name in &san.general_names {
-                if let GeneralName::DNSName(dns_name) = name {
-                    if matches_hostname(dns_name, hostname) {
-                        return Ok(true);
-                    }
+                if let GeneralName::DNSName(dns_name) = name
+                    && matches_hostname(dns_name, hostname)
+                {
+                    return Ok(true);
                 }
             }
         }
@@ -362,12 +408,11 @@ fn validate_hostname(cert: &X509Certificate, hostname: &str) -> Result<bool, Str
     for rdn in subject.iter() {
         for attr in rdn.iter() {
             // Common Name OID: 2.5.4.3
-            if attr.attr_type().to_id_string() == "2.5.4.3" {
-                if let Ok(cn) = attr.attr_value().as_str() {
-                    if matches_hostname(cn, hostname) {
-                        return Ok(true);
-                    }
-                }
+            if attr.attr_type().to_id_string() == "2.5.4.3"
+                && let Ok(cn) = attr.attr_value().as_str()
+                && matches_hostname(cn, hostname)
+            {
+                return Ok(true);
             }
         }
     }
@@ -382,8 +427,7 @@ fn matches_hostname(cert_name: &str, hostname: &str) -> bool {
     }
 
     // Handle wildcard certificates (*.example.com)
-    if cert_name.starts_with("*.") {
-        let cert_domain = &cert_name[2..];
+    if let Some(cert_domain) = cert_name.strip_prefix("*.") {
         let host_parts: Vec<&str> = hostname.split('.').skip(1).collect();
         if !host_parts.is_empty() {
             let host_domain = host_parts.join(".");
@@ -394,4 +438,253 @@ fn matches_hostname(cert_name: &str, hostname: &str) -> bool {
     false
 }
 
+/// Check endpoint-specific authorization requirements
+async fn check_endpoint_authorization(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    method: &str,
+    app_state: &AppState,
+) -> bool {
+    // Admin endpoints require admin privileges
+    if uri.starts_with("/_synapse/admin/") || uri.starts_with("/_matrix/client/v3/admin/") {
+        return check_admin_permission(matrix_auth, app_state).await;
+    }
 
+    // Room state event endpoints require appropriate power levels
+    if uri.contains("/rooms/") && uri.contains("/state/") && (method == "PUT" || method == "POST") {
+        return check_state_event_permission(matrix_auth, uri, app_state).await;
+    }
+
+    // Message sending endpoints require send permission
+    if uri.contains("/rooms/") && uri.contains("/send/") && (method == "PUT" || method == "POST") {
+        return check_send_message_permission(matrix_auth, uri, app_state).await;
+    }
+
+    // Room invite endpoint requires invite permission
+    if uri.contains("/rooms/") && uri.ends_with("/invite") && method == "POST" {
+        return check_invite_permission(matrix_auth, uri, app_state).await;
+    }
+
+    // Room kick endpoint requires kick permission
+    if uri.contains("/rooms/") && uri.ends_with("/kick") && method == "POST" {
+        return check_kick_permission(matrix_auth, uri, app_state).await;
+    }
+
+    // Room ban endpoint requires ban permission
+    if uri.contains("/rooms/") && uri.ends_with("/ban") && method == "POST" {
+        return check_ban_permission(matrix_auth, uri, app_state).await;
+    }
+
+    // Default: allow if authenticated (basic endpoints)
+    true
+}
+
+/// Check if user has admin permission
+async fn check_admin_permission(matrix_auth: &MatrixAuth, app_state: &AppState) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            // Check if user is admin via database
+            let user_repo = matryx_surrealdb::repository::UserRepository::new(app_state.db.clone());
+            user_repo
+                .is_admin(&access_token.user_id)
+                .await
+                .unwrap_or(false)
+        },
+        MatrixAuth::Server(_) => {
+            // Server auth doesn't have admin privileges for user-facing admin endpoints
+            false
+        },
+        MatrixAuth::Anonymous => {
+            // Anonymous users have no admin privileges
+            false
+        },
+    }
+}
+
+/// Check if user has permission to send state events in a room
+async fn check_state_event_permission(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    app_state: &AppState,
+) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            // Extract room_id from URI
+            if let Some(room_id) = extract_room_id_from_uri(uri) {
+                // Check user's power level in the room
+                check_user_power_level(
+                    &access_token.user_id,
+                    room_id,
+                    50, // Default state_default power level
+                    app_state,
+                )
+                .await
+            } else {
+                false
+            }
+        },
+        MatrixAuth::Server(_) => {
+            // Server federation auth has different permissions
+            true
+        },
+        MatrixAuth::Anonymous => {
+            // Anonymous users cannot send state events
+            false
+        },
+    }
+}
+
+/// Check if user has permission to send messages in a room
+async fn check_send_message_permission(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    app_state: &AppState,
+) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            if let Some(room_id) = extract_room_id_from_uri(uri) {
+                // Check user membership and power level
+                check_user_room_membership(&access_token.user_id, room_id, app_state).await
+                    && check_user_power_level(
+                        &access_token.user_id,
+                        room_id,
+                        0, // Default events_default is 0
+                        app_state,
+                    )
+                    .await
+            } else {
+                false
+            }
+        },
+        MatrixAuth::Server(_) => true,
+        MatrixAuth::Anonymous => {
+            // Anonymous users cannot send messages
+            false
+        },
+    }
+}
+
+/// Check if user has permission to invite users to a room
+async fn check_invite_permission(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    app_state: &AppState,
+) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            if let Some(room_id) = extract_room_id_from_uri(uri) {
+                check_user_power_level(
+                    &access_token.user_id,
+                    room_id,
+                    50, // Default invite power level
+                    app_state,
+                )
+                .await
+            } else {
+                false
+            }
+        },
+        MatrixAuth::Server(_) => true,
+        MatrixAuth::Anonymous => {
+            // Anonymous users cannot invite
+            false
+        },
+    }
+}
+
+/// Check if user has permission to kick users from a room
+async fn check_kick_permission(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    app_state: &AppState,
+) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            if let Some(room_id) = extract_room_id_from_uri(uri) {
+                check_user_power_level(
+                    &access_token.user_id,
+                    room_id,
+                    50, // Default kick power level
+                    app_state,
+                )
+                .await
+            } else {
+                false
+            }
+        },
+        MatrixAuth::Server(_) => true,
+        MatrixAuth::Anonymous => {
+            // Anonymous users cannot kick
+            false
+        },
+    }
+}
+
+/// Check if user has permission to ban users from a room
+async fn check_ban_permission(
+    matrix_auth: &MatrixAuth,
+    uri: &str,
+    app_state: &AppState,
+) -> bool {
+    match matrix_auth {
+        MatrixAuth::User(access_token) => {
+            if let Some(room_id) = extract_room_id_from_uri(uri) {
+                check_user_power_level(
+                    &access_token.user_id,
+                    room_id,
+                    50, // Default ban power level
+                    app_state,
+                )
+                .await
+            } else {
+                false
+            }
+        },
+        MatrixAuth::Server(_) => true,
+        MatrixAuth::Anonymous => {
+            // Anonymous users cannot ban
+            false
+        },
+    }
+}
+
+/// Extract room ID from URI
+fn extract_room_id_from_uri(uri: &str) -> Option<&str> {
+    // URI format: /_matrix/client/v3/rooms/{room_id}/...
+    let parts: Vec<&str> = uri.split('/').collect();
+    if let Some(idx) = parts.iter().position(|&p| p == "rooms")
+        && idx + 1 < parts.len()
+    {
+        return Some(parts[idx + 1]);
+    }
+    None
+}
+
+/// Check if user is a member of the room
+async fn check_user_room_membership(
+    user_id: &str,
+    room_id: &str,
+    app_state: &AppState,
+) -> bool {
+    // Access membership repository through database
+    let membership_repo = matryx_surrealdb::repository::MembershipRepository::new(app_state.db.clone());
+    membership_repo
+        .is_user_in_room(room_id, user_id)
+        .await
+        .unwrap_or(false)
+}
+
+/// Check if user has sufficient power level in the room
+async fn check_user_power_level(
+    user_id: &str,
+    room_id: &str,
+    required_level: i64,
+    app_state: &AppState,
+) -> bool {
+    // Access membership repository through database for power level checks
+    let membership_repo = matryx_surrealdb::repository::MembershipRepository::new(app_state.db.clone());
+    match membership_repo.get_user_power_level(room_id, user_id).await {
+        Ok(user_level) => user_level >= required_level,
+        Err(_) => false,
+    }
+}

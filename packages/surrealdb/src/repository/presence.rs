@@ -4,7 +4,6 @@ use matryx_entity::types::UserPresenceUpdate;
 use surrealdb::{Surreal, engine::any::Any};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 // TASK14 SUBTASK 3: Add supporting types for presence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,17 +245,35 @@ impl PresenceRepository {
 
     /// Cleanup old presence events
     pub async fn cleanup_old_presence_events(&self, cutoff: DateTime<Utc>) -> Result<u64, RepositoryError> {
-        let query = "DELETE presence_events WHERE updated_at < $cutoff";
+        // Count records to be deleted first
+        let count_query = "SELECT count() as count FROM presence_events WHERE updated_at < $cutoff";
+        let mut count_response = self.db
+            .query(count_query)
+            .bind(("cutoff", cutoff))
+            .await
+            .map_err(RepositoryError::Database)?;
         
-        let mut response = self.db
-            .query(query)
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: Option<i64>,
+        }
+        
+        let count_results: Vec<CountResult> = count_response.take(0).map_err(RepositoryError::Database)?;
+        let count = count_results
+            .into_iter()
+            .next()
+            .and_then(|r| r.count)
+            .unwrap_or(0) as u64;
+
+        // Delete old presence events
+        let delete_query = "DELETE presence_events WHERE updated_at < $cutoff";
+        let mut _delete_response = self.db
+            .query(delete_query)
             .bind(("cutoff", cutoff))
             .await
             .map_err(RepositoryError::Database)?;
 
-        // Get count of deleted records - simplified implementation
-        let _: Vec<Value> = response.take(0).map_err(RepositoryError::Database)?;
-        Ok(0) // Return 0 for now - in real implementation would return actual count
+        Ok(count)
     }
 
     /// Create a live query for presence changes affecting a user's contacts

@@ -221,17 +221,18 @@ pub async fn transaction_id_middleware(
 
                 // Only store successful responses for idempotency
                 if response.status().is_success()
-                    && let Ok(response_json) = response_to_json(&mut response).await {
-                        // Store the transaction result (ignore errors - idempotency is best effort)
-                        let _ = transaction_service
-                            .store_transaction(
-                                &txn_id,
-                                &user_id,
-                                response_json,
-                                response.status().as_u16(),
-                            )
-                            .await;
-                    }
+                    && let Ok(response_json) = response_to_json(&mut response).await
+                {
+                    // Store the transaction result (ignore errors - idempotency is best effort)
+                    let _ = transaction_service
+                        .store_transaction(
+                            &txn_id,
+                            &user_id,
+                            response_json,
+                            response.status().as_u16(),
+                        )
+                        .await;
+                }
 
                 return response;
             },

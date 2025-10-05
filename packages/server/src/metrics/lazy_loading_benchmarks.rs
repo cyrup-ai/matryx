@@ -62,10 +62,7 @@ pub struct LazyLoadingBenchmarks {
 
 impl LazyLoadingBenchmarks {
     pub fn new(config: LazyLoadingBenchmarkConfig) -> Self {
-        Self {
-            config,
-            results: std::sync::Mutex::new(Vec::new()),
-        }
+        Self { config, results: std::sync::Mutex::new(Vec::new()) }
     }
 
     pub fn with_default_config() -> Self {
@@ -317,7 +314,9 @@ impl LazyLoadingBenchmarks {
     /// Get current data collection statistics
     pub fn get_stats(&self) -> (usize, HashMap<String, usize>) {
         let results = self.results.lock().unwrap_or_else(|poisoned| {
-            warn!("Benchmark results mutex was poisoned during stats collection, recovering with data");
+            warn!(
+                "Benchmark results mutex was poisoned during stats collection, recovering with data"
+            );
             poisoned.into_inner()
         });
         let total = results.len();
@@ -336,9 +335,7 @@ static GLOBAL_BENCHMARKS: std::sync::OnceLock<LazyLoadingBenchmarks> = std::sync
 
 /// Global benchmark access functions
 pub fn init_benchmarks(config: LazyLoadingBenchmarkConfig) {
-    GLOBAL_BENCHMARKS
-        .set(LazyLoadingBenchmarks::new(config))
-        .unwrap_or(());
+    GLOBAL_BENCHMARKS.set(LazyLoadingBenchmarks::new(config)).unwrap_or(());
 }
 
 pub fn record_lazy_loading_operation(

@@ -29,6 +29,7 @@ pub struct OAuth2Client {
     pub client_type: String, // "public" or "confidential"
     pub created_at: DateTime<Utc>,
     pub is_active: bool,
+    pub allowed_scopes: Vec<String>,
 }
 
 pub struct OAuth2Repository<C: Connection> {
@@ -137,6 +138,7 @@ impl<C: Connection> OAuth2Repository<C> {
         client_name: &str,
         redirect_uris: Vec<String>,
         client_type: &str,
+        allowed_scopes: Option<Vec<String>>,
     ) -> Result<OAuth2Client, RepositoryError> {
         let client_id = format!("mxcl_{}", Uuid::new_v4());
         let client_secret = if client_type == "confidential" {
@@ -144,6 +146,14 @@ impl<C: Connection> OAuth2Repository<C> {
         } else {
             None
         };
+
+        // Default scopes if none provided
+        let scopes = allowed_scopes.unwrap_or_else(|| vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+            "urn:matrix:client:api:*".to_string(),
+        ]);
 
         let client = OAuth2Client {
             client_id: client_id.clone(),
@@ -153,6 +163,7 @@ impl<C: Connection> OAuth2Repository<C> {
             client_type: client_type.to_string(),
             created_at: Utc::now(),
             is_active: true,
+            allowed_scopes: scopes,
         };
 
         let _: Option<OAuth2Client> = self
@@ -223,13 +234,62 @@ impl<C: Connection> OAuth2Repository<C> {
     }
 
     /// Validate scope for a client
+    /// 
+    /// Validates that all requested scopes are in the client's allowed_scopes list.
+    /// Scopes are space-delimited per RFC 6749 section 3.3.
+    /// 
+    /// # Arguments
+    /// * `client_id` - The OAuth2 client ID
+    /// * `scope` - Space-delimited scope string (e.g., "openid profile email")
+    /// 
+    /// # Returns
+    /// * `Ok(true)` - All requested scopes are valid
+    /// * `Ok(false)` - One or more requested scopes are not allowed
+    /// * `Err(_)` - Database error or client not found
     pub async fn validate_scope(
         &self,
-        _client_id: &str,
-        _scope: &str,
+        client_id: &str,
+        scope: &str,
     ) -> Result<bool, RepositoryError> {
-        // For now, accept all scopes - in production this would check against allowed scopes
-        Ok(true)
+        // Fetch the client to get allowed scopes
+        let client = self.get_client(client_id).await?;
+        
+        if let Some(client) = client {
+            // Parse requested scopes (space-delimited per RFC 6749)
+            let requested_scopes: Vec<&str> = scope.split_whitespace().collect();
+            
+            // Check each requested scope against allowed scopes
+            for requested in requested_scopes {
+                let mut is_allowed = false;
+                
+                // Check for exact match or wildcard match
+                for allowed in &client.allowed_scopes {
+                    if allowed == requested {
+                        // Exact match
+                        is_allowed = true;
+                        break;
+                    } else if allowed.ends_with("*") {
+                        // Wildcard match (e.g., "urn:matrix:client:api:*")
+                        let prefix = &allowed[..allowed.len() - 1];
+                        if requested.starts_with(prefix) {
+                            is_allowed = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // If any scope is not allowed, validation fails
+                if !is_allowed {
+                    return Ok(false);
+                }
+            }
+            
+            // All scopes are allowed
+            Ok(true)
+        } else {
+            // Client not found or inactive
+            Ok(false)
+        }
     }
 
     /// Validate PKCE challenge

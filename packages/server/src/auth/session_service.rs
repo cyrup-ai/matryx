@@ -1,26 +1,19 @@
 use anyhow::Result;
 use base64::{Engine, engine::general_purpose};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use tracing::{debug, info, warn};
 
 use crate::auth::{
-    MatrixAccessToken,
-    MatrixAuth,
-    MatrixAuthError,
-    MatrixJwtClaims,
-    MatrixServerAuth,
+    MatrixAccessToken, MatrixAuth, MatrixAuthError, MatrixJwtClaims, MatrixServerAuth,
 };
-use matryx_surrealdb::repository::{
-    KeyServerRepository,
-    SessionRepository,
-
-};
+use matryx_surrealdb::repository::{KeyServerRepository, SessionRepository};
 use surrealdb::Connection;
 
 /// Service for managing Matrix authentication sessions with SurrealDB 3.0
 #[derive(Clone)]
 pub struct MatrixSessionService<C: Connection> {
-    jwt_secret: Vec<u8>,
+    encoding_key: EncodingKey,
+    decoding_key: DecodingKey,
     homeserver_name: String,
     session_repo: SessionRepository,
     key_server_repo: KeyServerRepository<C>,
@@ -29,13 +22,15 @@ pub struct MatrixSessionService<C: Connection> {
 impl<C: Connection> MatrixSessionService<C> {
     /// Create new session service with repositories
     pub fn new(
-        jwt_secret: Vec<u8>,
+        private_key_bytes: &[u8],
+        public_key_bytes: &[u8],
         homeserver_name: String,
         session_repo: SessionRepository,
         key_server_repo: KeyServerRepository<C>,
     ) -> Self {
         Self {
-            jwt_secret,
+            encoding_key: EncodingKey::from_ed_der(private_key_bytes),
+            decoding_key: DecodingKey::from_ed_der(public_key_bytes),
             homeserver_name,
             session_repo,
             key_server_repo,
@@ -59,8 +54,8 @@ impl<C: Connection> MatrixSessionService<C> {
         let claims =
             MatrixJwtClaims::for_user(user_id, device_id, access_token, refresh_token, expires_in);
 
-        let header = Header::default();
-        encode(&header, &claims, &EncodingKey::from_secret(&self.jwt_secret))
+        let header = Header::new(Algorithm::EdDSA);
+        encode(&header, &claims, &self.encoding_key)
             .map_err(|e| MatrixAuthError::JwtError(e.to_string()))
     }
 
@@ -73,18 +68,18 @@ impl<C: Connection> MatrixSessionService<C> {
     ) -> Result<String, MatrixAuthError> {
         let claims = MatrixJwtClaims::for_server(server_name, key_id, expires_in);
 
-        let header = Header::default();
-        encode(&header, &claims, &EncodingKey::from_secret(&self.jwt_secret))
+        let header = Header::new(Algorithm::EdDSA);
+        encode(&header, &claims, &self.encoding_key)
             .map_err(|e| MatrixAuthError::JwtError(e.to_string()))
     }
 
     /// Validate and decode JWT token
     pub fn validate_token(&self, token: &str) -> Result<MatrixJwtClaims, MatrixAuthError> {
-        let mut validation = Validation::default();
+        let mut validation = Validation::new(Algorithm::EdDSA);
         validation.validate_exp = true;
         validation.validate_nbf = true;
 
-        decode::<MatrixJwtClaims>(token, &DecodingKey::from_secret(&self.jwt_secret), &validation)
+        decode::<MatrixJwtClaims>(token, &self.decoding_key, &validation)
             .map(|data| data.claims)
             .map_err(|e| MatrixAuthError::JwtError(e.to_string()))
     }
@@ -131,8 +126,12 @@ impl<C: Connection> MatrixSessionService<C> {
         }
 
         // Log signature validation attempt
-        tracing::info!("Validating server signature for {} with key {} (signature len: {})",
-            server_name, key_id, signature.len());
+        tracing::info!(
+            "Validating server signature for {} with key {} (signature len: {})",
+            server_name,
+            key_id,
+            signature.len()
+        );
 
         // Create JWT claims for the server after validation
         let expires_in = 300; // 5 minutes for federation
@@ -200,14 +199,12 @@ impl<C: Connection> MatrixSessionService<C> {
     ) -> Result<MatrixAccessToken, MatrixAuthError> {
         // Use session repository to validate opaque token
         match self.session_repo.get_user_access_token(access_token).await {
-            Ok(Some(token_record)) => {
-                Ok(MatrixAccessToken {
-                    token: access_token.to_string(),
-                    user_id: token_record.user_id,
-                    device_id: token_record.device_id,
-                    expires_at: token_record.expires_at.map(|dt| dt.timestamp()),
-                })
-            },
+            Ok(Some(token_record)) => Ok(MatrixAccessToken {
+                token: access_token.to_string(),
+                user_id: token_record.user_id,
+                device_id: token_record.device_id,
+                expires_at: token_record.expires_at.map(|dt| dt.timestamp()),
+            }),
             Ok(None) => Err(MatrixAuthError::UnknownToken),
             Err(e) => {
                 Err(MatrixAuthError::DatabaseError(format!("Token validation failed: {}", e)))
@@ -358,24 +355,33 @@ impl<C: Connection> MatrixSessionService<C> {
         // Validate refresh token
         let claims = self.validate_token(refresh_token)?;
 
-        // Verify it contains refresh token data
+        // Verify it contains required user data
         let user_id = claims.matrix_user_id.ok_or(MatrixAuthError::UnknownToken)?;
         let device_id = claims.matrix_device_id.ok_or(MatrixAuthError::UnknownToken)?;
 
-        // Generate new tokens
-        let new_access_token = format!("syt_{}", uuid::Uuid::new_v4());
-        let new_refresh_token = format!("syr_{}", uuid::Uuid::new_v4());
+        // Generate unique token identifiers
+        let access_token_id = uuid::Uuid::new_v4().to_string();
+        let refresh_token_id = uuid::Uuid::new_v4().to_string();
 
-        // Create new JWT with extended expiration
-        let _new_jwt = self.create_user_token(
+        // Create new JWT access token
+        let new_access_jwt = self.create_user_token(
             &user_id,
             &device_id,
-            &new_access_token,
-            Some(&new_refresh_token),
+            &access_token_id,
+            Some(&refresh_token_id),
             3600, // 1 hour
         )?;
 
-        Ok((new_access_token, new_refresh_token))
+        // Create new JWT refresh token (longer expiration)
+        let new_refresh_jwt = self.create_user_token(
+            &user_id,
+            &device_id,
+            &access_token_id,
+            Some(&refresh_token_id),
+            2592000, // 30 days
+        )?;
+
+        Ok((new_access_jwt, new_refresh_jwt))
     }
 
     /// Create access token for user login
@@ -384,18 +390,19 @@ impl<C: Connection> MatrixSessionService<C> {
         user_id: &str,
         device_id: &str,
     ) -> Result<String, MatrixAuthError> {
-        let access_token = format!("syt_{}", uuid::Uuid::new_v4());
+        // Generate unique token identifier for the JWT 'jti' claim
+        let token_id = uuid::Uuid::new_v4().to_string();
 
-        // Create JWT token
-        let _jwt_token = self.create_user_token(
+        // Create JWT token with user claims
+        let jwt_token = self.create_user_token(
             user_id,
             device_id,
-            &access_token,
+            &token_id,
             None,
             3600, // 1 hour
         )?;
 
-        Ok(access_token)
+        Ok(jwt_token)
     }
 
     /// Fetch server public key from remote server's /_matrix/key/v2/server endpoint
@@ -546,24 +553,24 @@ impl<C: Connection> MatrixSessionService<C> {
 
             // Get the public key for this signature
             if let Some(key_data) = verify_keys.get(signature_key_id)
-                && let Some(public_key) = key_data.get("key").and_then(|k| k.as_str()) {
-                    match self.verify_ed25519_signature(signature_str, &canonical_json, public_key)
-                    {
-                        Ok(_) => {
-                            debug!(
-                                "Verified server key signature from {} with key {}",
-                                server_name, signature_key_id
-                            );
-                            verified = true;
-                            break;
-                        },
-                        Err(e) => {
-                            warn!(
-                                "Failed to verify server key signature from {} with key {}: {:?}",
-                                server_name, signature_key_id, e
-                            );
-                        },
-                    }
+                && let Some(public_key) = key_data.get("key").and_then(|k| k.as_str())
+            {
+                match self.verify_ed25519_signature(signature_str, &canonical_json, public_key) {
+                    Ok(_) => {
+                        debug!(
+                            "Verified server key signature from {} with key {}",
+                            server_name, signature_key_id
+                        );
+                        verified = true;
+                        break;
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Failed to verify server key signature from {} with key {}: {:?}",
+                            server_name, signature_key_id, e
+                        );
+                    },
+                }
             }
         }
 
@@ -622,12 +629,10 @@ impl<C: Connection> MatrixSessionService<C> {
                 // Generate new signing key if none exists
                 self.generate_server_signing_key(server_name).await
             },
-            Err(e) => {
-                Err(MatrixAuthError::DatabaseError(format!(
-                    "Failed to query server signing key: {}",
-                    e
-                )))
-            },
+            Err(e) => Err(MatrixAuthError::DatabaseError(format!(
+                "Failed to query server signing key: {}",
+                e
+            ))),
         }
     }
 
@@ -654,12 +659,10 @@ impl<C: Connection> MatrixSessionService<C> {
                     is_active: key_record.is_active,
                 })
             },
-            Err(e) => {
-                Err(MatrixAuthError::DatabaseError(format!(
-                    "Failed to generate server signing key: {}",
-                    e
-                )))
-            },
+            Err(e) => Err(MatrixAuthError::DatabaseError(format!(
+                "Failed to generate server signing key: {}",
+                e
+            ))),
         }
     }
 
@@ -743,7 +746,7 @@ impl<C: Connection> MatrixSessionService<C> {
                     .collect();
 
                 Ok(format!("{{{}}}", pairs?.join(",")))
-            }
+            },
         }
     }
 }

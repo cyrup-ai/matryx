@@ -577,17 +577,27 @@ impl SyncRepository {
 
         let mut rooms = Vec::new();
         for (room_id,) in room_ids {
-            let room_data = self.get_room_sync_data(user_id, &room_id, None).await?;
-            
-            // Apply filter if provided
+            // Apply room filter if provided
             if let Some(filter) = filter {
-                // TODO: Implement proper filter logic based on Filter structure
-                // For now, include all rooms, but filter should handle:
-                // - room type filtering
-                // - limit enforcement  
-                // - timeline filtering
-                let _ = filter; // Acknowledge parameter usage
+                // Apply room inclusion/exclusion filters
+                if let Some(room_filter) = &filter.room {
+                    // Skip room if in not_rooms list
+                    if let Some(not_rooms) = &room_filter.not_rooms
+                        && not_rooms.contains(&room_id)
+                    {
+                        continue; // Skip this room
+                    }
+                    
+                    // Skip room if rooms list exists and room not in it
+                    if let Some(rooms_list) = &room_filter.rooms
+                        && !rooms_list.is_empty() && !rooms_list.contains(&room_id)
+                    {
+                        continue; // Skip this room
+                    }
+                }
             }
+            
+            let room_data = self.get_room_sync_data(user_id, &room_id, None).await?;
             rooms.push(room_data);
         }
 
@@ -633,8 +643,25 @@ impl SyncRepository {
         for (room_id, membership) in memberships {
             // Apply filter if provided
             if let Some(filter) = filter {
-                // TODO: Implement proper filter logic based on Filter structure
-                let _ = filter; // Acknowledge parameter usage for now
+                // Apply room-level filters
+                if let Some(room_filter) = &filter.room {
+                    // Check room inclusion/exclusion
+                    if let Some(not_rooms) = &room_filter.not_rooms
+                        && not_rooms.contains(&room_id)
+                    {
+                        continue; // Skip this room
+                    }
+                    if let Some(rooms_list) = &room_filter.rooms
+                        && !rooms_list.is_empty() && !rooms_list.contains(&room_id)
+                    {
+                        continue; // Skip this room
+                    }
+                    
+                    // Check include_leave setting
+                    if !room_filter.include_leave.unwrap_or(false) && membership == "leave" {
+                        continue; // Skip left rooms if not included
+                    }
+                }
             }
 
             let room_sync_data = self.get_room_sync_data(user_id, &room_id, Some(&since.timestamp.to_rfc3339())).await?;
@@ -735,7 +762,7 @@ impl SyncRepository {
         since: Option<&SyncPosition>,
     ) -> Result<Vec<Value>, RepositoryError> {
         let mut query_parts = vec![
-            "SELECT * FROM events",
+            "SELECT * FROM event",
             "WHERE room_id = $room_id"
         ];
         
@@ -1000,7 +1027,7 @@ impl SyncRepository {
     /// Get room ephemeral events with optional since token
     pub async fn get_room_ephemeral_events(&self, room_id: &str, since: Option<&str>) -> Result<Vec<EphemeralEvent>, RepositoryError> {
         let mut query_parts = vec![
-            "SELECT event_id, event_type, content, sender FROM events",
+            "SELECT event_id, event_type, content, sender FROM event",
             "WHERE room_id = $room_id AND (event_type LIKE 'm.typing%' OR event_type LIKE 'm.receipt%')"
         ];
 

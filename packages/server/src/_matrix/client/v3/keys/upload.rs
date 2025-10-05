@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 
-
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{error, info};
@@ -66,13 +65,10 @@ async fn get_one_time_key_counts(
     user_id: &str,
     device_id: &str,
 ) -> Result<std::collections::HashMap<String, u32>, StatusCode> {
-    keys_repo
-        .get_one_time_key_counts(user_id, device_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to get one-time key counts: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    keys_repo.get_one_time_key_counts(user_id, device_id).await.map_err(|e| {
+        error!("Failed to get one-time key counts: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 /// POST /_matrix/client/v3/keys/upload
@@ -135,21 +131,50 @@ pub async fn post(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         info!("Device keys uploaded and validated for user: {} device: {}", user_id, device_id);
-        
-        // Generate device list update
+
+        // Generate device list update with Matrix-compliant sequential stream ID
         use crate::federation::device_management::DeviceListUpdate;
-        use chrono::Utc;
-        
+
+        // Generate sequential stream_id using SurrealDB SEQUENCE per user
+        let stream_id = {
+            let seq_name = format!("device_stream_{}", user_id.replace(':', "_"));
+            state.db
+                .query(format!("DEFINE SEQUENCE IF NOT EXISTS {} START 1;", seq_name))
+                .await
+                .map_err(|e| {
+                    error!("Failed to define device stream sequence: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            let mut response = state.db
+                .query(format!("RETURN sequence::nextval('{}');", seq_name))
+                .await
+                .map_err(|e| {
+                    error!("Failed to get next stream_id: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            let stream_id_opt: Option<i64> = response.take(0).map_err(|e| {
+                error!("Failed to extract stream_id from sequence::nextval: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            stream_id_opt.ok_or_else(|| {
+                error!("sequence::nextval returned None - sequence may not exist");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+        };
+
         let device_update = DeviceListUpdate {
             user_id: user_id.clone(),
             device_id: device_id.clone(),
-            stream_id: Utc::now().timestamp_millis(),
+            stream_id,
             prev_id: vec![],
             deleted: false,
             device_display_name: None,
             keys: None,
         };
-        
+
         if let Err(e) = state.device_manager.apply_device_update(&device_update).await {
             error!("Failed to apply device update: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -171,7 +196,7 @@ pub async fn post(
                 error!("Invalid one-time key format: {}", key_id);
                 return Err(StatusCode::BAD_REQUEST);
             }
-            
+
             // Track key counts by algorithm
             let algorithm = key_id.split(':').next().unwrap_or("unknown");
             *one_time_key_counts.entry(algorithm.to_string()).or_insert(0) += 1;
@@ -211,7 +236,7 @@ pub async fn post(
     let mut counts = get_one_time_key_counts(&keys_repo, &user_id, &device_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     // Merge newly uploaded key counts
     for (algorithm, count) in one_time_key_counts {
         *counts.entry(algorithm).or_insert(0) += count;

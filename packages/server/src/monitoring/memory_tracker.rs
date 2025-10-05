@@ -131,9 +131,15 @@ impl LazyLoadingMemoryTracker {
             1.0
         };
 
-        if current_mb >= CRITICAL_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO * 2.0 || peak_growth_ratio >= GROWTH_WARNING_RATIO * 3.0 {
+        if current_mb >= CRITICAL_THRESHOLD_MB
+            || growth_ratio >= GROWTH_WARNING_RATIO * 2.0
+            || peak_growth_ratio >= GROWTH_WARNING_RATIO * 3.0
+        {
             MemoryHealthStatus::Critical
-        } else if current_mb >= WARNING_THRESHOLD_MB || growth_ratio >= GROWTH_WARNING_RATIO || peak_growth_ratio >= GROWTH_WARNING_RATIO * 1.5 {
+        } else if current_mb >= WARNING_THRESHOLD_MB
+            || growth_ratio >= GROWTH_WARNING_RATIO
+            || peak_growth_ratio >= GROWTH_WARNING_RATIO * 1.5
+        {
             MemoryHealthStatus::Warning
         } else {
             MemoryHealthStatus::Healthy

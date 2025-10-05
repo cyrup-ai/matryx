@@ -14,10 +14,7 @@ use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, Validat
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    FederationRepository,
-    KeyServerRepository,
-    MembershipRepository,
+    EventRepository, FederationRepository, KeyServerRepository, MembershipRepository,
     RoomRepository,
 };
 
@@ -391,7 +388,9 @@ async fn check_invite_authorization(
         Some(membership) if membership.membership == MembershipState::Join => {
             // Check power levels for invite permission
             let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-            room_repo.check_invite_power_level(&room.room_id, sender).await
+            room_repo
+                .check_invite_power_level(&room.room_id, sender)
+                .await
                 .map_err(|e| format!("Failed to check invite power level: {}", e).into())
         },
         _ => {
@@ -400,8 +399,6 @@ async fn check_invite_authorization(
         },
     }
 }
-
-
 
 /// Add our server's signature to an invite event
 async fn sign_invite_event(

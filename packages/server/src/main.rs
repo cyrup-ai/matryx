@@ -2,18 +2,17 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, State, Request},
+    extract::{Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self as axum_middleware, Next},
     response::Response,
     routing::{delete, get, post, put},
 };
-use axum_extra::{headers, TypedHeader};
+use axum_extra::{TypedHeader, headers};
 use std::net::SocketAddr;
 use surrealdb::engine::any::{self, Any};
 use tokio::net::TcpListener;
 use tower_cookies::CookieManagerLayer;
-
 
 mod _matrix;
 mod _well_known;
@@ -21,6 +20,7 @@ mod auth;
 mod cache;
 mod config;
 mod crypto;
+mod email;
 mod error;
 mod event_replacements;
 mod federation;
@@ -43,19 +43,51 @@ use crate::auth::{
     MatrixSessionService,
     middleware::{auth_middleware, require_auth_middleware},
 };
-use crate::federation::dns_resolver::MatrixDnsResolver;
-use crate::federation::well_known_client::WellKnownClient;
 use crate::config::ServerConfig;
 use crate::error::MatrixError;
+use crate::federation::dns_resolver::MatrixDnsResolver;
+use crate::federation::well_known_client::WellKnownClient;
 use crate::middleware::{
-    RateLimitService,
-
-    TransactionService,
-    create_cors_layer,
-    rate_limit_middleware,
+    RateLimitService, TransactionService, create_cors_layer, rate_limit_middleware,
     transaction_id_middleware,
 };
 use crate::state::AppState;
+
+/// Parse Ed25519 private key from environment variable
+/// 
+/// Supports both base64 and hex encoded 32-byte raw Ed25519 keys.
+/// Returns tuple of (private_key_32_bytes, public_key_32_bytes).
+fn parse_private_key_from_env(key_str: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    use ed25519_dalek::SigningKey;
+    use base64::{Engine, engine::general_purpose};
+
+    // Try base64 decoding first
+    let key_bytes = if let Ok(bytes) = general_purpose::STANDARD.decode(key_str) {
+        bytes
+    } else if let Ok(bytes) = hex::decode(key_str) {
+        // Try hex decoding as fallback
+        bytes
+    } else {
+        return Err("JWT_PRIVATE_KEY must be base64 or hex encoded".to_string());
+    };
+
+    // Validate raw Ed25519 key format (32 bytes)
+    if key_bytes.len() != 32 {
+        return Err(format!(
+            "Invalid key length: expected 32 bytes for raw Ed25519 key, got {}",
+            key_bytes.len()
+        ));
+    }
+
+    // Create SigningKey from 32-byte array
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&key_bytes);
+    let signing_key = SigningKey::from_bytes(&key_array);
+    
+    let public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
+
+    Ok((key_bytes, public_key_bytes))
+}
 
 // OAuth2 wrapper handlers that extract OAuth2Service from AppState
 async fn oauth2_authorize_wrapper(
@@ -69,13 +101,15 @@ async fn oauth2_authorize_wrapper(
         &headers,
         cookies.as_ref(),
         &app_state.session_service,
-    ).await;
+    )
+    .await;
 
     crate::auth::oauth2::authorize_handler(
         axum::extract::State(app_state.oauth2_service),
         Query(params),
         authenticated_user,
-    ).await
+    )
+    .await
 }
 
 async fn extract_authenticated_user_from_session(
@@ -83,33 +117,27 @@ async fn extract_authenticated_user_from_session(
     cookies: Option<&TypedHeader<headers::Cookie>>,
     session_service: &MatrixSessionService<Any>,
 ) -> Option<String> {
-    // 1. Try Authorization header first (Bearer token) 
-    if let Some(auth_header) = headers.get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if let Ok(access_token) = session_service.validate_access_token(token).await {
-                    if !access_token.is_expired() {
-                        return Some(access_token.user_id);
-                    }
-                }
-            }
-        }
+    // 1. Try Authorization header first (Bearer token)
+    if let Some(auth_header) = headers.get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+        && let Ok(access_token) = session_service.validate_access_token(token).await
+        && !access_token.is_expired()
+    {
+        return Some(access_token.user_id);
     }
 
     // 2. Try session cookie as fallback
-    if let Some(cookies) = cookies {
-        if let Some(session_token) = cookies.get("matrix_session") {
-            if let Ok(access_token) = session_service.validate_access_token(session_token).await {
-                if !access_token.is_expired() {
-                    return Some(access_token.user_id);
-                }
-            }
-        }
+    if let Some(cookies) = cookies
+        && let Some(session_token) = cookies.get("matrix_session")
+        && let Ok(access_token) = session_service.validate_access_token(session_token).await
+        && !access_token.is_expired()
+    {
+        return Some(access_token.user_id);
     }
 
     None
 }
-
 
 async fn oauth2_token_wrapper(
     State(app_state): axum::extract::State<AppState>,
@@ -118,9 +146,9 @@ async fn oauth2_token_wrapper(
     crate::auth::oauth2::token_handler(
         axum::extract::State(app_state.oauth2_service),
         Json(request),
-    ).await
+    )
+    .await
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -134,7 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Initialize SurrealDB connection
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "surrealkv://data/matrix.db".to_string());
+    let db_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "surrealkv://data/matrix.db".to_string());
 
     let db = any::connect(&db_url)
         .await
@@ -146,21 +175,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| format!("Failed to select matrix.homeserver namespace/database: {}", e))?;
 
-    // Initialize authentication service
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .map(|s| s.into_bytes())
-        .or_else(|_| {
-            tracing::warn!(
-                "JWT_SECRET not set, generating random secret (not suitable for production)"
-            );
-            use rand::RngCore;
-            let mut secret = vec![0u8; 64];
-            rand::rng().fill_bytes(&mut secret);
-            Ok(secret)
-        })
-        .map_err(|e: std::env::VarError| format!("Failed to initialize JWT secret: {}", e))?;
+    // Initialize authentication service with Ed25519 keypair
+    use ed25519_dalek::SigningKey;
 
-    let config = ServerConfig::get().map_err(|e| format!("Failed to get server config: {:?}", e))?;
+    // Load from environment or generate Ed25519 keypair for JWT signing
+    let (private_key_32, public_key_bytes) = match std::env::var("JWT_PRIVATE_KEY") {
+        Ok(key_str) => {
+            // Parse the environment variable key
+            let (priv_key, pub_key) = parse_private_key_from_env(&key_str)
+                .map_err(|e| format!("Failed to parse JWT_PRIVATE_KEY: {}", e))?;
+            
+            tracing::info!("Loaded Ed25519 keypair from JWT_PRIVATE_KEY environment variable");
+            (priv_key, pub_key)
+        }
+        Err(_) => {
+            // Fallback: Generate new keypair using getrandom
+            tracing::warn!(
+                "JWT_PRIVATE_KEY not set, generating random keypair (tokens will not persist across restarts)"
+            );
+            
+            let mut private_key_bytes = [0u8; 32];
+            getrandom::fill(&mut private_key_bytes)
+                .map_err(|e| format!("Failed to generate random bytes: {}", e))?;
+            
+            let signing_key = SigningKey::from_bytes(&private_key_bytes);
+            let verifying_key = signing_key.verifying_key();
+            let public_key_bytes = verifying_key.to_bytes();
+            
+            (private_key_bytes.to_vec(), public_key_bytes.to_vec())
+        }
+    };
+
+    let config =
+        ServerConfig::get().map_err(|e| format!("Failed to get server config: {:?}", e))?;
     let homeserver_name = config.homeserver_name.clone();
 
     // Create repository instances
@@ -168,7 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(db.clone());
 
     let session_service = Arc::new(MatrixSessionService::new(
-        jwt_secret,
+        &private_key_32[..],
+        &public_key_bytes[..],
         homeserver_name.clone(),
         session_repo,
         key_server_repo,
@@ -177,22 +225,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create HTTP client
     let http_client = Arc::new(
         crate::federation::create_federation_http_client()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?,
     );
 
     // Create DNS resolver for Matrix federation
     let well_known_client = Arc::new(WellKnownClient::new(http_client.clone()));
-    let dns_resolver = Arc::new(MatrixDnsResolver::new(well_known_client)
-        .map_err(|e| format!("Failed to create DNS resolver: {}", e))?);
+    let dns_resolver = Arc::new(
+        MatrixDnsResolver::new(well_known_client)
+            .map_err(|e| format!("Failed to create DNS resolver: {}", e))?,
+    );
 
     // Create event signer
-    let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
-        session_service.clone(),
-        db.clone(),
-        dns_resolver.clone(),
-        homeserver_name.clone(),
-        "ed25519:auto".to_string(),
-    ).map_err(|e| format!("Failed to create event signer: {}", e))?);
+    let event_signer = Arc::new(
+        crate::federation::event_signer::EventSigner::new(
+            session_service.clone(),
+            db.clone(),
+            dns_resolver.clone(),
+            homeserver_name.clone(),
+            "ed25519:auto".to_string(),
+        )
+        .map_err(|e| format!("Failed to create event signer: {}", e))?,
+    );
 
     // Initialize rate limiting service with federation-specific limits
     let rate_limit_service = Arc::new(
@@ -207,12 +260,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize transaction service
     let transaction_service = Arc::new(TransactionService::new(db.clone()));
 
+    // Create outbound transaction queue channel
+    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
     // Create application state
-    let app_state = Arc::new(AppState::new(db, session_service, homeserver_name, config, http_client, event_signer, dns_resolver.clone())
-        .expect("Failed to initialize application state"));
+    let mut app_state_instance = AppState::new(
+        db,
+        session_service,
+        homeserver_name.clone(),
+        config,
+        http_client.clone(),
+        event_signer.clone(),
+        dns_resolver.clone(),
+    )
+    .expect("Failed to initialize application state");
+
+    // Update outbound_tx in app_state since new() creates a dummy channel
+    app_state_instance.outbound_tx = outbound_tx;
+    let app_state = Arc::new(app_state_instance);
+
+    // Spawn outbound transaction queue background task
+    let federation_client = Arc::new(crate::federation::client::FederationClient::new(
+        http_client.clone(),
+        event_signer.clone(),
+        homeserver_name.clone(),
+    ));
+    let queue = crate::federation::outbound_queue::OutboundTransactionQueue::new(
+        outbound_rx,
+        federation_client,
+        homeserver_name.clone(),
+    );
+    tokio::spawn(async move {
+        queue.run().await;
+    });
+    tracing::info!("Started outbound transaction queue background task");
 
     // Start key management background service for automatic key refresh
-    let key_management_service = crate::federation::key_management::KeyManagementService::new(app_state.clone());
+    let key_management_service =
+        crate::federation::key_management::KeyManagementService::new(app_state.clone());
     key_management_service.start();
     tracing::info!("Started key management background service");
 
@@ -305,6 +390,7 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v1/rooms/{room_id}/relations/{event_id}/{rel_type}", get(_matrix::client::v1::rooms::by_room_id::relations::by_event_id::by_rel_type::get))
         .route("/v1/rooms/{room_id}/relations/{event_id}/{rel_type}/{event_type}", get(_matrix::client::v1::rooms::by_room_id::relations::by_event_id::by_rel_type::by_event_type::get))
         .route("/v1/rooms/{room_id}/threads", get(_matrix::client::v1::rooms::by_room_id::threads::get))
+        .route("/v1/auth_metadata", get(_matrix::client::v1::auth_metadata::get))
         .route("/v3/account/3pid", get(_matrix::client::v3::account::threepid::get))
         .route("/v3/account/whoami", get(_matrix::client::v3::account::whoami::get))
         .route("/v3/admin/whois/{user_id}", get(_matrix::client::v3::admin::whois::by_user_id::get))
@@ -351,12 +437,10 @@ fn create_client_routes() -> Router<AppState> {
         // Matrix uses regular HTTP long-polling sync via GET /v3/sync
         // Enhanced live filtering available via GET /v3/sync/live
         .route("/v3/thirdparty/location", get(_matrix::client::v3::thirdparty::location::get))
-        .route("/v3/thirdparty/location/{alias}", get(_matrix::client::v3::thirdparty::location::by_alias::get))
         .route("/v3/thirdparty/location/{protocol}", get(_matrix::client::v3::thirdparty::location::by_protocol::get))
         .route("/v3/thirdparty/protocol/{protocol}", get(_matrix::client::v3::thirdparty::protocol::by_protocol::get))
         .route("/v3/thirdparty/protocols", get(_matrix::client::v3::thirdparty::protocols::get))
         .route("/v3/thirdparty/user", get(_matrix::client::v3::thirdparty::user::get))
-        .route("/v3/thirdparty/user/{userid}", get(_matrix::client::v3::thirdparty::user::by_userid::get))
         .route("/v3/thirdparty/user/{protocol}", get(_matrix::client::v3::thirdparty::user::by_protocol::get))
         .route("/v3/user/{user_id}/account_data/{type}", get(_matrix::client::v3::user::by_user_id::account_data::by_type::get))
         .route("/v3/user/{user_id}/filter/{filter_id}", get(_matrix::client::v3::user::by_user_id::filter::by_filter_id::get))
@@ -549,7 +633,10 @@ fn create_media_routes() -> Router<AppState> {
     Router::new()
         .route("/v1/create", post(_matrix::media::v1::create::post))
         .route("/v1/download/{server_name}/{media_id}", get(_matrix::media::v1::download::get))
-        .route("/v1/download/{server_name}/{media_id}/{file_name}", get(_matrix::media::v1::download::get_with_filename))
+        .route(
+            "/v1/download/{server_name}/{media_id}/{file_name}",
+            get(_matrix::media::v1::download::get_with_filename),
+        )
         .route("/v1/upload", post(_matrix::media::v1::upload::post))
         .route("/v3/upload", post(_matrix::media::v3::upload::post))
         .route(
@@ -632,12 +719,9 @@ async fn handler_405() -> impl axum::response::IntoResponse {
     (StatusCode::METHOD_NOT_ALLOWED, MatrixError::Unrecognized)
 }
 
-async fn method_not_allowed_middleware(
-    request: Request,
-    next: Next,
-) -> Response {
+async fn method_not_allowed_middleware(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
-    
+
     // If the response is 405 Method Not Allowed, convert to Matrix format
     if response.status() == StatusCode::METHOD_NOT_ALLOWED {
         use axum::response::IntoResponse;
@@ -652,44 +736,47 @@ async fn federation_content_type_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    
+
     // Check Content-Type for POST/PUT requests
     if matches!(request.method(), &axum::http::Method::POST | &axum::http::Method::PUT) {
         let content_type = request.headers().get("content-type");
-        
+
         match content_type {
             Some(ct) => {
                 let ct_str = match ct.to_str() {
                     Ok(s) => s,
                     Err(_) => {
                         return MatrixError::BadJson.into_response();
-                    }
+                    },
                 };
-                
+
                 // Check for application/json with optional charset
                 if !ct_str.starts_with("application/json") {
                     return MatrixError::NotJson.into_response();
                 }
-                
+
                 // Validate UTF-8 encoding if charset is specified
-                if ct_str.contains("charset=") && !ct_str.contains("charset=utf-8") && !ct_str.contains("charset=UTF-8") {
+                if ct_str.contains("charset=")
+                    && !ct_str.contains("charset=utf-8")
+                    && !ct_str.contains("charset=UTF-8")
+                {
                     return MatrixError::BadJson.into_response();
                 }
             },
             None => {
                 return MatrixError::NotJson.into_response();
-            }
+            },
         }
     }
-    
+
     let mut response = next.run(request).await;
-    
+
     // Set application/json Content-Type on all responses
     response.headers_mut().insert(
         "content-type",
-        axum::http::HeaderValue::from_static("application/json; charset=utf-8")
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    
+
     response
 }
 

@@ -1,4 +1,3 @@
-
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::cache::lazy_loading_cache::LazyLoadingCache;
@@ -138,7 +137,9 @@ async fn apply_lazy_loading_filter_enhanced(
     // Record metrics for dashboard
     if let Some(metrics) = state.lazy_loading_metrics.as_ref() {
         let cache_hit = !essential_members.is_empty(); // Simplified cache hit detection
-        let _ = metrics.record_operation(processing_time, cache_hit, members_filtered_out as u64).await;
+        let _ = metrics
+            .record_operation(processing_time, cache_hit, members_filtered_out as u64)
+            .await;
     }
 
     Ok(filtered_events)
@@ -166,8 +167,8 @@ pub async fn apply_lazy_loading_filter(
             // 1. For the requesting user
             // 2. For senders of other timeline events
             // 3. For membership changes during this sync
-            if event.state_key.as_ref() == Some(&user_id.to_string()) ||
-                !seen_senders.contains(&event.sender)
+            if event.state_key.as_ref() == Some(&user_id.to_string())
+                || !seen_senders.contains(&event.sender)
             {
                 seen_senders.insert(event.sender.clone());
                 filtered.push(event);

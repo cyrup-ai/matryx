@@ -42,8 +42,7 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
 
     // Log key age for Matrix federation key management
     let key_age_days = (chrono::Utc::now() - key_record.created_at).num_days();
-    info!("Serving signing key {} created {} days ago",
-          key_record.key_id, key_age_days);
+    info!("Serving signing key {} created {} days ago", key_record.key_id, key_age_days);
 
     // Use key expiry time if available, otherwise default to 7 days
     // Ensure minimum 1-hour response lifetime per Matrix spec to avoid repeated requests
@@ -99,10 +98,7 @@ async fn get_or_generate_signing_keys(
     // Start by trying to get the private signing key directly (correct approach)
     let key_id = "ed25519:auto";
 
-    let current_key = match infrastructure_service
-        .get_signing_key(server_name, key_id)
-        .await
-    {
+    let current_key = match infrastructure_service.get_signing_key(server_name, key_id).await {
         Ok(Some(signing_key_data)) => {
             // We have a stored signing key - use it to build the response
             info!("Found existing signing key {} for server {}", key_id, server_name);

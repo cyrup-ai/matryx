@@ -129,6 +129,7 @@ pub struct RoomOperationsService<C: Connection> {
     membership_repo: MembershipRepository,
     relations_repo: RelationsRepository<C>,
     threads_repo: ThreadsRepository<C>,
+    db: surrealdb::Surreal<surrealdb::engine::any::Any>,
 }
 
 impl<C: Connection> RoomOperationsService<C> {
@@ -138,6 +139,7 @@ impl<C: Connection> RoomOperationsService<C> {
         membership_repo: MembershipRepository,
         relations_repo: RelationsRepository<C>,
         threads_repo: ThreadsRepository<C>,
+        db: surrealdb::Surreal<surrealdb::engine::any::Any>,
     ) -> Self {
         Self {
             room_repo,
@@ -145,6 +147,7 @@ impl<C: Connection> RoomOperationsService<C> {
             membership_repo,
             relations_repo,
             threads_repo,
+            db,
         }
     }
 
@@ -433,7 +436,7 @@ impl<C: Connection> RoomOperationsService<C> {
         }
 
         // Get thread roots from threads repository
-        self.threads_repo.get_thread_roots(room_id, include, since, None).await
+        self.threads_repo.get_thread_roots(room_id, Some(user_id), include, since, None).await
     }
 
     /// Validate membership operations with power level checks
@@ -601,8 +604,17 @@ impl<C: Connection> RoomOperationsService<C> {
         let room = self.room_repo.create_room(config).await?;
         let room_id = room.room_id.clone();
 
+        // Create authorization service for join validation
+        let room_alias_repo = std::sync::Arc::new(crate::repository::room_alias::RoomAliasRepository::new(self.db.clone()));
+        let auth_service = crate::repository::room_authorization::RoomAuthorizationService::new(
+            std::sync::Arc::new(self.room_repo.clone()),
+            std::sync::Arc::new(self.membership_repo.clone()),
+            room_alias_repo,
+            self.db.clone()
+        );
+
         // Add creator as joined member
-        self.membership_repo.join_room(&room_id, creator_id, None, None).await?;
+        self.membership_repo.join_room(&room_id, creator_id, None, None, &auth_service).await?;
 
         // Create room creation event
         let creation_content = serde_json::json!({
@@ -730,9 +742,18 @@ impl<C: Connection> RoomOperationsService<C> {
             });
         }
 
+        // Create authorization service for join validation
+        let room_alias_repo = std::sync::Arc::new(crate::repository::room_alias::RoomAliasRepository::new(self.db.clone()));
+        let auth_service = crate::repository::room_authorization::RoomAuthorizationService::new(
+            std::sync::Arc::new(self.room_repo.clone()),
+            std::sync::Arc::new(self.membership_repo.clone()),
+            room_alias_repo,
+            self.db.clone()
+        );
+
         // Perform the join
         self.membership_repo
-            .join_room(room_id, user_id, display_name.clone(), avatar_url.clone())
+            .join_room(room_id, user_id, display_name.clone(), avatar_url.clone(), &auth_service)
             .await?;
 
         // Create join event
@@ -833,8 +854,17 @@ impl<C: Connection> RoomOperationsService<C> {
             });
         }
 
+        // Create authorization service for join validation
+        let room_alias_repo = std::sync::Arc::new(crate::repository::room_alias::RoomAliasRepository::new(self.db.clone()));
+        let auth_service = crate::repository::room_authorization::RoomAuthorizationService::new(
+            std::sync::Arc::new(self.room_repo.clone()),
+            std::sync::Arc::new(self.membership_repo.clone()),
+            room_alias_repo,
+            self.db.clone()
+        );
+
         // Perform the join
-        self.membership_repo.join_room(room_id, user_id, reason.map(|r| r.to_string()), None).await?;
+        self.membership_repo.join_room(room_id, user_id, reason.map(|r| r.to_string()), None, &auth_service).await?;
 
         // Create event (simplified)
         let event_id = format!("$join_{}_{}", user_id, chrono::Utc::now().timestamp_millis());

@@ -66,13 +66,13 @@ impl LoadTest {
             successful_users,
             failed_users,
             duration,
-            messages_per_second: self.metrics.messages_sent.load(Ordering::Relaxed) as f64 /
-                duration.as_secs_f64(),
-            requests_per_second: self.metrics.requests_sent.load(Ordering::Relaxed) as f64 /
-                duration.as_secs_f64(),
+            messages_per_second: self.metrics.messages_sent.load(Ordering::Relaxed) as f64
+                / duration.as_secs_f64(),
+            requests_per_second: self.metrics.requests_sent.load(Ordering::Relaxed) as f64
+                / duration.as_secs_f64(),
             average_response_time_ms: self.metrics.total_response_time_ms.load(Ordering::Relaxed)
-                as f64 /
-                self.metrics.requests_sent.load(Ordering::Relaxed) as f64,
+                as f64
+                / self.metrics.requests_sent.load(Ordering::Relaxed) as f64,
         })
     }
 
@@ -83,10 +83,14 @@ impl LoadTest {
         // Create a test user and room
         let (user_id, access_token) =
             create_test_user(&self.server, "throughput_user", "password").await?;
-        
+
         // Validate user creation for throughput test
-        assert!(user_id.starts_with('@'), "Throughput test user ID should be properly formatted: {}", user_id);
-        
+        assert!(
+            user_id.starts_with('@'),
+            "Throughput test user ID should be properly formatted: {}",
+            user_id
+        );
+
         let room_id = create_test_room(&self.server, &access_token, "Throughput Test Room").await?;
 
         let start_time = Instant::now();
@@ -132,9 +136,13 @@ impl LoadTest {
         // Create test user
         let (user_id, access_token) =
             create_test_user(&self.server, "sync_perf_user", "password").await?;
-        
+
         // Validate user creation for sync performance test
-        assert!(user_id.starts_with('@'), "Sync performance test user ID should be properly formatted: {}", user_id);
+        assert!(
+            user_id.starts_with('@'),
+            "Sync performance test user ID should be properly formatted: {}",
+            user_id
+        );
 
         let mut sync_times = Vec::new();
         let test_iterations = 10;
@@ -184,14 +192,15 @@ async fn simulate_user_session(
         .map_err(|e| -> Box<dyn std::error::Error + Send> {
             Box::new(std::io::Error::other(e.to_string()))
         })?;
-    
+
     // Validate user ID format for performance test consistency
     if !user_id.starts_with('@') || !user_id.contains(':') {
-        return Err(Box::new(std::io::Error::other(
-            format!("Invalid user ID format in performance test: {}", user_id)
-        )));
+        return Err(Box::new(std::io::Error::other(format!(
+            "Invalid user ID format in performance test: {}",
+            user_id
+        ))));
     }
-    
+
     metrics.requests_sent.fetch_add(1, Ordering::Relaxed);
 
     // Create room
@@ -226,7 +235,7 @@ async fn simulate_user_session(
     let response = server
         .test_authenticated_endpoint("GET", "/_matrix/client/v3/sync", &access_token, None)
         .await;
-    
+
     // Track sync success/failure for performance metrics
     if response.status_code() == 200 {
         metrics.syncs_completed.fetch_add(1, Ordering::Relaxed);
@@ -295,34 +304,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_load() {
-        let load_test = LoadTest::new().await.unwrap();
-        let report = load_test.test_concurrent_users(5).await.unwrap();
+        let load_test = LoadTest::new().await
+            .expect("Test setup: failed to create load test harness for concurrent users test");
+        let report = load_test.test_concurrent_users(5).await
+            .expect("Test execution: concurrent users load test should execute successfully");
 
         println!("Load test report: {:?}", report);
 
         // Should handle at least 5 concurrent users
         assert!(report.successful_users > 0, "Should have some successful users");
         assert!(report.requests_per_second > 0.0, "Should have some request throughput");
-        
+
         // Use all fields to satisfy clippy
         assert_eq!(report.user_count, 5, "User count should match requested count");
         assert!(report.failed_users <= 5, "Failed users should not exceed total");
         assert!(report.duration.as_secs() < 300, "Test should complete within 5 minutes");
         assert!(report.messages_per_second >= 0.0, "Messages per second should be non-negative");
-        assert!(report.average_response_time_ms >= 0.0, "Average response time should be non-negative");
+        assert!(
+            report.average_response_time_ms >= 0.0,
+            "Average response time should be non-negative"
+        );
     }
 
     #[tokio::test]
     async fn test_message_throughput() {
-        let load_test = LoadTest::new().await.unwrap();
-        let report = load_test.test_message_throughput(20).await.unwrap();
+        let load_test = LoadTest::new().await
+            .expect("Test setup: failed to create load test harness for message throughput test");
+        let report = load_test.test_message_throughput(20).await
+            .expect("Test execution: message throughput test should execute successfully");
 
         println!("Throughput report: {:?}", report);
 
         // Should successfully send most messages
         assert!(report.successful_messages > 10, "Should send most messages successfully");
         assert!(report.messages_per_second > 0.0, "Should have positive throughput");
-        
+
         // Use all fields to satisfy clippy
         assert_eq!(report.total_messages, 20, "Total messages should match requested count");
         assert!(report.failed_messages <= 20, "Failed messages should not exceed total");
@@ -331,8 +347,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_performance() {
-        let load_test = LoadTest::new().await.unwrap();
-        let report = load_test.test_sync_performance().await.unwrap();
+        let load_test = LoadTest::new().await
+            .expect("Test setup: failed to create load test harness for sync performance test");
+        let report = load_test.test_sync_performance().await
+            .expect("Test execution: sync performance test should execute successfully");
 
         println!("Sync performance report: {:?}", report);
 
@@ -342,10 +360,16 @@ mod tests {
             report.average_response_time < Duration::from_secs(5),
             "Sync should be reasonably fast"
         );
-        
+
         // Use all fields to satisfy clippy
         assert_eq!(report.total_syncs, 10, "Total syncs should match expected count");
-        assert!(report.min_response_time <= report.average_response_time, "Min should not exceed average");
-        assert!(report.max_response_time >= report.average_response_time, "Max should not be less than average");
+        assert!(
+            report.min_response_time <= report.average_response_time,
+            "Min should not exceed average"
+        );
+        assert!(
+            report.max_response_time >= report.average_response_time,
+            "Max should not be less than average"
+        );
     }
 }

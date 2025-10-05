@@ -49,4 +49,13 @@ pub enum RepositoryError {
 
     #[error("Invalid data: {message}")]
     InvalidData { message: String },
+
+    #[error("System metrics error: {0}")]
+    SystemError(String),
+
+    #[error("State resolution failed: {0}")]
+    StateResolution(String),
+
+    #[error("External service error: {0}")]
+    ExternalService(String),
 }

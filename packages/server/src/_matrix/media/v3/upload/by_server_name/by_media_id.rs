@@ -5,9 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
 use serde_json::{Value, json};
@@ -52,11 +50,10 @@ pub async fn put(
 
     // Process the payload for media metadata updates
     // The payload typically contains media information like filename, content_type, etc.
-    let filename = payload.get("filename")
-        .and_then(|f| f.as_str())
-        .map(|s| s.to_string());
-    
-    let content_type = payload.get("content_type")
+    let filename = payload.get("filename").and_then(|f| f.as_str()).map(|s| s.to_string());
+
+    let content_type = payload
+        .get("content_type")
         .and_then(|ct| ct.as_str())
         .unwrap_or("application/octet-stream");
 
@@ -65,17 +62,17 @@ pub async fn put(
         && let Err(e) = media_service
             .update_media_metadata(&media_id, &server_name, name, content_type)
             .await
-        {
-            tracing::warn!("Failed to update media metadata for {}/{}: {}", server_name, media_id, e);
-            // Continue execution - metadata update failure shouldn't block the response
-        }
+    {
+        tracing::warn!("Failed to update media metadata for {}/{}: {}", server_name, media_id, e);
+        // Continue execution - metadata update failure shouldn't block the response
+    }
 
     // Validate that the media exists after processing payload
     let media_exists = media_service
         .media_exists(&media_id, &server_name)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     if !media_exists {
         return Err(StatusCode::NOT_FOUND);
     }

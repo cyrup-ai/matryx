@@ -274,9 +274,9 @@ async fn test_transaction_id_patterns() {
     for pattern in valid_patterns {
         // Transaction ID patterns should contain the expected structure
         assert!(
-            pattern.contains("/send/") ||
-                pattern.contains("/sendToDevice/") ||
-                pattern.contains("/redact/")
+            pattern.contains("/send/")
+                || pattern.contains("/sendToDevice/")
+                || pattern.contains("/redact/")
         );
         assert!(pattern.split('/').count() >= 8); // Minimum segments for transaction ID endpoints
     }

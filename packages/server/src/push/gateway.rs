@@ -369,14 +369,12 @@ impl Clone for PushNotification {
                     .notification
                     .devices
                     .iter()
-                    .map(|d| {
-                        PushDeviceInfo {
-                            app_id: d.app_id.clone(),
-                            pushkey: d.pushkey.clone(),
-                            pushkey_ts: d.pushkey_ts,
-                            data: d.data.clone(),
-                            tweaks: d.tweaks.clone(),
-                        }
+                    .map(|d| PushDeviceInfo {
+                        app_id: d.app_id.clone(),
+                        pushkey: d.pushkey.clone(),
+                        pushkey_ts: d.pushkey_ts,
+                        data: d.data.clone(),
+                        tweaks: d.tweaks.clone(),
                     })
                     .collect(),
                 event_id: self.notification.event_id.clone(),

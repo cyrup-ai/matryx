@@ -14,10 +14,7 @@ use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, Validat
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    FederationRepository,
-    KeyServerRepository,
-    MembershipRepository,
+    EventRepository, FederationRepository, KeyServerRepository, MembershipRepository,
     RoomRepository,
 };
 
@@ -229,7 +226,8 @@ pub async fn put(
         dns_resolver: state.dns_resolver.clone(),
         db: state.db.clone(),
         homeserver_name: state.homeserver_name.clone(),
-    }).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    })
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Validate the join event PDU
     let validated_event = match pdu_validator.validate_pdu(&payload, &x_matrix_auth.origin).await {
@@ -293,7 +291,8 @@ pub async fn put(
     })?;
 
     // Get current room state (excluding the join event we just processed)
-    let room_state_events = event_repo.get_room_current_state(&room_id, Some(&stored_event.event_id))
+    let room_state_events = event_repo
+        .get_room_current_state(&room_id, Some(&stored_event.event_id))
         .await
         .map_err(|e| {
             error!("Failed to get room state: {}", e);
@@ -307,7 +306,8 @@ pub async fn put(
         .collect();
 
     // Get auth chain for the current room state
-    let auth_chain_events = event_repo.get_auth_chain_for_events(&room_state_events)
+    let auth_chain_events = event_repo
+        .get_auth_chain_for_events(&room_state_events)
         .await
         .map_err(|e| {
             error!("Failed to get auth chain: {}", e);
@@ -386,5 +386,3 @@ async fn sign_join_event(
 
     Ok(event)
 }
-
-

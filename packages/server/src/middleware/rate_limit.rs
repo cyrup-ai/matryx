@@ -1,10 +1,9 @@
 //! Module contains intentional library code not yet fully integrated
 #![allow(dead_code)]
 
-use crate::{auth::MatrixAuth, error::MatrixError};
-use tracing::{warn, error, info};
 use crate::auth::CaptchaService;
 use crate::auth::captcha::CaptchaConfig;
+use crate::{auth::MatrixAuth, error::MatrixError};
 use axum::{
     extract::{ConnectInfo, Request, State},
     http::StatusCode,
@@ -12,8 +11,7 @@ use axum::{
     response::Response,
 };
 use governor::{
-    Quota,
-    RateLimiter,
+    Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
@@ -27,6 +25,7 @@ use std::{
 };
 use surrealdb::engine::any::Any;
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 
 /// Type alias for a rate limiter with timestamp
 type RateLimiterEntry = (RateLimiter<NotKeyed, InMemoryState, DefaultClock>, Instant);
@@ -213,7 +212,10 @@ impl RateLimitService {
     }
 
     /// Check rate limit for federation server media requests
-    pub async fn check_server_media_rate_limit(&self, server_name: &str) -> Result<(), MatrixError> {
+    pub async fn check_server_media_rate_limit(
+        &self,
+        server_name: &str,
+    ) -> Result<(), MatrixError> {
         let mut limiters = self.server_limiters.write().await;
         let now = Instant::now();
 
@@ -260,7 +262,12 @@ impl RateLimitService {
     }
 
     /// Check if CAPTCHA is required for the given IP and operation
-    pub async fn is_captcha_required(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str, operation: &str) -> bool {
+    pub async fn is_captcha_required(
+        &self,
+        db: Arc<surrealdb::Surreal<Any>>,
+        ip_address: &str,
+        operation: &str,
+    ) -> bool {
         let config = CaptchaConfig::from_env();
         let captcha_repo = CaptchaRepository::new((*db).clone());
         let captcha_service = CaptchaService::new(captcha_repo, config);
@@ -270,12 +277,17 @@ impl RateLimitService {
             Err(e) => {
                 warn!("Failed to check CAPTCHA requirement: {}", e);
                 false
-            }
+            },
         }
     }
 
     /// Record a rate limit violation for CAPTCHA tracking
-    pub async fn record_rate_limit_violation(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str, operation: &str) {
+    pub async fn record_rate_limit_violation(
+        &self,
+        db: Arc<surrealdb::Surreal<Any>>,
+        ip_address: &str,
+        operation: &str,
+    ) {
         let config = CaptchaConfig::from_env();
         let captcha_repo = CaptchaRepository::new((*db).clone());
         let captcha_service = CaptchaService::new(captcha_repo, config);
@@ -302,7 +314,7 @@ impl RateLimitService {
             Err(e) => {
                 error!("Failed to create CAPTCHA challenge: {}", e);
                 None
-            }
+            },
         }
     }
 
@@ -317,7 +329,7 @@ impl RateLimitService {
             Err(e) => {
                 error!("Failed to get CAPTCHA stats: {}", e);
                 None
-            }
+            },
         }
     }
 
@@ -331,16 +343,20 @@ impl RateLimitService {
             Ok(count) => {
                 info!("Cleaned up {} expired CAPTCHA challenges", count);
                 count
-            }
+            },
             Err(e) => {
                 error!("Failed to cleanup expired CAPTCHA challenges: {}", e);
                 0
-            }
+            },
         }
     }
 
     /// Check suspicious activity patterns for CAPTCHA triggering
-    pub async fn check_suspicious_activity(&self, db: Arc<surrealdb::Surreal<Any>>, ip_address: &str) -> bool {
+    pub async fn check_suspicious_activity(
+        &self,
+        db: Arc<surrealdb::Surreal<Any>>,
+        ip_address: &str,
+    ) -> bool {
         let config = CaptchaConfig::from_env();
         let captcha_repo = CaptchaRepository::new((*db).clone());
         let captcha_service = CaptchaService::new(captcha_repo, config);
@@ -351,7 +367,7 @@ impl RateLimitService {
             Err(e) => {
                 warn!("Failed to check suspicious activity: {}", e);
                 false
-            }
+            },
         }
     }
 }
@@ -373,7 +389,6 @@ pub async fn rate_limit_middleware(
 
     // Determine endpoint type for specialized rate limiting
     let is_media_endpoint = request.uri().path().contains("/media/");
-    let is_federation_endpoint = request.uri().path().starts_with("/_matrix/federation/");
 
     // Check authentication-specific rate limits
     if let Some(auth) = request.extensions().get::<MatrixAuth>() {
@@ -390,12 +405,10 @@ pub async fn rate_limit_middleware(
                 if let Some(server_name) = auth.server_name() {
                     let result = if is_media_endpoint {
                         rate_limit_service.check_server_media_rate_limit(server_name).await
-                    } else if is_federation_endpoint {
-                        rate_limit_service.check_server_rate_limit(server_name).await
                     } else {
                         rate_limit_service.check_server_rate_limit(server_name).await
                     };
-                    
+
                     if let Err(_matrix_error) = result {
                         return Err(StatusCode::TOO_MANY_REQUESTS);
                     }
@@ -411,5 +424,3 @@ pub async fn rate_limit_middleware(
 
     Ok(next.run(request).await)
 }
-
-

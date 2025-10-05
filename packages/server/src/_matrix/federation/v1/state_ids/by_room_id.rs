@@ -136,7 +136,8 @@ pub async fn get(
     debug!("Room found: {} (version: {})", room.room_id, &room.room_version);
 
     // Check if requesting server has permission to view room state
-    let has_permission = room_repo.check_server_state_permission(&room_id, &x_matrix_auth.origin)
+    let has_permission = room_repo
+        .check_server_state_permission(&room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
             error!("Failed to check state permissions for room {}: {}", room_id, e);
@@ -168,20 +169,23 @@ pub async fn get(
     }
 
     // Get room state IDs at the specified event
-    let state_event_ids = event_repo.get_room_state_ids_at_event(&room_id, &query.event_id)
+    let state_event_ids = event_repo
+        .get_room_state_ids_at_event(&room_id, &query.event_id)
         .await
         .map_err(|e| {
-            error!("Failed to get room state IDs: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        error!("Failed to get room state IDs: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Get auth chain IDs for the state events
-    let auth_chain_ids = event_repo.get_auth_chain_ids_for_state(&state_event_ids)
-        .await
-        .map_err(|e| {
-            error!("Failed to get auth chain IDs: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let auth_chain_ids =
+        event_repo
+            .get_auth_chain_ids_for_state(&state_event_ids)
+            .await
+            .map_err(|e| {
+                error!("Failed to get auth chain IDs: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     let response = json!({
         "pdu_ids": state_event_ids,
@@ -198,5 +202,3 @@ pub async fn get(
 
     Ok(Json(response))
 }
-
-

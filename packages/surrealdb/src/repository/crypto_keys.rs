@@ -409,49 +409,144 @@ impl<C: Connection> CryptoKeysRepository<C> {
     }
 
     /// Validate key signatures for cross-signing verification
+    /// Implements Matrix specification for signature verification (Appendix - Signing JSON)
     pub async fn validate_key_signatures(
         &self,
         user_id: &str,
+        keys: &Value,
         signatures: &HashMap<String, Value>,
     ) -> Result<bool, RepositoryError> {
+        use base64::{Engine as _, engine::general_purpose};
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
         // Get the user's cross-signing keys
         let cross_signing_keys = self.get_cross_signing_keys(user_id).await?;
 
-        // Basic validation - check if we have the required keys
-        if cross_signing_keys.master_key.is_none() {
-            return Ok(false);
-        }
+        // Ensure master key exists (required for cross-signing)
+        let master_key = match cross_signing_keys.master_key {
+            Some(key) => key,
+            None => return Ok(false),
+        };
 
-        // In a real implementation, this would:
-        // 1. Verify each signature using the appropriate public key
-        // 2. Check the signature chain (master -> self-signing -> device keys)
-        // 3. Validate the cryptographic signatures using Ed25519
-
-        // For now, perform basic validation
-        for key_id in signatures.keys() {
-            // Check if we have the signing key
-            let key_exists_query = "
-                SELECT key_id FROM cross_signing_keys
-                WHERE user_id = $user_id
-                AND keys CONTAINS $key_id
-                LIMIT 1
-            ";
-
-            let mut result = self
-                .db
-                .query(key_exists_query)
-                .bind(("user_id", user_id.to_string()))
-                .bind(("key_id", key_id.to_string()))
-                .await?;
-
-            let keys: Vec<Value> = result.take(0)?;
-
-            if keys.is_empty() {
-                return Ok(false);
+        // Verify each signature using ed25519
+        for (key_id, signature_value) in signatures {
+            // Validate key_id format (must be ed25519:KEYID per spec)
+            if !key_id.starts_with("ed25519:") {
+                return Err(RepositoryError::Validation {
+                    field: "key_id".to_string(),
+                    message: format!("Unsupported algorithm in key_id: {}", key_id),
+                });
             }
+
+            // Extract signature string
+            let signature_str = match signature_value.as_str() {
+                Some(s) => s,
+                None => {
+                    return Err(RepositoryError::Validation {
+                        field: "signature".to_string(),
+                        message: "Signature must be a string".to_string(),
+                    });
+                }
+            };
+
+            // Get the signing key from master key
+            let signing_key = match master_key.keys.get(key_id) {
+                Some(key) => key,
+                None => {
+                    return Err(RepositoryError::Validation {
+                        field: "signing_key".to_string(),
+                        message: format!("Signing key {} not found in master key", key_id),
+                    });
+                }
+            };
+
+            // Decode signature from base64
+            let signature_bytes = general_purpose::STANDARD.decode(signature_str).map_err(|e| {
+                RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: format!("Invalid base64 signature: {}", e),
+                }
+            })?;
+
+            // Decode signing key from base64
+            let signing_key_bytes = general_purpose::STANDARD.decode(signing_key).map_err(|e| {
+                RepositoryError::Validation {
+                    field: "signing_key".to_string(),
+                    message: format!("Invalid base64 signing key: {}", e),
+                }
+            })?;
+
+            // Validate sizes (ed25519 spec)
+            if signature_bytes.len() != 64 {
+                return Err(RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: format!("Invalid signature length: {} (expected 64)", signature_bytes.len()),
+                });
+            }
+
+            if signing_key_bytes.len() != 32 {
+                return Err(RepositoryError::Validation {
+                    field: "signing_key".to_string(),
+                    message: format!("Invalid key length: {} (expected 32)", signing_key_bytes.len()),
+                });
+            }
+
+            // Convert to fixed-size arrays
+            let key_array: [u8; 32] = match signing_key_bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return Err(RepositoryError::Validation {
+                        field: "signing_key".to_string(),
+                        message: "Failed to convert key bytes to array".to_string(),
+                    });
+                }
+            };
+
+            let sig_array: [u8; 64] = match signature_bytes.try_into() {
+                Ok(arr) => arr,
+                Err(_) => {
+                    return Err(RepositoryError::Validation {
+                        field: "signature".to_string(),
+                        message: "Failed to convert signature bytes to array".to_string(),
+                    });
+                }
+            };
+
+            // Create verifying key and signature objects
+            let verifying_key = VerifyingKey::from_bytes(&key_array).map_err(|e| {
+                RepositoryError::Validation {
+                    field: "signing_key".to_string(),
+                    message: format!("Invalid Ed25519 key: {}", e),
+                }
+            })?;
+
+            let signature_obj = Signature::from_bytes(&sig_array);
+
+            // Create canonical JSON per Matrix "Signing JSON" spec
+            // Step 1: Clone the keys object
+            let mut canonical_value = keys.clone();
+
+            // Step 2: Remove signatures and unsigned fields per spec
+            if let Some(obj) = canonical_value.as_object_mut() {
+                obj.remove("signatures");
+                obj.remove("unsigned");
+            }
+
+            // Step 3: Create canonical JSON (compact, sorted keys)
+            let canonical_json = serde_json::to_string(&canonical_value)
+                .map_err(RepositoryError::Serialization)?;
+
+            // Verify signature against canonical JSON bytes (NOT key_id)
+            // This is the critical fix per Matrix spec
+            verifying_key.verify(canonical_json.as_bytes(), &signature_obj).map_err(|e| {
+                RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: format!("Ed25519 signature verification failed: {}", e),
+                }
+            })?;
         }
 
-        // All basic validations passed
+        // All signatures verified successfully per spec
         Ok(true)
     }
 

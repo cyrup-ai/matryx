@@ -6,14 +6,9 @@ use serde_json::json;
 
 use crate::state::AppState;
 use matryx_entity::types::{
-    AccountData,
-    AccountDataUpdate,
-    JoinedRoomUpdate,
-    LiveSyncUpdate,
-    RoomsUpdate,
-    TimelineUpdate,
+    AccountData, AccountDataUpdate, JoinedRoomUpdate, LiveSyncUpdate, RoomsUpdate, TimelineUpdate,
 };
-use matryx_surrealdb::repository::{EventRepository, AccountDataRepository};
+use matryx_surrealdb::repository::{AccountDataRepository, EventRepository};
 
 pub async fn create_event_live_stream(
     state: AppState,
@@ -95,9 +90,7 @@ pub async fn create_account_data_live_stream(
 > {
     // Create LiveQuery for account data changes
     let account_data_repo = AccountDataRepository::new(state.db.clone());
-    let mut stream = account_data_repo
-        .create_account_data_live_query(&user_id)
-        .await?;
+    let mut stream = account_data_repo.create_account_data_live_query(&user_id).await?;
 
     let sync_stream = stream.stream::<surrealdb::Notification<AccountData>>(0)?
         .map(move |notification_result| -> Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>> {

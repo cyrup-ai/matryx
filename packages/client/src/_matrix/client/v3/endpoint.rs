@@ -1,12 +1,22 @@
-//! Client stub for _matrix/client/v3/endpoint.rs
+//! Generic endpoint utilities for Matrix client
 //!
-//! This is a placeholder stub for the client implementation.
-//! The actual HTTP client functionality should be implemented here
-//! using reqwest to make outbound HTTP requests.
+//! This module provides utilities for endpoint discovery and metadata.
+//! Currently serves as a placeholder for future endpoint-related functionality.
 
-// Placeholder stub - implement actual client functionality as needed
-pub mod client_stub {
-    pub fn placeholder() {
-        // Client implementation would go here
+use crate::http_client::MatrixHttpClient;
+
+/// Client for generic endpoint operations
+#[derive(Clone)]
+pub struct EndpointClient {
+    /// HTTP client reserved for future endpoint discovery methods
+    _http_client: MatrixHttpClient,
+}
+
+impl EndpointClient {
+    pub fn new(http_client: MatrixHttpClient) -> Self {
+        Self { _http_client: http_client }
     }
+    
+    // Future endpoint discovery methods will be added here
+    // as the Matrix specification evolves
 }

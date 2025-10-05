@@ -11,19 +11,19 @@ use matryx_entity::types::{Event, MembershipState, Room};
 use serde_json::Value;
 use surrealdb::Connection;
 
-pub struct RoomManagementService<C: Connection> {
+pub struct RoomManagementService {
     room_repo: RoomRepository,
     event_repo: EventRepository,
     membership_repo: MembershipRepository,
-    power_levels_repo: PowerLevelsRepository<C>,
+    power_levels_repo: PowerLevelsRepository,
 }
 
-impl<C: Connection> RoomManagementService<C> {
+impl RoomManagementService {
     pub fn new(
         room_repo: RoomRepository,
         event_repo: EventRepository,
         membership_repo: MembershipRepository,
-        power_levels_repo: PowerLevelsRepository<C>,
+        power_levels_repo: PowerLevelsRepository,
     ) -> Self {
         Self {
             room_repo,

@@ -331,6 +331,61 @@ impl PublicRoomsRepository {
     fn generate_pagination_token(&self, offset: u32) -> String {
         offset.to_string()
     }
+
+    /// Update room search index for full-text search
+    pub async fn update_room_search_index(
+        &self,
+        room_id: &str,
+        name: &str,
+        topic: &str,
+    ) -> Result<(), RepositoryError> {
+        // Update search index fields in the room table
+        // This enables full-text search on room name and topic
+        let query = "
+            UPDATE room
+            SET search_name = $search_name,
+                search_topic = $search_topic,
+                search_updated_at = time::now()
+            WHERE room_id = $room_id
+        ";
+
+        self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("search_name", name.to_lowercase()))
+            .bind(("search_topic", topic.to_lowercase()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "update_room_search_index".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Emit directory update event for LiveQuery subscribers
+    pub async fn emit_directory_update_event(&self, room_id: &str) -> Result<(), RepositoryError> {
+        // Create a directory update event that LiveQuery can pick up
+        // This notifies subscribers that the room directory has changed
+        let query = "
+            CREATE directory_update_event CONTENT {
+                room_id: $room_id,
+                event_type: 'directory_update',
+                timestamp: time::now()
+            }
+        ";
+
+        self.db
+            .query(query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "emit_directory_update_event".to_string(),
+            })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

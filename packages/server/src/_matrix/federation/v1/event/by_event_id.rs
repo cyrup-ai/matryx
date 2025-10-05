@@ -7,13 +7,11 @@ use chrono::Utc;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::state::AppState;
-use crate::federation::pdu_validator::{PduValidator, ValidationResult};
 use crate::auth::x_matrix_parser::parse_x_matrix_header;
+use crate::federation::pdu_validator::{PduValidator, ValidationResult};
+use crate::state::AppState;
 use matryx_entity::types::{PDU, Transaction};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
-
-
 
 /// Validate Matrix event ID format
 fn validate_event_id(event_id: &str) -> Result<(), StatusCode> {
@@ -39,11 +37,10 @@ pub async fn get(
         .to_str()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let x_matrix_auth = parse_x_matrix_header(auth_header)
-        .map_err(|e| {
-            warn!("Failed to parse X-Matrix authentication header: {}", e);
-            StatusCode::BAD_REQUEST
-        })?;
+    let x_matrix_auth = parse_x_matrix_header(auth_header).map_err(|e| {
+        warn!("Failed to parse X-Matrix authentication header: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
     debug!("Event retrieval request - origin: {}, event: {}", x_matrix_auth.origin, event_id);
 
@@ -94,9 +91,7 @@ pub async fn get(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let validated_event = match pdu_validator
-        .validate_pdu(&event_json, &x_matrix_auth.origin)
-        .await
+    let validated_event = match pdu_validator.validate_pdu(&event_json, &x_matrix_auth.origin).await
     {
         Ok(ValidationResult::Valid(validated_event)) => {
             debug!("Event {} passed Matrix validation", event_id);
@@ -115,12 +110,13 @@ pub async fn get(
         Err(e) => {
             error!("Event validation error for {}: {}", event_id, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     // Check if requesting server has permission to access this event
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let has_users = membership_repo.server_has_users_in_room(&validated_event.room_id, &x_matrix_auth.origin)
+    let has_users = membership_repo
+        .server_has_users_in_room(&validated_event.room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
             error!("Failed to check server membership: {}", e);
@@ -132,7 +128,8 @@ pub async fn get(
     } else {
         // Check if room is world-readable
         let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-        room_repo.is_room_world_readable(&validated_event.room_id)
+        room_repo
+            .is_room_world_readable(&validated_event.room_id)
             .await
             .map_err(|e| {
                 error!("Failed to check room world-readable status: {}", e);
@@ -162,7 +159,10 @@ pub async fn get(
         depth: validated_event.depth.unwrap_or(0),
         signatures: validated_event.signatures.clone().unwrap_or_default(),
         hashes: validated_event.hashes.clone().unwrap_or_default(),
-        unsigned: validated_event.unsigned.clone().and_then(|v| serde_json::from_value(v).ok()),
+        unsigned: validated_event
+            .unsigned
+            .clone()
+            .and_then(|v| serde_json::from_value(v).ok()),
     };
 
     // Create transaction response
@@ -177,5 +177,3 @@ pub async fn get(
 
     Ok(Json(transaction))
 }
-
-

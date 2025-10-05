@@ -2,12 +2,13 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Duration, Utc};
-use matryx_surrealdb::repository::PerformanceRepository;
+use matryx_surrealdb::repository::{KeyServerRepository, PerformanceRepository};
 use std::collections::HashMap;
 use std::sync::Arc;
 use surrealdb::engine::any::Any;
 use tracing::{info, warn};
 
+use crate::federation::client::FederationClient;
 use crate::federation::device_management::{DeviceError, DeviceListCache};
 
 /// Efficient device cache manager with TTL and size limits
@@ -19,6 +20,8 @@ pub struct DeviceCacheManager {
     hit_count: u64,
     miss_count: u64,
     performance_repo: Arc<PerformanceRepository<Any>>,
+    federation_client: Option<Arc<FederationClient>>,
+    key_server_repo: Option<Arc<KeyServerRepository<Any>>>,
 }
 
 impl DeviceCacheManager {
@@ -36,6 +39,49 @@ impl DeviceCacheManager {
             hit_count: 0,
             miss_count: 0,
             performance_repo,
+            federation_client: None,
+            key_server_repo: None,
+        }
+    }
+
+    /// Create a new device cache manager with federation client
+    pub fn with_federation_client(
+        max_cache_size: usize,
+        cache_ttl_minutes: i64,
+        performance_repo: Arc<PerformanceRepository<Any>>,
+        federation_client: Arc<FederationClient>,
+    ) -> Self {
+        Self {
+            cache: HashMap::new(),
+            cache_expiry: HashMap::new(),
+            max_cache_size,
+            cache_ttl: Duration::minutes(cache_ttl_minutes),
+            hit_count: 0,
+            miss_count: 0,
+            performance_repo,
+            federation_client: Some(federation_client),
+            key_server_repo: None,
+        }
+    }
+
+    /// Create a new device cache manager with federation client and key server repository
+    pub fn with_federation_and_keys(
+        max_cache_size: usize,
+        cache_ttl_minutes: i64,
+        performance_repo: Arc<PerformanceRepository<Any>>,
+        federation_client: Arc<FederationClient>,
+        key_server_repo: Arc<KeyServerRepository<Any>>,
+    ) -> Self {
+        Self {
+            cache: HashMap::new(),
+            cache_expiry: HashMap::new(),
+            max_cache_size,
+            cache_ttl: Duration::minutes(cache_ttl_minutes),
+            hit_count: 0,
+            miss_count: 0,
+            performance_repo,
+            federation_client: Some(federation_client),
+            key_server_repo: Some(key_server_repo),
         }
     }
 
@@ -43,11 +89,12 @@ impl DeviceCacheManager {
     pub async fn get_device_list(&mut self, user_id: &str) -> Result<DeviceListCache, DeviceError> {
         // Check cache validity
         if let Some(expiry) = self.cache_expiry.get(user_id)
-            && Utc::now() > *expiry {
-                self.cache.remove(user_id);
-                self.cache_expiry.remove(user_id);
-                info!("Expired cache entry for user: {}", user_id);
-            }
+            && Utc::now() > *expiry
+        {
+            self.cache.remove(user_id);
+            self.cache_expiry.remove(user_id);
+            info!("Expired cache entry for user: {}", user_id);
+        }
 
         let is_cache_hit = self.cache.contains_key(user_id);
 
@@ -78,14 +125,119 @@ impl DeviceCacheManager {
         // Enforce cache size limits
         self.evict_if_necessary();
 
-        // In a real implementation, this would fetch from the federation client
-        // For now, we'll create an empty cache entry
-        let cache_entry = DeviceListCache::new();
+        // Check if federation client is available
+        let federation_client = match &self.federation_client {
+            Some(client) => client,
+            None => {
+                return Err(DeviceError::NetworkError(
+                    "Federation client not configured for device cache".to_string(),
+                ));
+            }
+        };
+
+        // Extract server name from user_id (@user:server.com)
+        let server_name = user_id
+            .split(':')
+            .nth(1)
+            .ok_or_else(|| DeviceError::InvalidUpdate(format!("Invalid user_id format: {}", user_id)))?;
+
+        // Fetch device list from federation server
+        let devices_response = federation_client
+            .query_user_devices(server_name, user_id)
+            .await
+            .map_err(|e| DeviceError::NetworkError(format!("Federation query failed: {}", e)))?;
+
+        // Verify server signature on the response per Matrix spec §3
+        self.verify_server_signature(&devices_response, server_name)
+            .await
+            .map_err(|e| DeviceError::NetworkError(format!("Signature verification failed: {}", e)))?;
+
+        // Create cache entry with fetched devices
+        let cache_entry = DeviceListCache {
+            devices: devices_response.devices,
+            stream_id: devices_response.stream_id,
+            cached_at: Utc::now(),
+        };
 
         self.cache.insert(user_id.to_string(), cache_entry);
         self.cache_expiry.insert(user_id.to_string(), Utc::now() + self.cache_ttl);
 
-        info!("Cached device list for user: {}", user_id);
+        info!(
+            "Cached device list for user: {} with {} devices (stream_id: {})",
+            user_id,
+            self.cache.get(user_id).map(|c| c.devices.len()).unwrap_or(0),
+            devices_response.stream_id
+        );
+
+        Ok(())
+    }
+
+    /// Verify cryptographic signature on federation response
+    /// Implements Matrix Server-Server API §3 signature verification
+    async fn verify_server_signature(
+        &self,
+        response: &crate::federation::client::DevicesResponse,
+        server_name: &str,
+    ) -> Result<(), DeviceError> {
+        // Get key server repository - required for Matrix spec §3 compliance
+        let key_server_repo = self.key_server_repo.as_ref()
+            .ok_or_else(|| DeviceError::ConfigurationError(
+                "Key server repository required for federation signature verification per Matrix spec §3".to_string()
+            ))?;
+
+        // Step 1: Extract signature from response
+        // Spec: Signatures are in response.signatures[server_name][key_id]
+        if response.signatures.is_empty() {
+            return Err(DeviceError::NetworkError(
+                format!("No signatures in device list response from {} (required by Matrix spec §3)", server_name)
+            ));
+        }
+
+        let signatures = match response.signatures.get(server_name) {
+            Some(sigs) => sigs,
+            None => {
+                return Err(DeviceError::NetworkError(
+                    format!("No signatures from originating server: {}", server_name)
+                ));
+            }
+        };
+
+        let (key_id, signature) = match signatures.iter().find(|(k, _)| k.starts_with("ed25519:")) {
+            Some(pair) => pair,
+            None => {
+                return Err(DeviceError::NetworkError(
+                    format!("No ed25519 signature found from server: {}", server_name)
+                ));
+            }
+        };
+
+        // Step 2: Create canonical JSON of response (remove signatures field)
+        // Spec: Per "Signing JSON" in appendices
+        let mut canonical_response = serde_json::to_value(response)
+            .map_err(|e| DeviceError::InvalidUpdate(format!("JSON serialization failed: {}", e)))?;
+
+        if let Some(obj) = canonical_response.as_object_mut() {
+            obj.remove("signatures");
+            obj.remove("unsigned");
+        }
+
+        let canonical_json = serde_json::to_vec(&canonical_response)
+            .map_err(|e| DeviceError::InvalidUpdate(format!("Canonical JSON failed: {}", e)))?;
+
+        // Step 3: Verify ed25519 signature using key_server_repo
+        // Spec: Uses ed25519 signature verification with server's public key
+        let verified = key_server_repo
+            .verify_key_signature(server_name, key_id, signature, &canonical_json)
+            .await
+            .map_err(|e| DeviceError::NetworkError(format!("Signature verification error: {}", e)))?;
+
+        if !verified {
+            return Err(DeviceError::NetworkError(
+                format!("Invalid server signature on device list response from {}", server_name)
+            ));
+        }
+
+        info!("Successfully verified signature for device list from {}", server_name);
         Ok(())
     }
 
@@ -209,7 +361,17 @@ impl Default for DeviceCacheManager {
         // In practice, this should be injected with a real database connection
         let db = surrealdb::Surreal::init();
         let performance_repo = Arc::new(PerformanceRepository::new(db));
-        Self::new(1000, 60, performance_repo) // 1000 entries, 60 minutes TTL
+        Self {
+            cache: HashMap::new(),
+            cache_expiry: HashMap::new(),
+            max_cache_size: 1000,
+            cache_ttl: Duration::minutes(60),
+            hit_count: 0,
+            miss_count: 0,
+            performance_repo,
+            federation_client: None,
+            key_server_repo: None,
+        }
     }
 }
 
@@ -273,12 +435,13 @@ impl BatchDeviceFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matryx_surrealdb::test_utils::create_test_db_async;
     use matryx_surrealdb::repository::PerformanceRepository;
+    use matryx_surrealdb::test_utils::create_test_db_async;
 
     #[tokio::test]
     async fn test_cache_hit_miss_tracking() {
-        let db = create_test_db_async().await.expect("Failed to create test db");
+        let db = create_test_db_async().await
+            .expect("Test setup: failed to create in-memory database for cache hit/miss tracking test");
         let performance_repo = Arc::new(PerformanceRepository::new(db));
         let mut cache_manager = DeviceCacheManager::new(10, 60, performance_repo);
 
@@ -302,7 +465,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_eviction() {
-        let db = create_test_db_async().await.expect("Failed to create test db");
+        let db = create_test_db_async().await
+            .expect("Test setup: failed to create in-memory database for cache eviction test");
         let performance_repo = Arc::new(PerformanceRepository::new(db));
         let mut cache_manager = DeviceCacheManager::new(2, 60, performance_repo); // Very small cache
 
@@ -318,7 +482,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_invalidation() {
-        let db = create_test_db_async().await.expect("Failed to create test db");
+        let db = create_test_db_async().await
+            .expect("Test setup: failed to create in-memory database for cache invalidation test");
         let performance_repo = Arc::new(PerformanceRepository::new(db));
         let mut cache_manager = DeviceCacheManager::new(10, 60, performance_repo);
 
@@ -331,7 +496,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_fetcher() {
-        let db = create_test_db_async().await.expect("Failed to create test db");
+        let db = create_test_db_async().await
+            .expect("Test setup: failed to create in-memory database for batch fetcher test");
         let performance_repo = Arc::new(PerformanceRepository::new(db));
         let cache_manager = DeviceCacheManager::new(10, 60, performance_repo);
         let mut batch_fetcher = BatchDeviceFetcher::new(cache_manager);
@@ -345,7 +511,8 @@ mod tests {
         let result = batch_fetcher.fetch_device_lists_batch(user_ids.clone()).await;
         assert!(result.is_ok());
 
-        let device_lists = result.expect("Batch fetch should succeed");
+        let device_lists = result
+            .expect("Test assertion: batch device fetch should succeed with valid user IDs");
         assert_eq!(device_lists.len(), 3);
 
         for user_id in user_ids {

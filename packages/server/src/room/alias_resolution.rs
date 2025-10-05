@@ -5,13 +5,10 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-
 use serde::Deserialize;
 
 use tracing::{debug, error, info, warn};
 use url::Url;
-
-
 
 use crate::state::AppState;
 
@@ -141,7 +138,7 @@ impl RoomAliasResolver {
                 warn!("Invalid room ID format: {}", room_id_or_alias);
                 return Err(StatusCode::BAD_REQUEST);
             }
-            
+
             // Validate that the room actually exists
             match self.room_repo.get_by_id(room_id_or_alias).await {
                 Ok(Some(_)) => Ok(room_id_or_alias.to_string()),
@@ -152,7 +149,7 @@ impl RoomAliasResolver {
                 Err(e) => {
                     error!("Failed to validate room existence for {}: {:?}", room_id_or_alias, e);
                     Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
+                },
             }
         } else {
             warn!("Invalid room identifier format: {}", room_id_or_alias);
@@ -263,8 +260,10 @@ impl RoomAliasResolver {
             // Check if creator has permission to create aliases for this room
             if room.creator != creator_id {
                 // Could implement additional permission checks here based on room power levels
-                debug!("Non-creator {} attempting to create alias for room {} created by {}", 
-                      creator_id, room_id, room.creator);
+                debug!(
+                    "Non-creator {} attempting to create alias for room {} created by {}",
+                    creator_id, room_id, room.creator
+                );
             }
         } else {
             error!("Cannot create alias for non-existent room: {}", room_id);
@@ -522,13 +521,10 @@ impl RoomAliasResolver {
 
     /// SUBTASK7: Check cache for existing alias resolution
     async fn get_cached_alias_resolution(&self, alias: &str) -> Result<Option<String>, StatusCode> {
-        self.room_alias_repo
-            .get_cached_alias_resolution(alias)
-            .await
-            .map_err(|e| {
-                error!("Failed to get cached alias resolution for {}: {:?}", alias, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })
+        self.room_alias_repo.get_cached_alias_resolution(alias).await.map_err(|e| {
+            error!("Failed to get cached alias resolution for {}: {:?}", alias, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
     }
 
     /// Validate room alias format according to Matrix specification
@@ -656,8 +652,8 @@ impl RoomAliasResolver {
     /// * `bool` - True if server name appears valid
     fn is_valid_server_name(&self, server_name: &str) -> bool {
         // Basic check: contains at least one dot and valid characters
-        server_name.contains('.') &&
-            server_name
+        server_name.contains('.')
+            && server_name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
     }

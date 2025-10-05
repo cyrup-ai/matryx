@@ -129,9 +129,9 @@ impl DatabaseTestHarness {
                 .bind(("user_id", user_id_clone))
                 .bind(("data", user_data_clone))
                 .await
-                .unwrap()
+                .expect("Test operation: failed to execute CREATE query in LiveQuery test")
                 .take(0)
-                .unwrap();
+                .expect("Test operation: failed to extract result from CREATE query in LiveQuery test");
         });
 
         // Wait for LiveQuery notification with timeout
@@ -230,16 +230,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_database_harness_initialization() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
 
         // Test basic database connectivity
         let result: Vec<Value> = harness
             .db
             .query("SELECT * FROM users LIMIT 1")
             .await
-            .unwrap()
+            .expect("Test operation: failed to execute SELECT query on users table")
             .take(0)
-            .unwrap();
+            .expect("Test operation: failed to extract result from SELECT query");
 
         // Should not error (empty result is fine)
         assert!(result.is_empty() || !result.is_empty());
@@ -247,35 +248,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_crud_operations() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
         let result = harness.test_user_operations().await;
         assert!(result.is_ok(), "User operations test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_room_crud_operations() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
         let result = harness.test_room_operations().await;
         assert!(result.is_ok(), "Room operations test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_matrix_schema_coverage() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
         let result = harness.test_matrix_entity_coverage().await;
         assert!(result.is_ok(), "Matrix entity coverage test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_livequery_functionality() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
         let result = harness.test_livequery_notifications().await;
         assert!(result.is_ok(), "LiveQuery test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_auth_context_preservation() {
-        let harness = DatabaseTestHarness::new().await.unwrap();
+        let harness = DatabaseTestHarness::new().await
+            .expect("Test setup: failed to create database test harness");
         let result = harness.test_authentication_context_preservation().await;
         assert!(result.is_ok(), "Authentication context test failed: {:?}", result);
     }

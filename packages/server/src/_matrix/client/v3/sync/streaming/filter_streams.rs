@@ -46,7 +46,7 @@ pub async fn get_with_live_filters(
     headers: HeaderMap,
     auth: AuthenticatedUser,
     Query(query): Query<SyncQuery>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let user_id = auth.user_id.clone();
     let filter_id_opt = query.filter.clone();
 
@@ -65,11 +65,18 @@ pub async fn get_with_live_filters(
     let _filter_updates = handle_filter_live_updates(&state, &user_id, filter_id_opt.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    // Drop the filter updates stream to release the borrow on state
+    drop(_filter_updates);
 
-    // TODO: Integrate filter_updates stream with sync response
-    // This would require server-sent events or WebSocket upgrade for live updates
+    // Check if client accepts SSE for live filter updates
+    if headers.get("Accept").and_then(|v| v.to_str().ok()) == Some("text/event-stream") {
+        // Return SSE stream with filter updates
+        use super::sse_handlers::get_sse_stream;
+        return get_sse_stream(state.clone(), auth, query).await.map(|r| r.into_response());
+    }
 
-    // For now, return standard sync response with current filter
+    // Otherwise return standard sync response
     use super::super::handlers::get;
-    get(State(state.clone()), headers, auth, Query(query)).await
+    get(State(state.clone()), headers, auth, Query(query)).await.map(|r| r.into_response())
 }

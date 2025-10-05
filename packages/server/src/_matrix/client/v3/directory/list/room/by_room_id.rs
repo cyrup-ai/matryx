@@ -1,8 +1,15 @@
-use axum::{Json, extract::{Path, State}, http::{HeaderMap, StatusCode}};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+};
 use serde_json::{Value, json};
 use tracing::error;
 
-use crate::{AppState, auth::{MatrixAuth, extract_matrix_auth}};
+use crate::{
+    AppState,
+    auth::{MatrixAuth, extract_matrix_auth},
+};
 use matryx_surrealdb::repository::{PublicRoomsRepository, RoomDirectoryVisibility};
 
 /// GET /_matrix/client/v3/directory/list/room/{roomId}
@@ -12,18 +19,14 @@ pub async fn get(
 ) -> Result<Json<Value>, StatusCode> {
     // Use PublicRoomsRepository to get room directory visibility
     let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
-    
+
     match public_rooms_repo.get_room_directory_visibility(&room_id).await {
-        Ok(Some(RoomDirectoryVisibility::Public)) => {
-            Ok(Json(json!({
-                "visibility": "public"
-            })))
-        },
-        Ok(Some(RoomDirectoryVisibility::Private)) | Ok(None) => {
-            Ok(Json(json!({
-                "visibility": "private"
-            })))
-        },
+        Ok(Some(RoomDirectoryVisibility::Public)) => Ok(Json(json!({
+            "visibility": "public"
+        }))),
+        Ok(Some(RoomDirectoryVisibility::Private)) | Ok(None) => Ok(Json(json!({
+            "visibility": "private"
+        }))),
         Err(e) => {
             error!("Failed to get room directory visibility: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -55,17 +58,19 @@ pub async fn put(
     };
 
     // Parse visibility from payload
-    let visibility_str = payload.get("visibility")
-        .and_then(|v| v.as_str())
-        .unwrap_or("private");
+    let visibility_str = payload.get("visibility").and_then(|v| v.as_str()).unwrap_or("private");
 
     // TODO: Implement proper authorization check
     // According to Matrix spec, only room admins/moderators should be able to change directory visibility
     // This requires checking user's power level in the room
     // For now, we log the user_id for audit purposes
-    tracing::info!("User {} requesting to change room {} directory visibility to {}", 
-                   user_id, room_id, visibility_str);
-    
+    tracing::info!(
+        "User {} requesting to change room {} directory visibility to {}",
+        user_id,
+        room_id,
+        visibility_str
+    );
+
     let visibility = match visibility_str {
         "public" => RoomDirectoryVisibility::Public,
         "private" => RoomDirectoryVisibility::Private,
@@ -74,7 +79,7 @@ pub async fn put(
 
     // Use PublicRoomsRepository to set room directory visibility
     let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
-    
+
     match visibility {
         RoomDirectoryVisibility::Public => {
             public_rooms_repo.add_room_to_directory(&room_id, visibility).await
@@ -82,7 +87,8 @@ pub async fn put(
         RoomDirectoryVisibility::Private => {
             public_rooms_repo.remove_room_from_directory(&room_id).await
         },
-    }.map_err(|e| {
+    }
+    .map_err(|e| {
         error!("Failed to update room directory visibility: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

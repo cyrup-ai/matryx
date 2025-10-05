@@ -1,18 +1,18 @@
-use axum::{Json, extract::{Path, State}, http::StatusCode};
+use axum::{
+    Json,
+    http::StatusCode,
+};
 use serde_json::Value;
 use tracing::{error, info};
 
 use crate::state::AppState;
 use matryx_surrealdb::repository::third_party_service::ThirdPartyService;
 
-/// GET /_matrix/client/v3/thirdparty/user/{userid}
-/// 
-/// Retrieve third-party users by Matrix user ID.
-/// This endpoint allows clients to query for third-party network users that correspond
-/// to a Matrix user ID (like IRC nicks, Discord users, etc.)
-pub async fn get(
-    State(state): State<AppState>,
-    Path(userid): Path<String>,
+/// Core logic for looking up third-party users by userid
+/// Used by GET /_matrix/client/v3/thirdparty/user?userid={userid}
+pub async fn get_by_userid(
+    state: AppState,
+    userid: String,
 ) -> Result<Json<Value>, StatusCode> {
     info!("Third-party user lookup for user ID: {}", userid);
 
@@ -25,7 +25,7 @@ pub async fn get(
         Err(e) => {
             error!("Failed to query third-party protocols: {:?}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     let mut users = Vec::new();
@@ -45,11 +45,11 @@ pub async fn get(
                         "fields": user.fields
                     }));
                 }
-            }
+            },
             Err(e) => {
                 // Log error but continue searching other protocols
                 error!("Failed to lookup users in protocol {}: {:?}", protocol_id, e);
-            }
+            },
         }
     }
 

@@ -6,7 +6,7 @@ use matryx_entity::types::{Device, DeviceKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 use matryx_surrealdb::repository::{DeviceRepository, EDURepository};
 
@@ -16,6 +16,7 @@ pub enum DeviceError {
     MissingPreviousUpdate,
     InvalidUpdate(String),
     NetworkError(String),
+    ConfigurationError(String),
 }
 
 impl std::fmt::Display for DeviceError {
@@ -25,6 +26,7 @@ impl std::fmt::Display for DeviceError {
             DeviceError::MissingPreviousUpdate => write!(f, "Missing previous update in chain"),
             DeviceError::InvalidUpdate(msg) => write!(f, "Invalid update: {}", msg),
             DeviceError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            DeviceError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
         }
     }
 }
@@ -138,8 +140,10 @@ impl DeviceManager {
         }
 
         // Record the successful update as an EDU for future validation
-        debug!("Recorded device list update for user {} with stream_id {}",
-               update.user_id, update.stream_id);
+        debug!(
+            "Recorded device list update for user {} with stream_id {}",
+            update.user_id, update.stream_id
+        );
 
         Ok(())
     }
@@ -147,8 +151,10 @@ impl DeviceManager {
     /// Check if we can apply the update based on dependency validation
     async fn can_apply_update(&self, update: &DeviceListUpdate) -> Result<bool, DeviceError> {
         // Validate the device list update according to Matrix specification
-        debug!("Validating device list update for user: {}, stream_id: {}",
-               update.user_id, update.stream_id);
+        debug!(
+            "Validating device list update for user: {}, stream_id: {}",
+            update.user_id, update.stream_id
+        );
 
         // Check if the update has required fields
         if update.user_id.is_empty() || update.stream_id == 0 {
@@ -162,19 +168,31 @@ impl DeviceManager {
                 // Filter for this user and find latest stream ID
                 let user_device_updates: Vec<_> = existing_edus
                     .iter()
-                    .filter(|edu| edu.ephemeral_event.content.get("user_id").and_then(|v| v.as_str()) == Some(&update.user_id))
+                    .filter(|edu| {
+                        edu.ephemeral_event.content.get("user_id").and_then(|v| v.as_str())
+                            == Some(&update.user_id)
+                    })
                     .collect();
 
                 if let Some(latest_edu) = user_device_updates.last() {
-                    if let Some(latest_stream_id) = latest_edu.ephemeral_event.content.get("stream_id").and_then(|v| v.as_u64()) {
+                    if let Some(latest_stream_id) = latest_edu
+                        .ephemeral_event
+                        .content
+                        .get("stream_id")
+                        .and_then(|v| v.as_u64())
+                    {
                         // Matrix specification: stream_id should be incremental
                         if update.stream_id <= (latest_stream_id as i64) {
-                            warn!("Device list update rejected: stream_id {} not greater than latest {}",
-                                  update.stream_id, latest_stream_id);
+                            warn!(
+                                "Device list update rejected: stream_id {} not greater than latest {}",
+                                update.stream_id, latest_stream_id
+                            );
                             return Ok(false);
                         }
-                        debug!("Device list update stream_id validation passed: {} > {}",
-                               update.stream_id, latest_stream_id);
+                        debug!(
+                            "Device list update stream_id validation passed: {} > {}",
+                            update.stream_id, latest_stream_id
+                        );
                     }
                 } else {
                     // No previous stream ID found - this is the first update for this user

@@ -6,12 +6,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 
-
 use serde::{Deserialize, Serialize};
 
-
 use tracing::{error, info, warn};
-
 
 use crate::{
     AppState,
@@ -101,22 +98,27 @@ pub async fn post(
 
     // Use RoomRepository to check if room exists
     let room_repo = RoomRepository::new(state.db.clone());
-    let _room = room_repo.get_by_id(&room_id).await.map_err(|e| {
-        error!("Failed to query room {}: {}", room_id, e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?.ok_or_else(|| {
-        warn!("Room kick failed - room not found: {}", room_id);
-        StatusCode::NOT_FOUND
-    })?;
+    let _room = room_repo
+        .get_by_id(&room_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to query room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!("Room kick failed - room not found: {}", room_id);
+            StatusCode::NOT_FOUND
+        })?;
 
     // Use MembershipRepository to check memberships and permissions
     let membership_repo = MembershipRepository::new(state.db.clone());
-    
+
     // Check if kicker is a member of the room with appropriate permissions
-    let kicker_membership = membership_repo.get_membership(&room_id, &kicker_id).await.map_err(|_| {
-        warn!("Room kick failed - kicker {} is not a member of room {}", kicker_id, room_id);
-        StatusCode::FORBIDDEN
-    })?;
+    let kicker_membership =
+        membership_repo.get_membership(&room_id, &kicker_id).await.map_err(|_| {
+            warn!("Room kick failed - kicker {} is not a member of room {}", kicker_id, room_id);
+            StatusCode::FORBIDDEN
+        })?;
 
     if let Some(membership) = kicker_membership {
         if membership.membership != MembershipState::Join {
@@ -132,13 +134,16 @@ pub async fn post(
     }
 
     // Check target user's current membership
-    let target_membership = membership_repo.get_membership(&room_id, &request.user_id).await.map_err(|_| {
-        warn!(
-            "Room kick failed - target user {} is not a member of room {}",
-            request.user_id, room_id
-        );
-        StatusCode::FORBIDDEN
-    })?;
+    let target_membership = membership_repo
+        .get_membership(&room_id, &request.user_id)
+        .await
+        .map_err(|_| {
+            warn!(
+                "Room kick failed - target user {} is not a member of room {}",
+                request.user_id, room_id
+            );
+            StatusCode::FORBIDDEN
+        })?;
 
     // Target must be currently joined to be kicked
     if let Some(membership) = target_membership {
@@ -171,12 +176,15 @@ pub async fn post(
     }
 
     // Use membership repository to check if user can perform kick action
-    let can_kick = membership_repo.can_perform_action(
-        &room_id, 
-        &kicker_id, 
-        matryx_surrealdb::repository::room_operations::MembershipAction::Kick, 
-        Some(&request.user_id)
-    ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let can_kick = membership_repo
+        .can_perform_action(
+            &room_id,
+            &kicker_id,
+            matryx_surrealdb::repository::room_operations::MembershipAction::Kick,
+            Some(&request.user_id),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !can_kick {
         warn!(
@@ -187,7 +195,8 @@ pub async fn post(
     }
 
     // Use membership repository to perform the kick
-    membership_repo.kick_member(&room_id, &request.user_id, &kicker_id, request.reason.as_deref())
+    membership_repo
+        .kick_member(&room_id, &request.user_id, &kicker_id, request.reason.as_deref())
         .await
         .map_err(|e| {
             error!(
@@ -197,7 +206,8 @@ pub async fn post(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let kick_event_id = format!("$kick_{}_{}", request.user_id, chrono::Utc::now().timestamp_millis());
+    let kick_event_id =
+        format!("$kick_{}_{}", request.user_id, chrono::Utc::now().timestamp_millis());
 
     info!(
         "Successfully kicked user {} from room {} by {} with event {}",

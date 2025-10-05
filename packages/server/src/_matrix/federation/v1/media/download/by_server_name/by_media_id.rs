@@ -2,7 +2,9 @@ use crate::AppState;
 use crate::auth::verify_x_matrix_auth;
 
 use crate::utils::request_helpers::extract_request_uri;
-use crate::utils::response_helpers::{build_multipart_media_response, MultipartMediaResponse, MediaContent};
+use crate::utils::response_helpers::{
+    MediaContent, MultipartMediaResponse, build_multipart_media_response,
+};
 use axum::{
     body::Body,
     extract::{Path, Request, State},
@@ -10,9 +12,7 @@ use axum::{
     response::Response,
 };
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
 use std::sync::Arc;
@@ -52,11 +52,7 @@ pub async fn get(
 
     // Handle federation media request using MediaService
     let media_response = media_service
-        .handle_federation_media_request(
-            &media_id,
-            &server_name,
-            &_x_matrix_auth.origin,
-        )
+        .handle_federation_media_request(&media_id, &server_name, &_x_matrix_auth.origin)
         .await
         .map_err(|e| {
             debug!("Media not found or access denied: {}", e);

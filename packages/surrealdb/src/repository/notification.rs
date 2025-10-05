@@ -102,6 +102,7 @@ pub struct PushAction {
     pub value: Option<Value>,
 }
 
+#[derive(Clone)]
 pub struct NotificationRepository {
     db: Surreal<Any>,
 }
@@ -185,11 +186,24 @@ impl NotificationRepository {
         }
 
         // Filter by notification type if 'only' parameter is provided
-        if let Some("highlight") = only {
-            query.push_str(" AND highlight = true");
+        match only {
+            Some("highlight") => {
+                query.push_str(" AND highlight = true");
+            },
+            Some(unknown_filter) => {
+                // Log unknown filter types for debugging but ignore them per Matrix spec
+                // Unknown conditions MUST NOT match any events (effectively disabling the filter)
+                tracing::warn!(
+                    "Unknown notification filter type '{}' ignored for user {} (forward compatibility)",
+                    unknown_filter,
+                    user_id
+                );
+                // Don't add any filter - unknown filters are ignored per spec
+            },
+            None => {
+                // No filter specified
+            },
         }
-        // For other filter types, we can add them as needed
-        // For now, ignore unknown filter types to maintain compatibility
 
         query.push_str(" ORDER BY created_at DESC");
 
@@ -437,7 +451,7 @@ impl NotificationRepository {
     // Helper methods
 
     async fn get_event_content(&self, event_id: &str) -> Result<Value, RepositoryError> {
-        let event_query = "SELECT content FROM events WHERE event_id = $event_id";
+        let event_query = "SELECT content FROM event WHERE event_id = $event_id";
 
         let mut response = self
             .db

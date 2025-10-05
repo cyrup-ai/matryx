@@ -8,21 +8,18 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
-
+use uuid::Uuid;
+use chrono::Utc;
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
     utils::matrix_identifiers::generate_room_id,
 };
+use matryx_entity::types::{SignedThirdPartyInvite, Event, EventContent};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    MembershipRepository,
-    PowerLevelsRepository,
-    RoomManagementService,
-    RoomRepository,
-    error::RepositoryError,
-    room::RoomCreationConfig,
+    EventRepository, MembershipRepository, PowerLevelsRepository, RoomManagementService,
+    RoomRepository, error::RepositoryError, room::RoomCreationConfig,
 };
 
 #[derive(Deserialize)]
@@ -54,6 +51,101 @@ pub struct CreateRoomResponse {
     room_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     room_alias: Option<String>,
+}
+
+/// Validate third-party invite with identity server
+async fn validate_third_party_invite(
+    medium: &str,
+    address: &str,
+    id_server: &str,
+    id_access_token: Option<&str>,
+) -> Result<SignedThirdPartyInvite, RepositoryError> {
+    use reqwest::Client;
+
+    // Build identity server URL
+    let url = format!("https://{}/_matrix/identity/v2/store-invite", id_server);
+
+    // Create HTTP client
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| RepositoryError::ExternalService(e.to_string()))?;
+
+    // Prepare request body
+    let body = serde_json::json!({
+        "medium": medium,
+        "address": address,
+    });
+
+    // Make request with optional access token
+    let mut request = client.post(&url).json(&body);
+    if let Some(token) = id_access_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+
+    // Send request and parse response
+    let response = request
+        .send()
+        .await
+        .map_err(|e| RepositoryError::ExternalService(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(RepositoryError::ExternalService(format!(
+            "Identity server returned {}",
+            response.status()
+        )));
+    }
+
+    let signed_invite: SignedThirdPartyInvite = response
+        .json()
+        .await
+        .map_err(|e| RepositoryError::SerializationError {
+            message: e.to_string(),
+        })?;
+
+    Ok(signed_invite)
+}
+
+/// Create third-party invite state event
+async fn create_third_party_invite_event(
+    event_repo: &EventRepository,
+    room_id: &str,
+    sender: &str,
+    display_name: &str,
+    signed: &SignedThirdPartyInvite,
+) -> Result<Event, RepositoryError> {
+    let event_id = format!("${}", Uuid::new_v4());
+    let now = Utc::now();
+
+    let content = serde_json::json!({
+        "display_name": display_name,
+        "key_validity_url": format!("https://{}/_matrix/identity/api/v1/pubkey/isvalid", "identity.server"),
+        "public_key": "public_key_placeholder",
+        "public_keys": [],
+    });
+
+    let event = Event {
+        event_id: event_id.clone(),
+        room_id: room_id.to_string(),
+        sender: sender.to_string(),
+        event_type: "m.room.third_party_invite".to_string(),
+        content: EventContent::Unknown(content),
+        state_key: Some(signed.token.clone()),
+        origin_server_ts: now.timestamp_millis(),
+        unsigned: None,
+        prev_events: None,
+        auth_events: None,
+        depth: None,
+        hashes: None,
+        signatures: None,
+        redacts: None,
+        outlier: Some(false),
+        received_ts: Some(now.timestamp_millis()),
+        rejected_reason: None,
+        soft_failed: Some(false),
+    };
+
+    event_repo.create(&event).await
 }
 
 /// Matrix Client-Server API v1.11 Section 10.1.1
@@ -102,7 +194,8 @@ pub async fn post(
 
     // Validate room version if provided
     if let Some(ref version) = request.room_version
-        && !is_supported_room_version(version) {
+        && !is_supported_room_version(version)
+    {
         warn!("Room creation failed - unsupported room version: {}", version);
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -166,21 +259,62 @@ pub async fn post(
 
             // Handle third party invites if provided
             if let Some(ref invite_3pid) = request.invite_3pid {
+                let event_repo = EventRepository::new(state.db.clone());
+
                 for invite in invite_3pid {
-                    if let (Some(medium), Some(address), Some(id_server)) =
-                        (invite.get("medium").and_then(|v| v.as_str()),
-                         invite.get("address").and_then(|v| v.as_str()),
-                         invite.get("id_server").and_then(|v| v.as_str())) {
-                        info!("Processing third party invite: {} {} via {}", medium, address, id_server);
-                        // TODO: Implement third party invite processing
-                        // This would involve contacting the identity server to validate the invite
+                    if let (Some(medium), Some(address), Some(id_server)) = (
+                        invite.get("medium").and_then(|v| v.as_str()),
+                        invite.get("address").and_then(|v| v.as_str()),
+                        invite.get("id_server").and_then(|v| v.as_str()),
+                    ) {
+                        info!(
+                            "Processing third party invite: {} {} via {}",
+                            medium, address, id_server
+                        );
+
+                        // Get optional ID access token
+                        let id_access_token = invite.get("id_access_token").and_then(|v| v.as_str());
+
+                        // Validate with identity server
+                        match validate_third_party_invite(medium, address, id_server, id_access_token).await {
+                            Ok(signed_invite) => {
+                                // Create display name from address
+                                let display_name = invite
+                                    .get("display_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(address);
+
+                                // Create third party invite state event
+                                if let Err(e) = create_third_party_invite_event(
+                                    &event_repo,
+                                    &room.room_id,
+                                    &user_id,
+                                    display_name,
+                                    &signed_invite,
+                                )
+                                .await
+                                {
+                                    error!("Failed to create third party invite event: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to validate third party invite with {}: {}",
+                                    id_server, e
+                                );
+                                // Continue processing other invites
+                            }
+                        }
                     }
                 }
             }
 
             // Apply creation content if provided (custom room creation parameters)
             if let Some(ref creation_content) = request.creation_content {
-                info!("Applying custom creation content for room {}: {:?}", room.room_id, creation_content);
+                info!(
+                    "Applying custom creation content for room {}: {:?}",
+                    room.room_id, creation_content
+                );
                 // TODO: Store custom creation content in room metadata
                 // This content is typically used for room versioning or custom room types
             }
@@ -196,26 +330,22 @@ pub async fn post(
 
             Ok(Json(CreateRoomResponse { room_id: room.room_id, room_alias }))
         },
-        Err(e) => {
-            match e {
-                RepositoryError::Validation { .. } => {
-                    warn!("Room creation failed - validation error: {}", e);
-                    Err(StatusCode::BAD_REQUEST)
-                },
-                RepositoryError::Unauthorized { .. } => {
-                    warn!("Room creation failed - unauthorized: {}", e);
-                    Err(StatusCode::FORBIDDEN)
-                },
-                _ => {
-                    error!("Room creation failed - internal error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                },
-            }
+        Err(e) => match e {
+            RepositoryError::Validation { .. } => {
+                warn!("Room creation failed - validation error: {}", e);
+                Err(StatusCode::BAD_REQUEST)
+            },
+            RepositoryError::Unauthorized { .. } => {
+                warn!("Room creation failed - unauthorized: {}", e);
+                Err(StatusCode::FORBIDDEN)
+            },
+            _ => {
+                error!("Room creation failed - internal error: {}", e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            },
         },
     }
 }
-
-
 
 fn is_supported_room_version(version: &str) -> bool {
     matches!(version, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11")

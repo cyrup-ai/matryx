@@ -14,9 +14,7 @@ use crate::{
     auth::{MatrixAuth, extract_matrix_auth},
 };
 use matryx_surrealdb::repository::{
-    RepositoryError,
-    device::DeviceRepository,
-    session::SessionRepository,
+    RepositoryError, device::DeviceRepository, session::SessionRepository,
 };
 
 /// Matrix Client-Server API v1.11 Section 5.4.2

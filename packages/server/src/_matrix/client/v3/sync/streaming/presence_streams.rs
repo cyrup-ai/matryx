@@ -17,9 +17,7 @@ pub async fn create_presence_live_stream(
 > {
     // Create LiveQuery for presence changes affecting this user's contacts
     let presence_repo = PresenceRepository::new(state.db.clone());
-    let mut stream = presence_repo
-        .create_presence_live_query(&user_id)
-        .await?;
+    let mut stream = presence_repo.create_presence_live_query(&user_id).await?;
 
     let sync_stream = stream.stream::<surrealdb::Notification<serde_json::Value>>(0)?
         .map(move |notification_result| -> Result<LiveSyncUpdate, Box<dyn std::error::Error + Send + Sync>> {

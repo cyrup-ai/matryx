@@ -1,41 +1,37 @@
-use crate::auth::{MatrixSessionService, oauth2::OAuth2Service, uia::{UiaService, UiaConfig}};
+use crate::auth::{
+    MatrixSessionService,
+    oauth2::OAuth2Service,
+    uia::{UiaConfig, UiaService},
+};
+use crate::cache::filter_cache::FilterCache;
+use crate::cache::lazy_loading_cache::LazyLoadingCache;
 use crate::config::ServerConfig;
+use crate::federation::device_edu_handler::DeviceEDUHandler;
+use crate::federation::device_management::DeviceManager;
 use crate::federation::dns_resolver::MatrixDnsResolver;
+use crate::federation::event_signer::EventSigner;
 use crate::federation::media_client::FederationMediaClient;
 use crate::federation::membership_federation::{FederationRetryManager, RetryConfig};
+use crate::federation::outbound_queue::OutboundEvent;
 use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
-use crate::federation::device_management::DeviceManager;
-use crate::federation::device_edu_handler::DeviceEDUHandler;
-use crate::cache::lazy_loading_cache::LazyLoadingCache;
-use crate::cache::filter_cache::FilterCache;
-use crate::federation::event_signer::EventSigner;
-use crate::metrics::lazy_loading_benchmarks::{LazyLoadingBenchmarks, LazyLoadingBenchmarkConfig};
+use crate::metrics::lazy_loading_benchmarks::{LazyLoadingBenchmarkConfig, LazyLoadingBenchmarks};
 use crate::metrics::lazy_loading_metrics::LazyLoadingMetrics;
-use crate::monitoring::lazy_loading_alerts::{LazyLoadingAlerts, AlertingConfig, ConsoleNotificationSender};
+use crate::monitoring::lazy_loading_alerts::{
+    AlertingConfig, ConsoleNotificationSender, LazyLoadingAlerts,
+};
 use crate::monitoring::memory_tracker::LazyLoadingMemoryTracker;
 use matryx_surrealdb::repository::push::PushRepository;
 use matryx_surrealdb::repository::{
-    AuthRepository,
-    MentionRepository,
-    ServerNoticeRepository,
-    ThreadRepository,
-    database_health::DatabaseHealthRepository,
-    event::EventRepository,
-    membership::MembershipRepository,
-    metrics::HealthStatus,
-    monitoring::MonitoringRepository,
-    oauth2::OAuth2Repository,
-    performance::PerformanceRepository,
-    relations::RelationsRepository,
-    room::RoomRepository,
-    room_operations::RoomOperationsService,
-    threads::ThreadsRepository,
-    uia::UiaRepository,
-    device::DeviceRepository,
-    edu::EDURepository,
+    AuthRepository, MentionRepository, ServerNoticeRepository, ThreadRepository,
+    database_health::DatabaseHealthRepository, device::DeviceRepository, edu::EDURepository,
+    event::EventRepository, membership::MembershipRepository, metrics::HealthStatus,
+    monitoring::MonitoringRepository, oauth2::OAuth2Repository, performance::PerformanceRepository,
+    relations::RelationsRepository, room::RoomRepository, room_operations::RoomOperationsService,
+    threads::ThreadsRepository, uia::UiaRepository,
 };
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
+use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -78,6 +74,10 @@ pub struct AppState {
     pub lazy_loading_benchmarks: Option<Arc<LazyLoadingBenchmarks>>,
     /// Database health monitoring repository
     pub database_health_repo: Arc<DatabaseHealthRepository<Any>>,
+    /// Channel sender for outbound federation events
+    pub outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
+    /// Email service for sending verification and notification emails
+    pub email_service: Option<Arc<crate::email::EmailService>>,
 }
 
 impl AppState {
@@ -97,13 +97,14 @@ impl AppState {
             session_service.clone(),
             homeserver_name.clone(),
         ));
-        
+
         // Initialize UIA service
         let uia_config = UiaConfig::from_env();
         let uia_repo = UiaRepository::new(db.clone());
         let auth_repo = AuthRepository::new(db.clone());
-        let uia_service = Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
-        
+        let uia_service =
+            Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
+
         let thread_repository = Arc::new(ThreadRepository::new(db.clone()));
         let mention_repository = Arc::new(MentionRepository::new(db.clone()));
         let server_notice_repository = Arc::new(ServerNoticeRepository::new(db.clone()));
@@ -122,16 +123,15 @@ impl AppState {
             membership_repo,
             relations_repo,
             threads_repo,
+            db.clone(),
         ));
 
         // Initialize server discovery orchestrator
-        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(
-            dns_resolver.clone()
-        ));
-        
+        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(dns_resolver.clone()));
+
         // Initialize retry configuration from environment
         let retry_config = RetryConfig::from_env();
-        
+
         // Initialize federation retry manager with circuit breaker
         let federation_retry_manager = Arc::new(FederationRetryManager::new(
             Some(retry_config),
@@ -145,15 +145,9 @@ impl AppState {
         let device_repo = Arc::new(DeviceRepository::new(db.clone()));
         let edu_repo = Arc::new(EDURepository::new(db.clone()));
 
-        let device_manager = Arc::new(DeviceManager::new(
-            device_repo.clone(),
-            edu_repo.clone(),
-        ));
+        let device_manager = Arc::new(DeviceManager::new(device_repo.clone(), edu_repo.clone()));
 
-        let device_edu_handler = Arc::new(DeviceEDUHandler::new(
-            edu_repo,
-            device_repo,
-        ));
+        let device_edu_handler = Arc::new(DeviceEDUHandler::new(edu_repo, device_repo));
 
         // Initialize federation media client
         let federation_media_client = Arc::new(FederationMediaClient::new(
@@ -168,8 +162,28 @@ impl AppState {
         // Initialize database health repository
         let database_health_repo = Arc::new(DatabaseHealthRepository::new(db.clone()));
 
+        // Initialize email service if email is enabled
+        let email_service = if config.email_config.enabled {
+            match crate::email::EmailService::new(&config.email_config, homeserver_name.clone()) {
+                Ok(service) => {
+                    tracing::info!("Email service initialized successfully");
+                    Some(Arc::new(service))
+                },
+                Err(e) => {
+                    tracing::error!("Failed to initialize email service: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Email service disabled in configuration");
+            None
+        };
+
         // Initialize filter cache for sync optimization
         let filter_cache = Arc::new(FilterCache::new());
+
+        // Create outbound queue channel
+        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             db,
@@ -197,6 +211,8 @@ impl AppState {
             lazy_loading_alerts: None,
             lazy_loading_benchmarks: None,
             database_health_repo,
+            outbound_tx,
+            email_service,
         })
     }
 
@@ -218,13 +234,14 @@ impl AppState {
             session_service.clone(),
             homeserver_name.clone(),
         ));
-        
+
         // Initialize UIA service
         let uia_config = UiaConfig::from_env();
         let uia_repo = UiaRepository::new(db.clone());
         let auth_repo = AuthRepository::new(db.clone());
-        let uia_service = Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
-        
+        let uia_service =
+            Arc::new(UiaService::new(uia_repo, auth_repo, homeserver_name.clone(), uia_config));
+
         // Initialize lazy loading components
         let lazy_cache = Arc::new(LazyLoadingCache::new());
 
@@ -242,11 +259,8 @@ impl AppState {
         // Initialize alerting system with production-quality configuration
         let alert_config = AlertingConfig::default();
         let notification_sender = Arc::new(ConsoleNotificationSender);
-        let lazy_loading_alerts = Arc::new(LazyLoadingAlerts::new(
-            alert_config,
-            notification_sender,
-            metrics.clone(),
-        ));
+        let lazy_loading_alerts =
+            Arc::new(LazyLoadingAlerts::new(alert_config, notification_sender, metrics.clone()));
 
         // Initialize benchmarking system with production-quality configuration
         let benchmark_config = LazyLoadingBenchmarkConfig::default();
@@ -273,16 +287,15 @@ impl AppState {
             membership_repo,
             relations_repo,
             threads_repo,
+            db.clone(),
         ));
 
         // Initialize server discovery orchestrator
-        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(
-            dns_resolver.clone()
-        ));
-        
+        let server_discovery = Arc::new(ServerDiscoveryOrchestrator::new(dns_resolver.clone()));
+
         // Initialize retry configuration from environment
         let retry_config = RetryConfig::from_env();
-        
+
         // Initialize federation retry manager with circuit breaker
         let federation_retry_manager = Arc::new(FederationRetryManager::new(
             Some(retry_config),
@@ -296,15 +309,9 @@ impl AppState {
         let device_repo = Arc::new(DeviceRepository::new(db.clone()));
         let edu_repo = Arc::new(EDURepository::new(db.clone()));
 
-        let device_manager = Arc::new(DeviceManager::new(
-            device_repo.clone(),
-            edu_repo.clone(),
-        ));
+        let device_manager = Arc::new(DeviceManager::new(device_repo.clone(), edu_repo.clone()));
 
-        let device_edu_handler = Arc::new(DeviceEDUHandler::new(
-            edu_repo,
-            device_repo,
-        ));
+        let device_edu_handler = Arc::new(DeviceEDUHandler::new(edu_repo, device_repo));
 
         // Initialize federation media client
         let federation_media_client = Arc::new(FederationMediaClient::new(
@@ -318,6 +325,26 @@ impl AppState {
 
         // Initialize database health repository
         let database_health_repo = Arc::new(DatabaseHealthRepository::new(db.clone()));
+
+        // Initialize email service if email is enabled
+        let email_service = if config.email_config.enabled {
+            match crate::email::EmailService::new(&config.email_config, homeserver_name.clone()) {
+                Ok(service) => {
+                    tracing::info!("Email service initialized successfully");
+                    Some(Arc::new(service))
+                },
+                Err(e) => {
+                    tracing::error!("Failed to initialize email service: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Email service disabled in configuration");
+            None
+        };
+
+        // Create outbound queue channel
+        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             db,
@@ -345,6 +372,8 @@ impl AppState {
             lazy_loading_alerts: Some(lazy_loading_alerts),
             lazy_loading_benchmarks: Some(lazy_loading_benchmarks),
             database_health_repo,
+            outbound_tx,
+            email_service,
         })
     }
 
@@ -367,7 +396,7 @@ impl AppState {
         // Shutdown memory tracker monitoring if enabled
         if let Some(memory_tracker) = &self.memory_tracker {
             tracing::debug!("Stopping memory tracker monitoring");
-            
+
             // Log final memory statistics before shutdown using available method
             let memory_stats = memory_tracker.get_memory_stats().await;
             tracing::info!(

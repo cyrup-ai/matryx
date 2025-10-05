@@ -1,19 +1,21 @@
+use crate::utils::session_helpers::create_secure_session_cookie;
 use axum::http::HeaderMap;
 use axum::{Json, extract::ConnectInfo, extract::State, http::StatusCode};
-use crate::utils::session_helpers::create_secure_session_cookie;
-use tower_cookies::Cookies;
 use regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
+use tower_cookies::Cookies;
 use tracing::{error, info, warn};
 
-use crate::state::AppState;
 use crate::auth::captcha::CaptchaService;
+use crate::state::AppState;
 // use crate::auth::errors::MatrixAuthError; // TODO: Use for proper error handling
 use crate::auth::refresh_token::TokenPair;
 // Cookie helper function is in main.rs
-use matryx_surrealdb::repository::{AuthRepository, SsoUserInfo, ApplicationService, DeviceRepository, captcha::CaptchaRepository};
+use matryx_surrealdb::repository::{
+    ApplicationService, AuthRepository, DeviceRepository, SsoUserInfo, captcha::CaptchaRepository,
+};
 use std::sync::Arc;
 
 pub mod get_token;
@@ -96,14 +98,17 @@ pub async fn post(
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     let result = match request.login_type.as_str() {
-        "m.login.password" => handle_password_login(state, addr, headers, cookies.clone(), request).await,
+        "m.login.password" => {
+            handle_password_login(state, addr, headers, cookies.clone(), request).await
+        },
         "m.login.token" => handle_token_login(state, addr, headers, request).await,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
     // Set secure session cookie for OAuth2 integration upon successful login
     if let Ok(login_response) = &result {
-        let session_cookie = create_secure_session_cookie("matrix_session", &login_response.access_token);
+        let session_cookie =
+            create_secure_session_cookie("matrix_session", &login_response.access_token);
         cookies.add(session_cookie);
     }
 
@@ -133,26 +138,29 @@ async fn handle_password_login(
 
     // Check if CAPTCHA is required for this login attempt
     let captcha_repo = CaptchaRepository::new(state.db.clone());
-    let captcha_service = CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
-    
+    let captcha_service =
+        CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
+
     let client_ip = addr.ip().to_string();
-    let user_agent = headers.get("user-agent")
+    let user_agent = headers
+        .get("user-agent")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("unknown");
 
     // Check if CAPTCHA is required based on rate limiting and suspicious activity
-    if captcha_service.is_captcha_required(&client_ip, "login").await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
-
+    if captcha_service
+        .is_captcha_required(&client_ip, "login")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
         // Return CAPTCHA challenge - client must retry with CAPTCHA response
-        let _challenge = captcha_service.create_challenge(
-            Some(client_ip.clone()), 
-            Some(user_agent.to_string()), 
-            None
-        ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            
+        let _challenge = captcha_service
+            .create_challenge(Some(client_ip.clone()), Some(user_agent.to_string()), None)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         info!("CAPTCHA challenge required for login attempt: user={}, ip={}", username, client_ip);
-        
+
         // Return Matrix M_CAPTCHA_NEEDED error with challenge data
         return Err(StatusCode::TOO_MANY_REQUESTS); // Client should handle this as CAPTCHA needed
     }
@@ -178,16 +186,17 @@ async fn handle_password_login(
     .await;
 
     // Record rate limit violations if login failed
-    if result.is_err() {
-        if let Err(e) = captcha_service.record_rate_limit_violation(&username, &client_ip).await {
-            warn!("Failed to record rate limit violation: {:?}", e);
-        }
+    if result.is_err()
+        && let Err(e) = captcha_service.record_rate_limit_violation(&username, &client_ip).await
+    {
+        warn!("Failed to record rate limit violation: {:?}", e);
     }
 
     // Periodic cleanup of expired CAPTCHA challenges
     tokio::spawn(async move {
         let captcha_repo = CaptchaRepository::new(state.db.clone());
-        let captcha_service = CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
+        let captcha_service =
+            CaptchaService::new(captcha_repo, crate::auth::captcha::CaptchaConfig::from_env());
         if let Err(e) = captcha_service.cleanup_expired_challenges().await {
             warn!("Failed to cleanup expired CAPTCHA challenges: {:?}", e);
         }
@@ -280,7 +289,7 @@ async fn handle_refresh_token_login(
         device_id: token_pair.device_id,
         refresh_token: Some(token_pair.refresh_token),
         expires_in_ms: Some((token_pair.expires_in * 1000) as u64), // Convert to milliseconds
-        well_known: None,             // Not typically needed for refresh token responses
+        well_known: None, // Not typically needed for refresh token responses
     }))
 }
 
@@ -351,29 +360,25 @@ async fn handle_sso_token_login(
 /// Get configured SSO identity providers from server state using repository
 async fn get_configured_sso_providers(state: &AppState) -> Vec<Value> {
     let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
-    
+
     match auth_repo.get_sso_providers().await {
-        Ok(providers) => {
-            providers
-                .into_iter()
-                .map(|provider| {
-                    serde_json::json!({
-                        "id": provider.id,
-                        "name": provider.name,
-                        "icon": provider.icon_url,
-                        "brand": provider.brand
-                    })
+        Ok(providers) => providers
+            .into_iter()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": provider.id,
+                    "name": provider.name,
+                    "icon": provider.icon_url,
+                    "brand": provider.brand
                 })
-                .collect()
-        },
+            })
+            .collect(),
         Err(e) => {
             warn!("Failed to query SSO providers: {}", e);
             Vec::new()
         },
     }
 }
-
-
 
 /// Handle SSO-based login using pre-validated tokens
 async fn handle_sso_login(
@@ -422,17 +427,23 @@ async fn handle_sso_login(
 
     // Store device information using repository
     let device_repo = DeviceRepository::new(state.db.clone());
-    device_repo.create_device_info(
-        &user_info.user_id,
-        &device_id,
-        request.initial_device_display_name.clone().or_else(|| Some("SSO Login".to_string())),
-        &client_ip,
-        user_agent,
-        None,
-    ).await.map_err(|e| {
-        error!("Failed to store device info for SSO login: {}", e);
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    device_repo
+        .create_device_info(
+            &user_info.user_id,
+            &device_id,
+            request
+                .initial_device_display_name
+                .clone()
+                .or_else(|| Some("SSO Login".to_string())),
+            &client_ip,
+            user_agent,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to store device info for SSO login: {}", e);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     info!("SSO login successful for user: {}", user_info.user_id);
 
@@ -505,18 +516,23 @@ async fn handle_application_service_login(
 
     // Store device information using repository
     let device_repo = DeviceRepository::new(state.db.clone());
-    device_repo.create_device_info(
-        target_user,
-        &device_id,
-        request.initial_device_display_name.clone()
-            .or_else(|| Some(format!("Application Service: {}", app_service.id))),
-        &client_ip,
-        user_agent,
-        Some(app_service.id.clone()),
-    ).await.map_err(|e| {
-        error!("Failed to store device info for AS login: {}", e);
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    device_repo
+        .create_device_info(
+            target_user,
+            &device_id,
+            request
+                .initial_device_display_name
+                .clone()
+                .or_else(|| Some(format!("Application Service: {}", app_service.id))),
+            &client_ip,
+            user_agent,
+            Some(app_service.id.clone()),
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to store device info for AS login: {}", e);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     info!("Application service login successful: {} as user {}", app_service.id, target_user);
 
@@ -530,16 +546,16 @@ async fn handle_application_service_login(
     }))
 }
 
-
-
 /// Validate SSO token and extract user information using repository
 async fn validate_sso_token(
     state: &AppState,
     token: &str,
 ) -> Result<SsoUserInfo, Box<dyn std::error::Error + Send + Sync>> {
     let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
-    
-    let user_info = auth_repo.validate_sso_token(token).await
+
+    let user_info = auth_repo
+        .validate_sso_token(token)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         .ok_or("Invalid or expired SSO token")?;
 
@@ -552,8 +568,10 @@ async fn validate_application_service_token(
     token: &str,
 ) -> Result<ApplicationService, Box<dyn std::error::Error + Send + Sync>> {
     let auth_repo = Arc::new(AuthRepository::new(state.db.clone()));
-    
-    let service = auth_repo.validate_application_service_token(token).await
+
+    let service = auth_repo
+        .validate_application_service_token(token)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         .ok_or("Invalid application service token")?;
 
@@ -576,15 +594,13 @@ fn can_app_service_login_as(app_service: &ApplicationService, user_id: &str) -> 
     // Check if any user namespace regex matches
     for namespace in &app_service.namespaces.users {
         if let Ok(regex) = regex::Regex::new(&namespace.regex)
-            && regex.is_match(localpart) {
-                return true;
-            }
+            && regex.is_match(localpart)
+        {
+            return true;
+        }
     }
 
     false
 }
 
-
-
 // Re-export password module types for convenience
-

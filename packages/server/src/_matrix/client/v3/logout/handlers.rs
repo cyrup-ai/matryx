@@ -85,15 +85,16 @@ async fn logout_internal(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let (user_id, device_id, access_token) = match (auth.user_id(), auth.device_id(), auth.access_token()) {
-        (Some(user_id), Some(device_id), Some(access_token)) => {
-            (user_id.to_string(), device_id.to_string(), access_token.to_string())
-        },
-        _ => {
-            warn!("{} logout failed - user authentication required", logout_type);
-            return Err(StatusCode::UNAUTHORIZED);
-        }
-    };
+    let (user_id, device_id, access_token) =
+        match (auth.user_id(), auth.device_id(), auth.access_token()) {
+            (Some(user_id), Some(device_id), Some(access_token)) => {
+                (user_id.to_string(), device_id.to_string(), access_token.to_string())
+            },
+            _ => {
+                warn!("{} logout failed - user authentication required", logout_type);
+                return Err(StatusCode::UNAUTHORIZED);
+            },
+        };
 
     // Ensure we have user authentication (not server or anonymous)
     match auth {
@@ -105,7 +106,10 @@ async fn logout_internal(
             return Err(StatusCode::UNAUTHORIZED);
         },
         MatrixAuth::Anonymous => {
-            warn!("{} logout failed - anonymous authentication not allowed for logout", logout_type);
+            warn!(
+                "{} logout failed - anonymous authentication not allowed for logout",
+                logout_type
+            );
             return Err(StatusCode::UNAUTHORIZED);
         },
     };
@@ -147,8 +151,6 @@ async fn logout_internal(
     // Return empty JSON object as per Matrix specification
     Ok(Json(serde_json::json!({})))
 }
-
-
 
 /// Invalidate user session in database
 async fn invalidate_user_session(
@@ -216,7 +218,7 @@ async fn cleanup_livequery_subscriptions(
     device_id: &str,
 ) -> Result<(), LogoutError> {
     let session_repo = SessionRepository::new(state.db.clone());
-    
+
     match session_repo.cleanup_livequery_subscriptions(user_id, device_id).await {
         Ok(_) => {
             info!("LiveQuery subscriptions cleaned up for user: {} device: {}", user_id, device_id);
@@ -277,7 +279,7 @@ async fn revoke_device_refresh_tokens(
     device_id: &str,
 ) -> Result<(), LogoutError> {
     let session_repo = SessionRepository::new(state.db.clone());
-    
+
     match session_repo.revoke_device_refresh_tokens(user_id, device_id).await {
         Ok(_) => {
             info!("Refresh tokens revoked for user: {} device: {}", user_id, device_id);
@@ -293,5 +295,3 @@ async fn revoke_device_refresh_tokens(
         },
     }
 }
-
-

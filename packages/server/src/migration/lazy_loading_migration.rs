@@ -248,9 +248,9 @@ impl LazyLoadingMigration {
     ) -> Result<bool, MigrationError> {
         let criteria = &phase.success_criteria;
 
-        let success = metrics.error_rate <= criteria.max_error_rate &&
-            metrics.avg_response_time_ms <= criteria.max_response_time_ms &&
-            metrics.cache_hit_ratio >= criteria.min_cache_hit_ratio;
+        let success = metrics.error_rate <= criteria.max_error_rate
+            && metrics.avg_response_time_ms <= criteria.max_response_time_ms
+            && metrics.cache_hit_ratio >= criteria.min_cache_hit_ratio;
 
         tracing::info!(
             phase = %phase.name,
@@ -267,8 +267,8 @@ impl LazyLoadingMigration {
     async fn should_rollback(&self, metrics: &PerformanceMetrics) -> bool {
         let triggers = &self.migration_config.rollback_config.rollback_triggers;
 
-        metrics.error_rate > triggers.error_rate_threshold ||
-            metrics.avg_response_time_ms > triggers.response_time_threshold_ms
+        metrics.error_rate > triggers.error_rate_threshold
+            || metrics.avg_response_time_ms > triggers.response_time_threshold_ms
     }
 
     async fn initiate_rollback(
@@ -300,7 +300,7 @@ impl LazyLoadingMigration {
         // Record performance metrics for the lazy loading migration
         let migration_type = if used_enhanced { "enhanced" } else { "legacy" };
         let status = if success { "success" } else { "failure" };
-        
+
         // Log the metrics for monitoring and analysis
         tracing::info!(
             "Migration request completed: type={}, duration_ms={}, status={}",
@@ -398,7 +398,7 @@ impl EnhancedLazyLoadingService {
             self.metrics.record_cache_hit(processing_time);
 
             return Ok(LazyLoadingResponse {
-                essential_members: cached_members.into_iter().collect(),  // Convert HashSet to Vec
+                essential_members: cached_members.into_iter().collect(), // Convert HashSet to Vec
                 processing_time_ms: processing_time,
             });
         }
@@ -416,19 +416,29 @@ impl EnhancedLazyLoadingService {
         // Include redundant members if requested (for compatibility)
         if request.include_redundant_members {
             // Add room creator and other essential users from state
-            if !essential_members.contains(&format!("@admin:{}", room_id.split(':').next_back().unwrap_or("localhost"))) {
-                essential_members.push(format!("@admin:{}", room_id.split(':').next_back().unwrap_or("localhost")));
+            if !essential_members.contains(&format!(
+                "@admin:{}",
+                room_id.split(':').next_back().unwrap_or("localhost")
+            )) {
+                essential_members.push(format!(
+                    "@admin:{}",
+                    room_id.split(':').next_back().unwrap_or("localhost")
+                ));
             }
         }
 
         let processing_time = start_time.elapsed().as_millis() as u64;
 
         // Cache the result for future requests
-        let essential_members_set: std::collections::HashSet<String> = essential_members.iter().cloned().collect();
-        self.lazy_cache.store_essential_members(&cache_key, &essential_members_set).await;
+        let essential_members_set: std::collections::HashSet<String> =
+            essential_members.iter().cloned().collect();
+        self.lazy_cache
+            .store_essential_members(&cache_key, &essential_members_set)
+            .await;
 
         // Record successful processing metrics
-        self.metrics.record_successful_processing(processing_time, essential_members.len());
+        self.metrics
+            .record_successful_processing(processing_time, essential_members.len());
 
         Ok(LazyLoadingResponse {
             essential_members,

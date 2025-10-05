@@ -9,20 +9,15 @@ use chrono::Utc;
 
 use serde::{Deserialize, Serialize};
 
-
 use tracing::{error, info, warn};
-
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
-
 };
 use matryx_entity::types::{Membership, MembershipState};
 use matryx_surrealdb::repository::{
-    event::EventRepository,
-    membership::MembershipRepository,
-    room::RoomRepository,
+    event::EventRepository, membership::MembershipRepository, room::RoomRepository,
     user::UserRepository,
 };
 
@@ -166,11 +161,17 @@ pub async fn post(
             return Err(StatusCode::FORBIDDEN);
         },
         Some("restricted") | Some("private") => {
-            warn!("Room knock failed - room {} does not allow knocking (restricted/private)", actual_room_id);
+            warn!(
+                "Room knock failed - room {} does not allow knocking (restricted/private)",
+                actual_room_id
+            );
             return Err(StatusCode::FORBIDDEN);
         },
         _ => {
-            warn!("Room knock failed - room {} does not allow knocking (unknown join rule)", actual_room_id);
+            warn!(
+                "Room knock failed - room {} does not allow knocking (unknown join rule)",
+                actual_room_id
+            );
             return Err(StatusCode::FORBIDDEN);
         },
     }

@@ -1,6 +1,5 @@
 use serde_json::Value;
 
-
 use super::basic_filters::apply_event_filter;
 use crate::state::AppState;
 use matryx_entity::filter::{EventFilter, RoomEventFilter};
@@ -12,10 +11,11 @@ pub async fn get_filtered_timeline_events(
     state: &AppState,
     room_id: &str,
     filter: &RoomEventFilter,
+    since_ts: Option<i64>,
 ) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
     let filter_repo = FilterRepository::new(state.db.clone());
     let events = filter_repo
-        .get_filtered_timeline_events(room_id, filter)
+        .get_filtered_timeline_events(room_id, filter, since_ts)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 

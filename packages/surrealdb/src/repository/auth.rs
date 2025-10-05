@@ -515,20 +515,30 @@ impl<C: Connection> AuthRepository<C> {
     /// * `Ok(None)` - No user found with this threepid (should return M_THREEPID_NOT_FOUND)
     /// * `Err(RepositoryError)` - Database or other error
     pub async fn get_user_by_threepid(&self, medium: &str, address: &str) -> Result<Option<String>, RepositoryError> {
-        let _query = "
+        let query = "
             SELECT user_id FROM user_threepid
             WHERE medium = $medium AND address = $address AND validated = true
             LIMIT 1
         ";
 
-        // TODO: Implement actual SurrealDB query for threepid lookup
-        // This requires the user_threepid table to be properly defined in the schema
-        // For now, return None to indicate threepid not found (Matrix spec compliant)
-        
         tracing::debug!("Looking up user by threepid: medium={}, address={}", medium, address);
-        
-        // Return None to indicate threepid not found - this will trigger M_THREEPID_NOT_FOUND
-        // when handled by the calling UIA code, which is Matrix specification compliant
+
+        let mut result = self.db
+            .query(query)
+            .bind(("medium", medium.to_string()))
+            .bind(("address", address.to_string()))
+            .await?;
+
+        let rows: Vec<serde_json::Value> = result.take(0)?;
+
+        if let Some(row) = rows.first()
+            && let Some(user_id) = row.get("user_id").and_then(|v| v.as_str())
+        {
+            tracing::debug!("Found user {} for threepid {}:{}", user_id, medium, address);
+            return Ok(Some(user_id.to_string()));
+        }
+
+        tracing::debug!("No user found for threepid {}:{}", medium, address);
         Ok(None)
     }
 }

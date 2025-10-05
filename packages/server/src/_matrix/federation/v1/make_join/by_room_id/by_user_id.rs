@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use crate::state::AppState;
 use crate::federation::membership_federation::validate_federation_join_allowed;
+use crate::state::AppState;
 use matryx_entity::types::{MembershipState, Room};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
@@ -205,18 +205,14 @@ pub async fn get(
     if !can_join.allowed {
         warn!("User {} not authorized to join room {}: {}", user_id, room_id, can_join.reason);
         return match can_join.error_code.as_str() {
-            "M_UNABLE_TO_AUTHORISE_JOIN" => {
-                Ok(Json(json!({
-                    "errcode": "M_UNABLE_TO_AUTHORISE_JOIN",
-                    "error": can_join.reason
-                })))
-            },
-            "M_UNABLE_TO_GRANT_JOIN" => {
-                Ok(Json(json!({
-                    "errcode": "M_UNABLE_TO_GRANT_JOIN",
-                    "error": can_join.reason
-                })))
-            },
+            "M_UNABLE_TO_AUTHORISE_JOIN" => Ok(Json(json!({
+                "errcode": "M_UNABLE_TO_AUTHORISE_JOIN",
+                "error": can_join.reason
+            }))),
+            "M_UNABLE_TO_GRANT_JOIN" => Ok(Json(json!({
+                "errcode": "M_UNABLE_TO_GRANT_JOIN",
+                "error": can_join.reason
+            }))),
             _ => Err(StatusCode::FORBIDDEN),
         };
     }
@@ -234,22 +230,20 @@ pub async fn get(
     let now = Utc::now().timestamp_millis();
 
     // Get auth_events required for Matrix federation compliance
-    let auth_events = event_repo
-        .get_auth_events_for_join(&room_id, &user_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to fetch auth_events for join in room {}: {}", room_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let auth_events =
+        event_repo
+            .get_auth_events_for_join(&room_id, &user_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to fetch auth_events for join in room {}: {}", room_id, e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     // Get prev_events for proper event DAG construction per Matrix specification
-    let prev_events = event_repo
-        .get_room_events(&room_id, Some(10))
-        .await
-        .map_err(|e| {
-            error!("Failed to fetch prev_events for room {}: {}", room_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let prev_events = event_repo.get_room_events(&room_id, Some(10)).await.map_err(|e| {
+        error!("Failed to fetch prev_events for room {}: {}", room_id, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     debug!(
         "Matrix join event preparation: auth_events={}, prev_events={} for user {} in room {}",
@@ -301,16 +295,21 @@ async fn check_join_authorization(
     origin_server: &str,
 ) -> Result<JoinAuthResult, Box<dyn std::error::Error + Send + Sync>> {
     // Validate that the origin server matches the user's server domain
-    let user_server = user_id.split(':').nth(1)
-        .ok_or("Invalid user ID format")?;
-    
+    let user_server = user_id.split(':').nth(1).ok_or("Invalid user ID format")?;
+
     if user_server != origin_server {
-        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+        return Err(format!(
+            "Origin server mismatch: user {} not from server {}",
+            user_id, origin_server
+        )
+        .into());
     }
 
     // Get room's join rules from current state
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let join_rules = room_repo.get_room_join_rules_string(&room.room_id).await
+    let join_rules = room_repo
+        .get_room_join_rules_string(&room.room_id)
+        .await
         .map_err(|e| format!("Failed to get room join rules: {}", e))?;
 
     match join_rules.as_str() {
@@ -336,14 +335,12 @@ async fn check_join_authorization(
                         authorizing_user: None,
                     })
                 },
-                _ => {
-                    Ok(JoinAuthResult {
-                        allowed: false,
-                        reason: "Room requires invite to join".to_string(),
-                        error_code: "M_FORBIDDEN".to_string(),
-                        authorizing_user: None,
-                    })
-                },
+                _ => Ok(JoinAuthResult {
+                    allowed: false,
+                    reason: "Room requires invite to join".to_string(),
+                    error_code: "M_FORBIDDEN".to_string(),
+                    authorizing_user: None,
+                }),
             }
         },
         "knock" => {
@@ -371,8 +368,6 @@ async fn check_join_authorization(
     }
 }
 
-
-
 /// Check restricted room join conditions
 async fn check_restricted_room_conditions(
     state: &AppState,
@@ -381,16 +376,21 @@ async fn check_restricted_room_conditions(
     origin_server: &str,
 ) -> Result<JoinAuthResult, Box<dyn std::error::Error + Send + Sync>> {
     // Validate that the origin server matches the user's server domain
-    let user_server = user_id.split(':').nth(1)
-        .ok_or("Invalid user ID format")?;
-    
+    let user_server = user_id.split(':').nth(1).ok_or("Invalid user ID format")?;
+
     if user_server != origin_server {
-        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+        return Err(format!(
+            "Origin server mismatch: user {} not from server {}",
+            user_id, origin_server
+        )
+        .into());
     }
 
     // Get room's join rule content for allow conditions
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let join_rule_content = room_repo.get_room_join_rule_content(&room.room_id).await
+    let join_rule_content = room_repo
+        .get_room_join_rule_content(&room.room_id)
+        .await
         .map_err(|e| format!("Failed to get room join rule content: {}", e))?;
 
     let allow_conditions = join_rule_content
@@ -441,8 +441,6 @@ async fn check_restricted_room_conditions(
     })
 }
 
-
-
 /// Check if user satisfies room membership condition
 async fn check_room_membership_condition(
     state: &AppState,
@@ -451,11 +449,14 @@ async fn check_room_membership_condition(
     origin_server: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Validate that the origin server matches the user's server domain
-    let user_server = user_id.split(':').nth(1)
-        .ok_or("Invalid user ID format")?;
-    
+    let user_server = user_id.split(':').nth(1).ok_or("Invalid user ID format")?;
+
     if user_server != origin_server {
-        return Err(format!("Origin server mismatch: user {} not from server {}", user_id, origin_server).into());
+        return Err(format!(
+            "Origin server mismatch: user {} not from server {}",
+            user_id, origin_server
+        )
+        .into());
     }
 
     // Check if our server knows about the condition room
@@ -469,9 +470,11 @@ async fn check_room_membership_condition(
     if condition_room.room_version.is_empty() {
         return Err("Invalid condition room: missing room version".into());
     }
-    
-    debug!("Validating membership in condition room {} (version: {})", 
-           condition_room_id, condition_room.room_version);
+
+    debug!(
+        "Validating membership in condition room {} (version: {})",
+        condition_room_id, condition_room.room_version
+    );
 
     // Check if the user is a member of the condition room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
@@ -481,12 +484,12 @@ async fn check_room_membership_condition(
         Some(m) if m.membership == MembershipState::Join => {
             // Find a user from our server who can authorize the join
             let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-            membership_repo.find_authorizing_user(condition_room_id, &state.homeserver_name).await
+            membership_repo
+                .find_authorizing_user(condition_room_id, &state.homeserver_name)
+                .await
                 .map_err(|e| format!("Failed to find authorizing user: {}", e))?
                 .ok_or("No authorizing user found from our server".into())
         },
         _ => Err("User is not a member of the condition room".into()),
     }
 }
-
-

@@ -9,17 +9,12 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-
-
-
 use crate::AppState;
+use chrono::Utc;
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
-use chrono::Utc;
 use std::sync::Arc;
 
 #[derive(Serialize)]
@@ -66,22 +61,22 @@ fn validate_content_type(content_type: &str) -> bool {
     // Allow common media types
     matches!(
         content_type,
-        "image/jpeg" |
-            "image/png" |
-            "image/gif" |
-            "image/webp" |
-            "image/svg+xml" |
-            "video/mp4" |
-            "video/webm" |
-            "video/ogg" |
-            "audio/mp3" |
-            "audio/ogg" |
-            "audio/wav" |
-            "audio/flac" |
-            "application/pdf" |
-            "text/plain" |
-            "application/json" |
-            "application/octet-stream"
+        "image/jpeg"
+            | "image/png"
+            | "image/gif"
+            | "image/webp"
+            | "image/svg+xml"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "audio/mp3"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/flac"
+            | "application/pdf"
+            | "text/plain"
+            | "application/json"
+            | "application/octet-stream"
     )
 }
 
@@ -197,8 +192,6 @@ pub async fn upload_media(
 
     Ok(Json(MediaUploadResponse { content_uri: upload_result.content_uri }))
 }
-
-
 
 /// POST /_matrix/media/v3/upload
 pub async fn post(

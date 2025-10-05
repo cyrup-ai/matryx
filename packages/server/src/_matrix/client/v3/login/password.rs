@@ -1,9 +1,9 @@
+use crate::utils::session_helpers::create_secure_session_cookie;
 use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode};
 use bcrypt::verify;
 use chrono::Utc;
-use crate::utils::session_helpers::create_secure_session_cookie;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -12,11 +12,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::LoginResponse;
-use crate::auth::MatrixSessionService;
 use crate::auth::uia::UserIdentifier;
 use crate::state::AppState;
 use matryx_entity::types::{Device, Session, User};
-use matryx_surrealdb::repository::{DeviceRepository, SessionRepository, UserRepository, third_party::ThirdPartyRepository};
+use matryx_surrealdb::repository::{
+    DeviceRepository, SessionRepository, UserRepository, third_party::ThirdPartyRepository,
+};
 
 #[derive(Deserialize)]
 pub struct PasswordLoginRequest {
@@ -77,14 +78,12 @@ pub async fn post_password_login(
     // Extract user identifier from request (Matrix spec UserIdentifier support)
     let user_string = if let Some(identifier) = &request.identifier {
         match identifier.id_type.as_str() {
-            "m.id.user" => {
-                match &identifier.user {
-                    Some(user) if !user.is_empty() => user.clone(),
-                    _ => {
-                        warn!("Invalid user field in m.id.user identifier");
-                        return Err(LoginError::InvalidRequest.into());
-                    }
-                }
+            "m.id.user" => match &identifier.user {
+                Some(user) if !user.is_empty() => user.clone(),
+                _ => {
+                    warn!("Invalid user field in m.id.user identifier");
+                    return Err(LoginError::InvalidRequest.into());
+                },
             },
             "m.id.thirdparty" => {
                 // Handle email/phone login
@@ -106,7 +105,7 @@ pub async fn post_password_login(
             _ => {
                 warn!("Unsupported identifier type: {}", identifier.id_type);
                 return Err(LoginError::InvalidRequest.into());
-            }
+            },
         }
     } else if let Some(user) = &request.user {
         // Backward compatibility with legacy user field
@@ -158,29 +157,28 @@ pub async fn post_password_login(
     )
     .await?;
 
-    // Generate secure access and refresh tokens
-    let access_token = generate_secure_access_token()?;
+    // Generate JWT access token directly (no UUID intermediate)
+    let jwt_token = state.session_service
+        .create_access_token(&user_id, &device_id)
+        .await
+        .map_err(|auth_error| {
+            error!("Failed to create JWT access token: {:?}", auth_error);
+            LoginError::InternalError
+        })?;
+
+    // Generate refresh token (keep syr_ format for DB tracking)
     let refresh_token = generate_secure_refresh_token()?;
 
-    // Create authenticated session with atomic database operations
+    // Create authenticated session with JWT
     let session_repo = SessionRepository::new(state.db.clone());
     let _session = create_user_session(
         &session_repo,
         &user_id,
         &device_id,
-        &access_token,
+        &jwt_token,
         &refresh_token,
         &client_ip,
         &user_agent,
-    )
-    .await?;
-
-    // Register session with authentication service for JWT generation
-    let jwt_token = register_session_with_auth_service(
-        &state.session_service,
-        &user_id,
-        &device_id,
-        &access_token,
     )
     .await?;
 
@@ -349,16 +347,6 @@ async fn create_or_update_device(
     Ok(device)
 }
 
-/// Generate cryptographically secure access token
-///
-/// Creates Matrix-compliant access token with secure random generation
-/// following the syt_ prefix convention for synapse compatibility.
-fn generate_secure_access_token() -> Result<String, LoginError> {
-    let uuid = Uuid::new_v4();
-    let token = format!("syt_{}", uuid.simple());
-    Ok(token)
-}
-
 /// Generate cryptographically secure refresh token
 ///
 /// Creates Matrix-compliant refresh token with secure random generation
@@ -406,39 +394,6 @@ async fn create_user_session(
 
     info!("Session created successfully for user: {}", user_id);
     Ok(created_session)
-}
-
-/// Register session with authentication service and generate JWT
-///
-/// Integrates with Matrix session service to generate JWT tokens
-/// for API authentication and authorization.
-async fn register_session_with_auth_service(
-    session_service: &MatrixSessionService<surrealdb::engine::any::Any>,
-    user_id: &str,
-    device_id: &str,
-    access_token: &str,
-) -> Result<String, LoginError> {
-    // Create user session in auth service
-    let _matrix_access_token = session_service
-        .create_user_session(user_id, device_id, access_token, None)
-        .await
-        .map_err(|auth_error| {
-            error!("Auth service error creating session: {:?}", auth_error);
-            LoginError::InternalError
-        })?;
-
-    // Generate JWT token for API authentication
-    let jwt_token =
-        session_service
-            .create_access_token(user_id, device_id)
-            .await
-            .map_err(|auth_error| {
-                error!("Auth service error creating JWT token: {:?}", auth_error);
-                LoginError::InternalError
-            })?;
-
-    info!("JWT token created successfully for user: {}", user_id);
-    Ok(jwt_token)
 }
 
 /// Build Matrix well-known discovery configuration
@@ -498,13 +453,6 @@ mod tests {
             generate_device_id(&None).expect("Test should generate device ID when none provided");
         assert!(!result.is_empty());
         assert!(result.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
-    fn test_generate_secure_access_token() {
-        let result = generate_secure_access_token().expect("Test should generate access token");
-        assert!(result.starts_with("syt_"));
-        assert!(result.len() > 10);
     }
 
     #[test]

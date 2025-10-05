@@ -21,13 +21,6 @@ pub enum TestUtilsError {
     Configuration { field: String, message: String },
 }
 
-/// Create a test database connection for unit tests
-pub fn create_test_db() -> Result<Surreal<Any>, TestUtilsError> {
-    let rt = tokio::runtime::Runtime::new().map_err(TestUtilsError::RuntimeCreation)?;
-
-    rt.block_on(async { create_test_db_async().await })
-}
-
 /// Configuration for test database setup
 #[derive(Debug, Clone)]
 pub struct TestDatabaseConfig {

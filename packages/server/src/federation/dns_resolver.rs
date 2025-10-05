@@ -1,17 +1,17 @@
 //! Module contains intentional library code not yet fully integrated
 #![allow(dead_code)]
 
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use hickory_resolver::TokioResolver;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use tokio::sync::RwLock;
 
 use hickory_resolver::ResolveError;
-use tracing::{debug, info, warn, error};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn};
 
 use crate::federation::well_known_client::WellKnownClient;
 
@@ -20,16 +20,16 @@ use crate::federation::well_known_client::WellKnownClient;
 pub enum DnsResolutionError {
     #[error("DNS resolution failed: {0}")]
     ResolveError(String),
-    
+
     #[error("Well-known lookup failed: {0}")]
     WellKnownError(String),
-    
+
     #[error("No valid server found for hostname: {0}")]
     NoServerFound(String),
-    
+
     #[error("Invalid hostname: {0}")]
     InvalidHostname(String),
-    
+
     #[error("SRV record parsing failed: {0}")]
     SrvParsingError(String),
 }
@@ -92,10 +92,7 @@ struct CacheEntry<T> {
 
 impl<T> CacheEntry<T> {
     fn new(value: T, ttl: Duration) -> Self {
-        Self {
-            value,
-            expires_at: Instant::now() + ttl,
-        }
+        Self { value, expires_at: Instant::now() + ttl }
     }
 
     fn is_expired(&self) -> bool {
@@ -138,21 +135,28 @@ impl BackoffState {
 }
 
 /// Matrix-compliant DNS resolver for federation server discovery
-/// 
+///
 /// Implements the complete Matrix Server-Server API DNS resolution specification:
 /// 1. Well-known delegation (/.well-known/matrix/server)
 /// 2. SRV record lookup (_matrix-fed._tcp and _matrix._tcp)
 /// 3. Direct hostname resolution with fallback to port 8448
 /// 4. Response caching with Matrix-compliant TTLs
 /// 5. Exponential backoff for repeated failures
-/// 
+///
 /// This resolver ensures Matrix specification compliance for server discovery.
 pub struct MatrixDnsResolver {
     dns_resolver: Arc<TokioResolver>,
     well_known_client: Arc<WellKnownClient>,
     timeout: Duration,
     // Caching for successful well-known responses (24-48 hours)
-    well_known_cache: Arc<RwLock<HashMap<String, CacheEntry<Option<crate::federation::well_known_client::WellKnownResponse>>>>>,
+    well_known_cache: Arc<
+        RwLock<
+            HashMap<
+                String,
+                CacheEntry<Option<crate::federation::well_known_client::WellKnownResponse>>,
+            >,
+        >,
+    >,
     // Caching for error responses (up to 1 hour)
     error_cache: Arc<RwLock<HashMap<String, CacheEntry<DnsResolutionError>>>>,
     // Exponential backoff state for failed servers
@@ -195,7 +199,7 @@ impl MatrixDnsResolver {
     }
 
     /// Resolve a Matrix server name according to the Matrix Server-Server API specification
-    /// 
+    ///
     /// This implements the complete Matrix server discovery process:
     /// 1. Parse server name (hostname[:port])
     /// 2. Handle IP literals directly
@@ -204,10 +208,10 @@ impl MatrixDnsResolver {
     /// 5. Perform SRV record lookups (_matrix-fed._tcp and _matrix._tcp)
     /// 6. Fallback to hostname:8448
     /// 7. Exponential backoff for repeated failures
-    /// 
+    ///
     /// # Arguments
     /// * `server_name` - The Matrix server name (e.g., "example.com" or "matrix.example.com:8448")
-    /// 
+    ///
     /// # Returns
     /// * `ResolvedServer` - Complete server connection information
     pub async fn resolve_server(&self, server_name: &str) -> DnsResult<ResolvedServer> {
@@ -221,7 +225,10 @@ impl MatrixDnsResolver {
 
         // Check exponential backoff state
         if !self.can_retry_server(server_name).await {
-            let error = DnsResolutionError::NoServerFound(format!("Server {} is in backoff state", server_name));
+            let error = DnsResolutionError::NoServerFound(format!(
+                "Server {} is in backoff state",
+                server_name
+            ));
             return Err(error);
         }
 
@@ -232,12 +239,12 @@ impl MatrixDnsResolver {
             Ok(_) => {
                 // Reset backoff state on success
                 self.reset_backoff_state(server_name).await;
-            }
+            },
             Err(e) => {
                 // Record failure and cache error
                 self.record_failure(server_name).await;
                 self.cache_error(server_name, e.clone()).await;
-            }
+            },
         }
 
         result
@@ -279,11 +286,11 @@ impl MatrixDnsResolver {
             Ok(resolved) => {
                 info!("Resolved via well-known delegation: {:?}", resolved);
                 return Ok(resolved);
-            }
+            },
             Err(e) => {
                 debug!("Well-known lookup failed: {}", e);
                 // Continue to SRV lookup
-            }
+            },
         }
 
         // Step 5: SRV record lookups
@@ -292,10 +299,10 @@ impl MatrixDnsResolver {
             Ok(resolved) => {
                 info!("Resolved via _matrix-fed._tcp SRV record: {:?}", resolved);
                 return Ok(resolved);
-            }
+            },
             Err(e) => {
                 debug!("_matrix-fed._tcp SRV lookup failed: {}", e);
-            }
+            },
         }
 
         // Try legacy _matrix._tcp (deprecated)
@@ -303,10 +310,10 @@ impl MatrixDnsResolver {
             Ok(resolved) => {
                 info!("Resolved via legacy _matrix._tcp SRV record: {:?}", resolved);
                 return Ok(resolved);
-            }
+            },
             Err(e) => {
                 debug!("_matrix._tcp SRV lookup failed: {}", e);
-            }
+            },
         }
 
         // Step 6: Fallback to hostname:8448
@@ -332,18 +339,25 @@ impl MatrixDnsResolver {
             if let Some(bracket_end) = server_name.find(']') {
                 let ipv6_part = &server_name[1..bracket_end];
                 let remainder = &server_name[bracket_end + 1..];
-                
+
                 if remainder.is_empty() {
                     return Ok((ipv6_part.to_string(), None));
                 } else if let Some(port_str) = remainder.strip_prefix(':') {
-                    let port = port_str.parse::<u16>()
-                        .map_err(|_| DnsResolutionError::InvalidHostname(format!("Invalid port: {}", port_str)))?;
+                    let port = port_str.parse::<u16>().map_err(|_| {
+                        DnsResolutionError::InvalidHostname(format!("Invalid port: {}", port_str))
+                    })?;
                     return Ok((ipv6_part.to_string(), Some(port)));
                 } else {
-                    return Err(DnsResolutionError::InvalidHostname(format!("Invalid IPv6 literal: {}", server_name)));
+                    return Err(DnsResolutionError::InvalidHostname(format!(
+                        "Invalid IPv6 literal: {}",
+                        server_name
+                    )));
                 }
             } else {
-                return Err(DnsResolutionError::InvalidHostname(format!("Unclosed IPv6 literal: {}", server_name)));
+                return Err(DnsResolutionError::InvalidHostname(format!(
+                    "Unclosed IPv6 literal: {}",
+                    server_name
+                )));
             }
         }
 
@@ -351,15 +365,16 @@ impl MatrixDnsResolver {
         if let Some(colon_pos) = server_name.rfind(':') {
             let hostname = &server_name[..colon_pos];
             let port_str = &server_name[colon_pos + 1..];
-            
+
             // Check if this is actually an IPv6 address without brackets
             if hostname.contains(':') {
                 // This is likely an IPv6 address without brackets
                 return Ok((server_name.to_string(), None));
             }
-            
-            let port = port_str.parse::<u16>()
-                .map_err(|_| DnsResolutionError::InvalidHostname(format!("Invalid port: {}", port_str)))?;
+
+            let port = port_str.parse::<u16>().map_err(|_| {
+                DnsResolutionError::InvalidHostname(format!("Invalid port: {}", port_str))
+            })?;
             Ok((hostname.to_string(), Some(port)))
         } else {
             Ok((server_name.to_string(), None))
@@ -374,12 +389,17 @@ impl MatrixDnsResolver {
             if let Some(well_known) = cached_response {
                 return self.process_well_known_response(hostname, &well_known).await;
             } else {
-                return Err(DnsResolutionError::WellKnownError("Cached well-known response is None".to_string()));
+                return Err(DnsResolutionError::WellKnownError(
+                    "Cached well-known response is None".to_string(),
+                ));
             }
         }
 
         // Fetch from network
-        let well_known_result = self.well_known_client.get_well_known(hostname).await
+        let well_known_result = self
+            .well_known_client
+            .get_well_known(hostname)
+            .await
             .map_err(|e| DnsResolutionError::WellKnownError(e.to_string()));
 
         // Cache the result (both success and failure)
@@ -387,22 +407,25 @@ impl MatrixDnsResolver {
             Ok(well_known_opt) => {
                 self.cache_well_known(hostname, well_known_opt.clone()).await;
                 if let Some(well_known) = well_known_opt {
-                    return self.process_well_known_response(hostname, well_known).await;
+                    self.process_well_known_response(hostname, well_known).await
                 } else {
-                    return Err(DnsResolutionError::WellKnownError("No well-known response".to_string()));
+                    Err(DnsResolutionError::WellKnownError("No well-known response".to_string()))
                 }
-            }
+            },
             Err(e) => {
                 // Cache None for failed requests
                 self.cache_well_known(hostname, None).await;
-                return Err(e.clone());
-            }
+                Err(e.clone())
+            },
         }
     }
 
     /// Process a well-known response to resolve the server
-    async fn process_well_known_response(&self, _hostname: &str, well_known: &crate::federation::well_known_client::WellKnownResponse) -> DnsResult<ResolvedServer> {
-
+    async fn process_well_known_response(
+        &self,
+        _hostname: &str,
+        well_known: &crate::federation::well_known_client::WellKnownResponse,
+    ) -> DnsResult<ResolvedServer> {
         // Parse delegated server name
         let (delegated_hostname, delegated_port) = self.parse_server_name(&well_known.server)?;
 
@@ -465,17 +488,24 @@ impl MatrixDnsResolver {
     }
 
     /// Cache management methods
-    async fn get_cached_well_known(&self, hostname: &str) -> Option<Option<crate::federation::well_known_client::WellKnownResponse>> {
+    async fn get_cached_well_known(
+        &self,
+        hostname: &str,
+    ) -> Option<Option<crate::federation::well_known_client::WellKnownResponse>> {
         let cache = self.well_known_cache.read().await;
-        if let Some(entry) = cache.get(hostname) {
-            if !entry.is_expired() {
-                return Some(entry.value.clone());
-            }
+        if let Some(entry) = cache.get(hostname)
+            && !entry.is_expired()
+        {
+            return Some(entry.value.clone());
         }
         None
     }
 
-    async fn cache_well_known(&self, hostname: &str, response: Option<crate::federation::well_known_client::WellKnownResponse>) {
+    async fn cache_well_known(
+        &self,
+        hostname: &str,
+        response: Option<crate::federation::well_known_client::WellKnownResponse>,
+    ) {
         let mut cache = self.well_known_cache.write().await;
         // Matrix spec: cache for 24-48 hours, we use 24 hours as default
         let ttl = Duration::from_secs(24 * 60 * 60); // 24 hours
@@ -485,10 +515,10 @@ impl MatrixDnsResolver {
 
     async fn get_cached_error(&self, server_name: &str) -> Option<DnsResolutionError> {
         let cache = self.error_cache.read().await;
-        if let Some(entry) = cache.get(server_name) {
-            if !entry.is_expired() {
-                return Some(entry.value.clone());
-            }
+        if let Some(entry) = cache.get(server_name)
+            && !entry.is_expired()
+        {
+            return Some(entry.value.clone());
         }
         None
     }
@@ -513,7 +543,9 @@ impl MatrixDnsResolver {
 
     async fn record_failure(&self, server_name: &str) {
         let mut backoff_map = self.backoff_state.write().await;
-        let state = backoff_map.entry(server_name.to_string()).or_insert_with(BackoffState::new);
+        let state = backoff_map
+            .entry(server_name.to_string())
+            .or_insert_with(BackoffState::new);
         state.record_failure();
     }
 
@@ -554,30 +586,34 @@ impl MatrixDnsResolver {
         debug!("Looking up SRV record: {}", srv_name);
 
         // Apply timeout to SRV lookup
-        let srv_lookup = tokio::time::timeout(
-            self.timeout,
-            self.dns_resolver.srv_lookup(&srv_name)
-        ).await
-            .map_err(|_| DnsResolutionError::ResolveError(format!("SRV lookup timeout for {}", srv_name)))?
-            .map_err(DnsResolutionError::from)?;
+        let srv_lookup =
+            tokio::time::timeout(self.timeout, self.dns_resolver.srv_lookup(&srv_name))
+                .await
+                .map_err(|_| {
+                    DnsResolutionError::ResolveError(format!("SRV lookup timeout for {}", srv_name))
+                })?
+                .map_err(DnsResolutionError::from)?;
 
         let srv_records = self.parse_srv_records(srv_lookup)?;
 
         if srv_records.is_empty() {
-            return Err(DnsResolutionError::NoServerFound(format!("No SRV records found for {}", srv_name)));
+            return Err(DnsResolutionError::NoServerFound(format!(
+                "No SRV records found for {}",
+                srv_name
+            )));
         }
 
         // Sort by priority (lower is higher priority), then by weight (higher is preferred)
         let mut sorted_records = srv_records;
-        sorted_records.sort_by(|a, b| {
-            a.priority.cmp(&b.priority)
-                .then_with(|| b.weight.cmp(&a.weight))
-        });
+        sorted_records
+            .sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| b.weight.cmp(&a.weight)));
 
         // Try each SRV record in order
         for srv_record in sorted_records {
-            debug!("Trying SRV record: {}:{} (priority: {}, weight: {})", 
-                   srv_record.target, srv_record.port, srv_record.priority, srv_record.weight);
+            debug!(
+                "Trying SRV record: {}:{} (priority: {}, weight: {})",
+                srv_record.target, srv_record.port, srv_record.priority, srv_record.weight
+            );
 
             match self.resolve_hostname_to_ip(&srv_record.target).await {
                 Ok(ip) => {
@@ -594,11 +630,11 @@ impl MatrixDnsResolver {
                         tls_hostname: hostname.to_string(),
                         resolution_method,
                     });
-                }
+                },
                 Err(e) => {
                     warn!("Failed to resolve SRV target {}: {}", srv_record.target, e);
                     continue;
-                }
+                },
             }
         }
 
@@ -606,7 +642,10 @@ impl MatrixDnsResolver {
     }
 
     /// Parse SRV lookup results into SrvRecord structs
-    fn parse_srv_records(&self, srv_lookup: hickory_resolver::lookup::SrvLookup) -> DnsResult<Vec<SrvRecord>> {
+    fn parse_srv_records(
+        &self,
+        srv_lookup: hickory_resolver::lookup::SrvLookup,
+    ) -> DnsResult<Vec<SrvRecord>> {
         let mut records = Vec::new();
 
         for srv in srv_lookup.iter() {
@@ -626,15 +665,16 @@ impl MatrixDnsResolver {
         debug!("Resolving hostname to IP: {}", hostname);
 
         // Apply timeout to DNS resolution
-        let lookup = tokio::time::timeout(
-            self.timeout,
-            self.dns_resolver.lookup_ip(hostname)
-        ).await
-            .map_err(|_| DnsResolutionError::ResolveError(format!("DNS resolution timeout for {}", hostname)))?
+        let lookup = tokio::time::timeout(self.timeout, self.dns_resolver.lookup_ip(hostname))
+            .await
+            .map_err(|_| {
+                DnsResolutionError::ResolveError(format!("DNS resolution timeout for {}", hostname))
+            })?
             .map_err(DnsResolutionError::from)?;
 
-        let ip = lookup.iter().next()
-            .ok_or_else(|| DnsResolutionError::NoServerFound(format!("No IP addresses found for {}", hostname)))?;
+        let ip = lookup.iter().next().ok_or_else(|| {
+            DnsResolutionError::NoServerFound(format!("No IP addresses found for {}", hostname))
+        })?;
 
         debug!("Resolved {} to {}", hostname, ip);
         Ok(ip)
@@ -659,13 +699,14 @@ impl MatrixDnsResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use reqwest::Client;
+    use std::sync::Arc;
 
     fn create_test_resolver() -> MatrixDnsResolver {
         let http_client = Arc::new(Client::new());
         let well_known_client = Arc::new(WellKnownClient::new(http_client));
-        MatrixDnsResolver::new(well_known_client).unwrap()
+        MatrixDnsResolver::new(well_known_client)
+            .expect("Test: Failed to create DNS resolver")
     }
 
     #[test]
@@ -673,32 +714,38 @@ mod tests {
         let resolver = create_test_resolver();
 
         // Test hostname only
-        let (hostname, port) = resolver.parse_server_name("example.com").unwrap();
+        let (hostname, port) = resolver.parse_server_name("example.com")
+            .expect("Test: Failed to parse valid server name 'example.com'");
         assert_eq!(hostname, "example.com");
         assert_eq!(port, None);
 
         // Test hostname with port
-        let (hostname, port) = resolver.parse_server_name("example.com:8448").unwrap();
+        let (hostname, port) = resolver.parse_server_name("example.com:8448")
+            .expect("Test: Failed to parse server name with port");
         assert_eq!(hostname, "example.com");
         assert_eq!(port, Some(8448));
 
         // Test IPv4 literal
-        let (hostname, port) = resolver.parse_server_name("192.168.1.1").unwrap();
+        let (hostname, port) = resolver.parse_server_name("192.168.1.1")
+            .expect("Test: Failed to parse IPv4 literal");
         assert_eq!(hostname, "192.168.1.1");
         assert_eq!(port, None);
 
         // Test IPv4 literal with port
-        let (hostname, port) = resolver.parse_server_name("192.168.1.1:8448").unwrap();
+        let (hostname, port) = resolver.parse_server_name("192.168.1.1:8448")
+            .expect("Test: Failed to parse IPv4 literal with port");
         assert_eq!(hostname, "192.168.1.1");
         assert_eq!(port, Some(8448));
 
         // Test IPv6 literal with brackets
-        let (hostname, port) = resolver.parse_server_name("[::1]:8448").unwrap();
+        let (hostname, port) = resolver.parse_server_name("[::1]:8448")
+            .expect("Test: Failed to parse IPv6 literal with brackets");
         assert_eq!(hostname, "::1");
         assert_eq!(port, Some(8448));
 
         // Test IPv6 literal without port
-        let (hostname, port) = resolver.parse_server_name("[2001:db8::1]").unwrap();
+        let (hostname, port) = resolver.parse_server_name("[2001:db8::1]")
+            .expect("Test: Failed to parse IPv6 literal without port");
         assert_eq!(hostname, "2001:db8::1");
         assert_eq!(port, None);
     }
@@ -708,14 +755,18 @@ mod tests {
         let resolver = create_test_resolver();
 
         // Test IPv4 literal
-        let resolved = resolver.resolve_server("192.168.1.1:8448").await.unwrap();
-        assert_eq!(resolved.ip_address, "192.168.1.1".parse::<IpAddr>().unwrap());
+        let resolved = resolver.resolve_server("192.168.1.1:8448").await
+            .expect("Test: Failed to resolve IPv4 literal");
+        assert_eq!(resolved.ip_address, "192.168.1.1".parse::<IpAddr>()
+            .expect("Test: Failed to parse IPv4 address"));
         assert_eq!(resolved.port, 8448);
         assert_eq!(resolved.resolution_method, ResolutionMethod::IpLiteral);
 
         // Test IPv6 literal
-        let resolved = resolver.resolve_server("[::1]:8448").await.unwrap();
-        assert_eq!(resolved.ip_address, "::1".parse::<IpAddr>().unwrap());
+        let resolved = resolver.resolve_server("[::1]:8448").await
+            .expect("Test: Failed to resolve IPv6 literal");
+        assert_eq!(resolved.ip_address, "::1".parse::<IpAddr>()
+            .expect("Test: Failed to parse IPv6 address"));
         assert_eq!(resolved.port, 8448);
         assert_eq!(resolved.resolution_method, ResolutionMethod::IpLiteral);
     }

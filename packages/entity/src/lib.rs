@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+
 pub mod types;
 pub mod utils;
 

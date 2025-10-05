@@ -2,9 +2,7 @@
 mod tests {
     use crate::security::cross_signing::{CrossSigningVerifier, TestCryptoProvider};
     use matryx_surrealdb::repository::cross_signing::{
-        CrossSigningKey,
-        CrossSigningKeys,
-        DeviceKey,
+        CrossSigningKey, CrossSigningKeys, DeviceKey,
     };
     use std::collections::HashMap;
     use std::sync::Arc;

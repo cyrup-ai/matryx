@@ -1,6 +1,6 @@
 use crate::config::ServerConfig;
-use uuid::Uuid;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use uuid::Uuid;
 
 /// Parsed Matrix server name with hostname, port, and IP literal detection
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +21,7 @@ impl ParsedServerName {
     pub fn cert_hostname(&self) -> &str {
         &self.hostname
     }
-    
+
     /// Get the Host header value for HTTP requests
     #[allow(dead_code)]
     pub fn host_header(&self) -> String {
@@ -31,7 +31,7 @@ impl ParsedServerName {
             format!("{}:{}", self.hostname, self.port)
         }
     }
-    
+
     /// Get the server name for Matrix protocol usage
     #[allow(dead_code)]
     pub fn server_name(&self) -> String {
@@ -50,7 +50,7 @@ pub fn get_server_name() -> &'static str {
         Err(_) => {
             tracing::error!("ServerConfig not initialized, falling back to localhost");
             "localhost"
-        }
+        },
     }
 }
 
@@ -126,7 +126,7 @@ pub fn is_valid_server_name(server_name: &str) -> bool {
     if server_name.is_empty() || server_name == "localhost" {
         return false;
     }
-    
+
     // Use the comprehensive parser for validation
     parse_server_name(server_name).is_ok()
 }
@@ -148,12 +148,12 @@ pub fn parse_server_name(server_name: &str) -> Result<ParsedServerName, String> 
     }
 
     let original = server_name.to_string();
-    
+
     // Handle IPv6 literals with brackets: [::1]:8080 or [::1]
     if server_name.starts_with('[') {
         return parse_ipv6_server_name(server_name, original);
     }
-    
+
     // Handle IPv4 and hostname formats: example.com:8080 or 192.168.1.1:8080
     parse_hostname_or_ipv4_server_name(server_name, original)
 }
@@ -163,30 +163,32 @@ fn parse_ipv6_server_name(server_name: &str, original: String) -> Result<ParsedS
     if !server_name.starts_with('[') {
         return Err("IPv6 address must start with '['".to_string());
     }
-    
+
     // Find the closing bracket
-    let bracket_end = server_name.find(']')
+    let bracket_end = server_name
+        .find(']')
         .ok_or_else(|| "IPv6 address missing closing ']'".to_string())?;
-    
+
     if bracket_end == 1 {
         return Err("IPv6 address cannot be empty".to_string());
     }
-    
+
     // Extract IPv6 address (skip opening '[' and take up to closing ']')
     let ipv6_part = server_name
         .strip_prefix('[')
         .and_then(|s| s.get(..bracket_end - 1))
         .ok_or_else(|| "Failed to extract IPv6 address".to_string())?;
-    
+
     // Get remainder after closing ']'
     let remainder = server_name
         .get(bracket_end + 1..)
         .ok_or_else(|| "Failed to get remainder after IPv6 address".to_string())?;
-    
+
     // Validate IPv6 address
-    let _ipv6: Ipv6Addr = ipv6_part.parse()
+    let _ipv6: Ipv6Addr = ipv6_part
+        .parse()
         .map_err(|_| format!("Invalid IPv6 address: {}", ipv6_part))?;
-    
+
     // Parse port if present
     let port = if remainder.is_empty() {
         8448
@@ -194,12 +196,13 @@ fn parse_ipv6_server_name(server_name: &str, original: String) -> Result<ParsedS
         if port_str.is_empty() {
             return Err("Port cannot be empty after ':'".to_string());
         }
-        port_str.parse::<u16>()
+        port_str
+            .parse::<u16>()
             .map_err(|_| format!("Invalid port number: {}", port_str))?
     } else {
         return Err("Invalid characters after IPv6 address".to_string());
     };
-    
+
     Ok(ParsedServerName {
         hostname: format!("[{}]", ipv6_part),
         port,
@@ -209,7 +212,10 @@ fn parse_ipv6_server_name(server_name: &str, original: String) -> Result<ParsedS
 }
 
 /// Parse hostname or IPv4 server name
-fn parse_hostname_or_ipv4_server_name(server_name: &str, original: String) -> Result<ParsedServerName, String> {
+fn parse_hostname_or_ipv4_server_name(
+    server_name: &str,
+    original: String,
+) -> Result<ParsedServerName, String> {
     // Split on the last colon to handle IPv4 addresses correctly
     let (hostname, port) = if let Some(colon_pos) = server_name.rfind(':') {
         let hostname_part = server_name
@@ -218,31 +224,32 @@ fn parse_hostname_or_ipv4_server_name(server_name: &str, original: String) -> Re
         let port_part = server_name
             .get(colon_pos + 1..)
             .ok_or_else(|| "Failed to extract port part".to_string())?;
-        
+
         if port_part.is_empty() {
             return Err("Port cannot be empty after ':'".to_string());
         }
-        
-        let port = port_part.parse::<u16>()
+
+        let port = port_part
+            .parse::<u16>()
             .map_err(|_| format!("Invalid port number: {}", port_part))?;
-            
+
         (hostname_part, port)
     } else {
         (server_name, 8448)
     };
-    
+
     if hostname.is_empty() {
         return Err("Hostname cannot be empty".to_string());
     }
-    
+
     // Check if it's an IPv4 literal
     let is_ip_literal = hostname.parse::<Ipv4Addr>().is_ok();
-    
+
     // Basic hostname validation for non-IP literals
     if !is_ip_literal && !is_valid_hostname(hostname) {
         return Err(format!("Invalid hostname: {}", hostname));
     }
-    
+
     Ok(ParsedServerName {
         hostname: hostname.to_string(),
         port,
@@ -256,12 +263,12 @@ fn is_valid_hostname(hostname: &str) -> bool {
     if hostname.is_empty() || hostname.len() > 253 {
         return false;
     }
-    
+
     // Must contain at least one dot for domain names
     if !hostname.contains('.') {
         return false;
     }
-    
+
     // Basic character validation
     hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         && !hostname.starts_with('-')
@@ -281,10 +288,10 @@ fn is_valid_hostname(hostname: &str) -> bool {
 pub fn is_ip_literal(hostname: &str) -> bool {
     // Check for IPv6 with brackets
     if hostname.starts_with('[') && hostname.ends_with(']') {
-        let ipv6_part = &hostname[1..hostname.len()-1];
+        let ipv6_part = &hostname[1..hostname.len() - 1];
         return ipv6_part.parse::<Ipv6Addr>().is_ok();
     }
-    
+
     // Check for IPv4
     hostname.parse::<Ipv4Addr>().is_ok()
 }
@@ -300,7 +307,7 @@ mod tests {
         assert_eq!(parsed.port, 8448);
         assert!(!parsed.is_ip_literal);
     }
-    
+
     #[test]
     fn test_parse_hostname_without_port() {
         let parsed = parse_server_name("example.com").unwrap();
@@ -308,7 +315,7 @@ mod tests {
         assert_eq!(parsed.port, 8448);
         assert!(!parsed.is_ip_literal);
     }
-    
+
     #[test]
     fn test_parse_ipv4_with_port() {
         let parsed = parse_server_name("192.168.1.1:8080").unwrap();
@@ -316,7 +323,7 @@ mod tests {
         assert_eq!(parsed.port, 8080);
         assert!(parsed.is_ip_literal);
     }
-    
+
     #[test]
     fn test_parse_ipv6_with_port() {
         let parsed = parse_server_name("[::1]:8080").unwrap();
@@ -324,7 +331,7 @@ mod tests {
         assert_eq!(parsed.port, 8080);
         assert!(parsed.is_ip_literal);
     }
-    
+
     #[test]
     fn test_parse_ipv6_without_port() {
         let parsed = parse_server_name("[2001:db8::1]").unwrap();
@@ -332,7 +339,7 @@ mod tests {
         assert_eq!(parsed.port, 8448);
         assert!(parsed.is_ip_literal);
     }
-    
+
     #[test]
     fn test_invalid_server_names() {
         assert!(parse_server_name("").is_err());
@@ -342,7 +349,7 @@ mod tests {
         assert!(parse_server_name("::1]").is_err());
         assert!(parse_server_name("invalid_hostname").is_err());
     }
-    
+
     #[test]
     fn test_is_ip_literal() {
         assert!(is_ip_literal("192.168.1.1"));
@@ -351,7 +358,7 @@ mod tests {
         assert!(!is_ip_literal("example.com"));
         assert!(!is_ip_literal("localhost"));
     }
-    
+
     #[test]
     fn test_enhanced_server_name_validation() {
         assert!(is_valid_server_name("example.com"));

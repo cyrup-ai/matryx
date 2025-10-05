@@ -5,15 +5,14 @@ use axum::{
 };
 use chrono::Utc;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tracing::{error, info};
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
 use matryx_surrealdb::KeyBackupRepository;
-
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tracing::{error, info};
 
 #[derive(Deserialize)]
 pub struct BackupVersionUpdateRequest {
@@ -56,13 +55,10 @@ pub async fn delete(
 
     // Delete backup version and all associated keys
     let backup_repo = KeyBackupRepository::new(state.db.clone());
-    backup_repo
-        .delete_backup_version(&user_id, &version)
-        .await
-        .map_err(|e| {
-            error!("Failed to delete backup version: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    backup_repo.delete_backup_version(&user_id, &version).await.map_err(|e| {
+        error!("Failed to delete backup version: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     info!("Backup version deleted: user={} version={}", user_id, version);
     Ok(Json(json!({})))
@@ -110,7 +106,7 @@ pub async fn get(
         Err(e) => {
             error!("Failed to query backup version: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        },
     }
 }
 

@@ -1,7 +1,9 @@
 use crate::repository::error::RepositoryError;
 use crate::repository::third_party::{BridgeConfig, BridgeStatus, BridgeStatistics};
 use chrono::{DateTime, Utc};
+use std::time::Duration;
 use surrealdb::{Connection, Surreal};
+use tokio::time::Instant;
 
 // TASK17 SUBTASK 3: Create BridgeRepository
 pub struct BridgeRepository<C: Connection> {
@@ -183,7 +185,7 @@ impl<C: Connection> BridgeRepository<C> {
             })?;
 
         // Perform health check by attempting to connect to bridge URL
-        let health_status = match self.perform_health_check(&bridge.url).await {
+        let health_status = match self.perform_health_check(&bridge.url, &bridge.hs_token).await {
             Ok(response_time) => {
                 if response_time < 1000 { // Less than 1 second
                     crate::repository::third_party::BridgeHealth::Healthy
@@ -210,11 +212,53 @@ impl<C: Connection> BridgeRepository<C> {
     }
 
     /// Perform actual health check against bridge URL (simplified implementation)
-    async fn perform_health_check(&self, _bridge_url: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        // Simplified health check - in production this would make HTTP requests
-        // For now, simulate a health check with random response time
-        let response_time = 500; // Simulate 500ms response time
-        Ok(response_time)
+    async fn perform_health_check(&self, bridge_url: &str, hs_token: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        // Create HTTP client with 5 second timeout
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        
+        // Generate unique transaction ID
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        
+        // Construct ping endpoint URL
+        let ping_url = format!("{}/_matrix/app/v1/ping", bridge_url.trim_end_matches('/'));
+        
+        // Create request body per Matrix spec
+        let request_body = serde_json::json!({
+            "transaction_id": transaction_id
+        });
+        
+        // Start timing
+        let start = Instant::now();
+        
+        // Make HTTP POST request with authentication
+        let response = client
+            .post(&ping_url)
+            .header("Authorization", format!("Bearer {}", hs_token))
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        // Calculate response time in milliseconds
+        let response_time_ms = start.elapsed().as_millis() as u64;
+        
+        // Check response status
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            
+            return Err(format!(
+                "Bridge health check failed: HTTP {} - {}",
+                status.as_u16(),
+                error_body
+            ).into());
+        }
+        
+        // Verify response is valid JSON (should be empty object {})
+        let _response_body: serde_json::Value = response.json().await?;
+        
+        Ok(response_time_ms)
     }
 
     /// Track bridge message throughput and errors

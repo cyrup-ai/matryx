@@ -9,8 +9,13 @@ mod sync_tests {
     use chrono::Utc;
 
     async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("surrealkv://test_data/sync_test.db").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
+        let db = surrealdb::engine::any::connect("surrealkv://test_data/sync_test.db")
+            .await
+            .expect("Failed to connect to test database");
+        db.use_ns("test")
+            .use_db("test")
+            .await
+            .expect("Failed to set test database namespace");
         db
     }
 
@@ -32,7 +37,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting member count for empty room
-        let count = sync_repo.get_room_member_count(room_id).await.unwrap();
+        let count = sync_repo
+            .get_room_member_count(room_id)
+            .await
+            .expect("Failed to get room member count");
         assert_eq!(count, 0);
     }
 
@@ -44,7 +52,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting invited member count for empty room
-        let count = sync_repo.get_room_invited_member_count(room_id).await.unwrap();
+        let count = sync_repo
+            .get_room_invited_member_count(room_id)
+            .await
+            .expect("Failed to get room invited member count");
         assert_eq!(count, 0);
     }
 
@@ -56,7 +67,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting timeline events for empty room
-        let events = sync_repo.get_room_timeline_events(room_id, None).await.unwrap();
+        let events = sync_repo
+            .get_room_timeline_events(room_id, None)
+            .await
+            .expect("Failed to get room timeline events");
         assert_eq!(events.len(), 0);
     }
 
@@ -68,7 +82,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting state events for empty room
-        let events = sync_repo.get_room_state_events(room_id, None).await.unwrap();
+        let events = sync_repo
+            .get_room_state_events(room_id, None)
+            .await
+            .expect("Failed to get room state events");
         assert_eq!(events.len(), 0);
     }
 
@@ -80,7 +97,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting ephemeral events for empty room
-        let events = sync_repo.get_room_ephemeral_events(room_id, None).await.unwrap();
+        let events = sync_repo
+            .get_room_ephemeral_events(room_id, None)
+            .await
+            .expect("Failed to get room ephemeral events");
         assert_eq!(events.len(), 0);
     }
 
@@ -93,7 +113,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting room account data for empty room
-        let events = sync_repo.get_room_account_data_events(user_id, room_id, None).await.unwrap();
+        let events = sync_repo
+            .get_room_account_data_events(user_id, room_id, None)
+            .await
+            .expect("Failed to get room account data events");
         assert_eq!(events.len(), 0);
     }
 
@@ -106,7 +129,10 @@ mod sync_tests {
         let room_id = "!test:example.com";
         
         // Test getting unread notifications for empty room
-        let counts = sync_repo.get_room_unread_notifications(user_id, room_id).await.unwrap();
+        let counts = sync_repo
+            .get_room_unread_notifications(user_id, room_id)
+            .await
+            .expect("Failed to get room unread notifications");
         assert_eq!(counts.highlight_count, Some(0));
         assert_eq!(counts.notification_count, Some(0));
     }
@@ -119,7 +145,10 @@ mod sync_tests {
         let user_id = "@test:example.com";
         
         // Test getting presence events for user with no presence data
-        let events = presence_repo.get_user_presence_events(user_id, None).await.unwrap();
+        let events = presence_repo
+            .get_user_presence_events(user_id, None)
+            .await
+            .expect("Failed to get user presence events");
         assert_eq!(events.len(), 0);
     }
 
@@ -143,7 +172,10 @@ mod sync_tests {
         let user_id = "@test:example.com";
         
         // Test getting last active time for user with no presence data
-        let last_active = presence_repo.get_user_last_active(user_id).await.unwrap();
+        let last_active = presence_repo
+            .get_user_last_active(user_id)
+            .await
+            .expect("Failed to get user last active time");
         assert!(last_active.is_none());
     }
 
@@ -155,7 +187,10 @@ mod sync_tests {
         let cutoff = Utc::now();
         
         // Test cleanup of old presence events
-        let cleaned_count = presence_repo.cleanup_old_presence_events(cutoff).await.unwrap();
+        let cleaned_count = presence_repo
+            .cleanup_old_presence_events(cutoff)
+            .await
+            .expect("Failed to cleanup old presence events");
         assert_eq!(cleaned_count, 0); // No events to clean in empty database
     }
 
@@ -169,7 +204,7 @@ mod sync_tests {
         let result = sync_service.get_full_sync_response(user_id, None).await;
         assert!(result.is_ok());
         
-        let sync_response = result.unwrap();
+        let sync_response = result.expect("Expected full sync response");
         assert!(!sync_response.next_batch.is_empty());
     }
 
@@ -183,7 +218,7 @@ mod sync_tests {
         let result = sync_service.get_presence_sync_data(user_id, None).await;
         assert!(result.is_ok());
         
-        let presence_events = result.unwrap();
+        let presence_events = result.expect("Expected presence sync data");
         assert_eq!(presence_events.len(), 0); // No presence data in empty database
     }
 
@@ -198,7 +233,7 @@ mod sync_tests {
         let result = sync_service.get_room_sync_data(user_id, room_id, None).await;
         assert!(result.is_ok());
         
-        let room_sync_data = result.unwrap();
+        let room_sync_data = result.expect("Expected room sync data");
         assert_eq!(room_sync_data.room_id, room_id);
     }
 }

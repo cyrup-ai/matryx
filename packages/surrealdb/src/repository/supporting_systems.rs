@@ -52,6 +52,7 @@ pub enum RoomKeyBackupResponse {
 }
 
 pub struct SupportingSystemsService {
+    db: Surreal<Any>,
     reactions_repo: ReactionsRepository<Any>,
     server_notices_repo: ServerNoticesRepository<Any>,
     crypto_keys_repo: CryptoKeysRepository<Any>,
@@ -64,6 +65,7 @@ pub struct SupportingSystemsService {
 impl SupportingSystemsService {
     pub fn new(db: Surreal<Any>) -> Self {
         Self {
+            db: db.clone(),
             reactions_repo: ReactionsRepository::new(db.clone()),
             server_notices_repo: ServerNoticesRepository::new(db.clone()),
             crypto_keys_repo: CryptoKeysRepository::new(db.clone()),
@@ -306,10 +308,17 @@ impl SupportingSystemsService {
     pub async fn upload_signatures(
         &self,
         user_id: &str,
+        keys: &Value,
         signatures: &HashMap<String, HashMap<String, Value>>,
     ) -> Result<(), RepositoryError> {
-        // Validate signatures
-        if !self.crypto_keys_repo.validate_key_signatures(user_id, &signatures.iter().map(|(k, v)| (k.clone(), v.values().next().cloned().unwrap_or_default())).collect()).await? {
+        // Extract signatures from the nested HashMap for validation
+        let flattened_signatures: HashMap<String, Value> = signatures
+            .iter()
+            .flat_map(|(_, sig_map)| sig_map.clone())
+            .collect();
+
+        // Validate signatures per Matrix spec (verify against canonical JSON)
+        if !self.crypto_keys_repo.validate_key_signatures(user_id, keys, &flattened_signatures).await? {
             return Err(RepositoryError::Validation {
                 field: "signatures".to_string(),
                 message: "Invalid key signatures".to_string(),
@@ -371,8 +380,108 @@ impl SupportingSystemsService {
         user_id: &str,
         device_id: &str,
     ) -> Result<HashMap<String, u32>, RepositoryError> {
-        // This would query the database to count remaining one-time keys by algorithm
-        // For now, return empty counts
-        Ok(HashMap::new())
+        self.crypto_keys_repo.get_one_time_key_counts(user_id, device_id).await
     }
+
+    /// Get system statistics and counts
+    pub async fn get_system_counts(&self) -> Result<SystemCounts, RepositoryError> {
+        // Count total users
+        let users_query = "SELECT count() as count FROM users";
+        let mut users_result = self.db.query(users_query).await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_users".to_string(),
+            })?;
+        let users_count_data: Vec<serde_json::Value> = users_result.take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_users_parse".to_string(),
+            })?;
+        let total_users = users_count_data
+            .first()
+            .and_then(|v| v.get("count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        // Count total rooms by type
+        let rooms_query = "SELECT room_type, count() as count FROM room GROUP BY room_type";
+        let mut rooms_result = self.db.query(rooms_query).await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_rooms".to_string(),
+            })?;
+        let rooms_data: Vec<serde_json::Value> = rooms_result.take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_rooms_parse".to_string(),
+            })?;
+
+        let mut room_counts = HashMap::new();
+        let mut total_rooms = 0u64;
+        for room_data in rooms_data {
+            if let (Some(room_type), Some(count)) = (
+                room_data.get("room_type").and_then(|v| v.as_str()),
+                room_data.get("count").and_then(|v| v.as_u64()),
+            ) {
+                room_counts.insert(room_type.to_string(), count);
+                total_rooms += count;
+            }
+        }
+
+        // Count total events
+        let events_query = "SELECT count() as count FROM event";
+        let mut events_result = self.db.query(events_query).await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_events".to_string(),
+            })?;
+        let events_count_data: Vec<serde_json::Value> = events_result.take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_events_parse".to_string(),
+            })?;
+        let total_events = events_count_data
+            .first()
+            .and_then(|v| v.get("count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        // Count federation peers (distinct servers from events)
+        let peers_query = "SELECT count(DISTINCT server_name) as count FROM (
+            SELECT string::split(sender, ':')[1] as server_name FROM event WHERE sender LIKE '%:%'
+        )";
+        let mut peers_result = self.db.query(peers_query).await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_federation_peers".to_string(),
+            })?;
+        let peers_count_data: Vec<serde_json::Value> = peers_result.take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "count_federation_peers_parse".to_string(),
+            })?;
+        let federation_peers = peers_count_data
+            .first()
+            .and_then(|v| v.get("count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        Ok(SystemCounts {
+            total_users,
+            total_rooms,
+            room_counts,
+            total_events,
+            federation_peers,
+        })
+    }
+}
+
+/// System statistics and counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCounts {
+    pub total_users: u64,
+    pub total_rooms: u64,
+    pub room_counts: HashMap<String, u64>,
+    pub total_events: u64,
+    pub federation_peers: u64,
 }

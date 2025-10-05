@@ -277,69 +277,24 @@ impl RoomRepository {
         &self,
         room_id: &str,
         event: &Event,
+        auth_service: &crate::repository::room_authorization::RoomAuthorizationService,
     ) -> Result<bool, RepositoryError> {
-        // Get room power levels and validate authorization
-        let query = "
-            SELECT * FROM event
-            WHERE room_id = $room_id
-            AND event_type = 'm.room.power_levels'
-            AND state_key = ''
-            ORDER BY origin_server_ts DESC
-            LIMIT 1
-        ";
-        let mut result = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
-        let power_level_events: Vec<Event> = result.take(0)?;
-
-        if power_level_events.is_empty() {
-            // No power level event found, use default Matrix power levels
-            return self.validate_with_default_power_levels(event).await;
-        }
-
-        // Get the sender's current power level
-        let sender_power_query = "
-            SELECT * FROM room_memberships
-            WHERE room_id = $room_id AND user_id = $sender
-            AND membership = 'join'
-        ";
-        let mut sender_result = self
-            .db
-            .query(sender_power_query)
-            .bind(("room_id", room_id.to_string()))
-            .bind(("sender", event.sender.clone()))
+        let auth_result = auth_service
+            .check_room_access(room_id, &event.sender, &event.event_type)
             .await?;
-        let memberships: Vec<Value> = sender_result.take(0)?;
 
-        if memberships.is_empty() {
-            // Sender is not a member of the room
-            return Ok(false);
+        if !auth_result.authorized {
+            return Err(RepositoryError::Forbidden {
+                reason: auth_result.reason.unwrap_or_else(|| "Unauthorized".to_string()),
+            });
         }
 
-        // Basic authorization check based on event type
-        // This is a simplified version - full Matrix power level logic would be more complex
-        match event.event_type.as_str() {
-            "m.room.message" | "m.room.encrypted" => {
-                // Regular messages require basic membership
-                Ok(true)
-            },
-            "m.room.name" | "m.room.topic" | "m.room.avatar" => {
-                // Room state changes typically require higher power levels
-                // For now, allow if user is joined (simplified)
-                Ok(true)
-            },
-            "m.room.power_levels" | "m.room.server_acl" => {
-                // Administrative events require high power levels
-                // This would need to check actual power level values
-                Ok(true)
-            },
-            _ => {
-                // Unknown event types are allowed for joined members
-                Ok(true)
-            },
-        }
+        Ok(true)
     }
 
     /// Validate authorization using default Matrix power levels
-    async fn validate_with_default_power_levels(
+    /// This is used as a fallback when explicit power levels are not configured
+    pub async fn validate_with_default_power_levels(
         &self,
         event: &Event,
     ) -> Result<bool, RepositoryError> {
@@ -1366,12 +1321,21 @@ impl RoomRepository {
         // Get room state at event
         let state = self.get_room_state_at_event(room_id, event_id).await?;
 
+        // Generate tokens from events_before and events_after combined
+        let mut all_events = events_before.clone();
+        if let Some(ref evt) = target_event {
+            all_events.push(evt.clone());
+        }
+        all_events.extend(events_after.clone());
+
+        let (start, end) = crate::pagination::generate_timeline_tokens(&all_events, room_id);
+
         Ok(ContextResponse {
             events_before,
             event: target_event,
             events_after,
-            start: None, // TODO: Implement pagination tokens
-            end: None,   // TODO: Implement pagination tokens
+            start,
+            end,
             state,
         })
     }
@@ -1440,28 +1404,24 @@ impl RoomRepository {
                     members_response.joined.insert(user_id, member_info);
                 },
                 "leave" => {
-                    if members_response.left.is_none() {
-                        members_response.left = Some(std::collections::HashMap::new());
-                    }
-                    members_response.left.as_mut().unwrap().insert(user_id, member_info);
+                    members_response.left
+                        .get_or_insert_with(std::collections::HashMap::new)
+                        .insert(user_id, member_info);
                 },
                 "invite" => {
-                    if members_response.invited.is_none() {
-                        members_response.invited = Some(std::collections::HashMap::new());
-                    }
-                    members_response.invited.as_mut().unwrap().insert(user_id, member_info);
+                    members_response.invited
+                        .get_or_insert_with(std::collections::HashMap::new)
+                        .insert(user_id, member_info);
                 },
                 "ban" => {
-                    if members_response.banned.is_none() {
-                        members_response.banned = Some(std::collections::HashMap::new());
-                    }
-                    members_response.banned.as_mut().unwrap().insert(user_id, member_info);
+                    members_response.banned
+                        .get_or_insert_with(std::collections::HashMap::new)
+                        .insert(user_id, member_info);
                 },
                 "knock" => {
-                    if members_response.knocked.is_none() {
-                        members_response.knocked = Some(std::collections::HashMap::new());
-                    }
-                    members_response.knocked.as_mut().unwrap().insert(user_id, member_info);
+                    members_response.knocked
+                        .get_or_insert_with(std::collections::HashMap::new)
+                        .insert(user_id, member_info);
                 },
                 _ => {},
             }
@@ -1640,14 +1600,51 @@ impl RoomRepository {
     }
 
     /// Get room hierarchy (spaces)
+    /// Get room hierarchy (spaces)
     pub async fn get_room_hierarchy(
         &self,
         room_id: &str,
         suggested_only: bool,
         max_depth: Option<u32>,
     ) -> Result<HierarchyResponse, RepositoryError> {
-        // This is a simplified implementation
-        // Full implementation would traverse the space hierarchy recursively
+        let mut visited = std::collections::HashSet::new();
+        self.get_room_hierarchy_internal(room_id, suggested_only, max_depth, &mut visited).await
+    }
+
+    /// Internal implementation of get_room_hierarchy with visited tracking for cycle detection and deduplication
+    async fn get_room_hierarchy_internal(
+        &self,
+        room_id: &str,
+        suggested_only: bool,
+        max_depth: Option<u32>,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<HierarchyResponse, RepositoryError> {
+        use matryx_entity::types::SpaceHierarchyParentRoom;
+        
+        // Cycle detection: if we've already visited this room, return empty result to break the cycle
+        if visited.contains(room_id) {
+            let empty_room = SpaceHierarchyParentRoom {
+                room_id: room_id.to_string(),
+                canonical_alias: None,
+                children_state: Vec::new(),
+                room_type: None,
+                name: None,
+                num_joined_members: 0,
+                topic: None,
+                world_readable: false,
+                guest_can_join: false,
+                join_rule: None,
+                avatar_url: None,
+                allowed_room_ids: None,
+                encryption: None,
+                room_version: None,
+            };
+            return Ok(HierarchyResponse::new(Vec::new(), Vec::new(), empty_room));
+        }
+        
+        // Mark this room as visited immediately to prevent recursion into it
+        visited.insert(room_id.to_string());
+        
         let room = self.get_by_id(room_id).await?.ok_or_else(|| {
             RepositoryError::NotFound {
                 entity_type: "Room".to_string(),
@@ -1676,6 +1673,11 @@ impl RoomRepository {
         if max_depth.is_none_or(|depth| depth > 0) {
             for child in children {
                 if let Some(child_room_id) = child.get("child_room_id").and_then(|v| v.as_str()) {
+                    // Deduplication check: skip if already visited
+                    if visited.contains(child_room_id) {
+                        continue;
+                    }
+                    
                     // Try to get child room details
                     if let Ok(Some(child_room)) = self.get_by_id(child_room_id).await {
                         use matryx_entity::types::SpaceHierarchyChildRoomsChunk;
@@ -1697,29 +1699,43 @@ impl RoomRepository {
                         };
                         child_chunks.push(chunk);
                         
+                        // Mark child as visited when added
+                        visited.insert(child_room_id.to_string());
+                        
                         // Recursively get children if max_depth allows
                         if let Some(depth) = max_depth {
                             if depth > 1 {
-                                let child_hierarchy = Box::pin(self.get_room_hierarchy(
+                                let child_hierarchy = Box::pin(self.get_room_hierarchy_internal(
                                     child_room_id, 
                                     suggested_only, 
-                                    Some(depth - 1)
+                                    Some(depth - 1),
+                                    visited
                                 )).await;
                                 if let Ok(child_hierarchy) = child_hierarchy {
-                                    // Merge child hierarchies (simplified - in production this would be more complex)
-                                    child_chunks.extend(child_hierarchy.children);
+                                    // Merge child hierarchies with deduplication
+                                    for child in child_hierarchy.children {
+                                        if visited.insert(child.room_id.clone()) {
+                                            child_chunks.push(child);
+                                        }
+                                    }
                                 }
                             }
                         } else {
                             // No depth limit, continue recursion (but limit to prevent infinite loops)
                             if child_chunks.len() < 100 { // Safety limit
-                                let child_hierarchy = Box::pin(self.get_room_hierarchy(
+                                let child_hierarchy = Box::pin(self.get_room_hierarchy_internal(
                                     child_room_id, 
                                     suggested_only, 
-                                    Some(10) // Reasonable default depth limit
+                                    Some(10), // Reasonable default depth limit
+                                    visited
                                 )).await;
                                 if let Ok(child_hierarchy) = child_hierarchy {
-                                    child_chunks.extend(child_hierarchy.children);
+                                    // Merge child hierarchies with deduplication
+                                    for child in child_hierarchy.children {
+                                        if visited.insert(child.room_id.clone()) {
+                                            child_chunks.push(child);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1731,8 +1747,7 @@ impl RoomRepository {
             }
         }
 
-        // Create parent room representation (simplified)
-        use matryx_entity::types::SpaceHierarchyParentRoom;
+        // Create parent room representation
         let parent_room = SpaceHierarchyParentRoom {
             room_id: room.room_id.clone(),
             canonical_alias: room.canonical_alias,

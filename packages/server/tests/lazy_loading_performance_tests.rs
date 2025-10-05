@@ -6,13 +6,19 @@ use std::time::Duration;
 use surrealdb::{Surreal, engine::any::Any};
 
 async fn setup_test_database() -> Surreal<Any> {
-    let db = surrealdb::engine::any::connect("surrealkv://test_data/lazy_loading_test.db").await.unwrap();
-    db.use_ns("test").use_db("test").await.unwrap();
+    let db = surrealdb::engine::any::connect("surrealkv://test_data/lazy_loading_test.db")
+        .await
+        .expect("Test setup: failed to connect to test database");
+    db.use_ns("test").use_db("test").await
+        .expect("Test setup: failed to select test namespace");
 
     // Apply database schema for testing
-    db.query("DEFINE TABLE room_membership SCHEMALESS").await.unwrap();
-    db.query("DEFINE TABLE power_levels SCHEMALESS").await.unwrap();
-    db.query("DEFINE TABLE rooms SCHEMALESS").await.unwrap();
+    db.query("DEFINE TABLE room_membership SCHEMALESS").await
+        .expect("Test setup: failed to create room_membership table");
+    db.query("DEFINE TABLE power_levels SCHEMALESS").await
+        .expect("Test setup: failed to create power_levels table");
+    db.query("DEFINE TABLE rooms SCHEMALESS").await
+        .expect("Test setup: failed to create rooms table");
 
     db
 }
@@ -97,13 +103,14 @@ async fn test_lazy_loading_performance_optimization() {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
             .await
-            .unwrap();
+            .expect("Test setup: failed to create membership event");
     }
 
     // Add power users (admins and moderators)
     for i in 0..5 {
         let admin_id = format!("@admin{}:example.com", i);
-        create_power_level_event(&test_db, room_id, &admin_id, 100).await.unwrap(); // Admin
+        create_power_level_event(&test_db, room_id, &admin_id, 100).await
+            .expect("Test setup: failed to create power level event"); // Admin
     }
 
     // Add timeline events from specific senders
@@ -123,7 +130,7 @@ async fn test_lazy_loading_performance_optimization() {
     let essential_members_1 = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: lazy loading cache should return essential members");
     let first_duration = start_time.elapsed();
 
     // Verify essential members are correctly identified
@@ -137,7 +144,7 @@ async fn test_lazy_loading_performance_optimization() {
     let essential_members_2 = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: lazy loading cache should return essential members on cache hit");
     let second_duration = start_time.elapsed();
 
     // Verify cache hit performance improvement
@@ -166,16 +173,16 @@ async fn test_database_level_optimization() {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
             .await
-            .unwrap();
+            .expect("Test setup: failed to create membership event");
     }
 
     // Create power level hierarchy
     create_power_level_event(&test_db, room_id, "@admin1:example.com", 100)
         .await
-        .unwrap();
+        .expect("Test setup: failed to create power level event for admin");
     create_power_level_event(&test_db, room_id, "@mod1:example.com", 50)
         .await
-        .unwrap();
+        .expect("Test setup: failed to create power level event for moderator");
 
     let timeline_senders = vec![
         "@member5:example.com".to_string(),
@@ -187,7 +194,7 @@ async fn test_database_level_optimization() {
     let essential_members = membership_repo
         .get_essential_members_optimized(room_id, user_id, &timeline_senders)
         .await
-        .unwrap();
+        .expect("Test execution: database query should return essential members");
     let query_duration = start_time.elapsed();
 
     // Verify results
@@ -216,7 +223,7 @@ async fn test_cache_invalidation_on_membership_changes() {
     let _ = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: cache should return essential members for invalidation test");
 
     // Verify cache has data
     let cache_stats_before = lazy_cache.get_cache_stats().await;
@@ -247,7 +254,7 @@ async fn test_memory_usage_within_limits() {
             let member_id = format!("@member{}:example.com", i);
             create_membership_event(&test_db, &room_id, &member_id, "join")
                 .await
-                .unwrap();
+                .expect("Test setup: failed to create membership event for memory usage test");
         }
 
         // Cache essential members for this room
@@ -283,7 +290,7 @@ async fn test_cache_hit_ratio_targets() {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
             .await
-            .unwrap();
+            .expect("Test setup: failed to create membership event");
     }
 
     let timeline_senders = vec!["@member1:example.com".to_string()];
@@ -292,14 +299,14 @@ async fn test_cache_hit_ratio_targets() {
     let _ = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: cache should return essential members on first request");
 
     // Multiple subsequent requests (should be cache hits)
     for _ in 0..10 {
         let _ = lazy_cache
             .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
             .await
-            .unwrap();
+            .expect("Test execution: cache should return essential members on subsequent requests");
     }
 
     // Check cache hit ratio
@@ -328,13 +335,14 @@ async fn test_large_room_scalability() {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
             .await
-            .unwrap();
+            .expect("Test setup: failed to create membership event");
     }
 
     // Add power users
     for i in 0..10 {
         let admin_id = format!("@admin{}:example.com", i);
-        create_power_level_event(&test_db, room_id, &admin_id, 100).await.unwrap();
+        create_power_level_event(&test_db, room_id, &admin_id, 100).await
+            .expect("Test setup: failed to create power level event for large room scalability test");
     }
 
     let timeline_senders = vec![
@@ -347,7 +355,7 @@ async fn test_large_room_scalability() {
     let essential_members = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: cache should return essential members for large room scalability test");
     let processing_time = start_time.elapsed();
 
     // Verify scalability targets
@@ -379,7 +387,7 @@ async fn test_complete_lazy_loading_pipeline() {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
             .await
-            .unwrap();
+            .expect("Test setup: failed to create membership event");
     }
 
     // Create test events including membership and message events
@@ -419,7 +427,7 @@ async fn test_complete_lazy_loading_pipeline() {
     let essential_members = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
         .await
-        .unwrap();
+        .expect("Test execution: cache should return essential members for complete pipeline test");
 
     // Filter events like the actual implementation would
     let filtered_events: Vec<Event> = all_events

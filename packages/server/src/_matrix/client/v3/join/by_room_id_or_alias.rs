@@ -14,11 +14,7 @@ use crate::{
     auth::{MatrixAuth, extract_matrix_auth},
 };
 use matryx_surrealdb::repository::{
-    EventRepository,
-    MembershipRepository,
-    RoomRepository,
-    UserRepository,
-    error::RepositoryError,
+    EventRepository, MembershipRepository, RoomRepository, UserRepository, error::RepositoryError,
     room_join::RoomJoinService,
 };
 
@@ -117,31 +113,26 @@ pub async fn post(
             );
             Ok(Json(JoinResponse { room_id: result.room_id }))
         },
-        Err(e) => {
-            match e {
-                RepositoryError::NotFound { .. } => {
-                    warn!("Room join failed - room not found: {}", room_id_or_alias);
-                    Err(StatusCode::NOT_FOUND)
-                },
-                RepositoryError::Unauthorized { .. } => {
-                    warn!(
-                        "Room join failed - user {} not authorized to join room {}",
-                        user_id, room_id_or_alias
-                    );
-                    Err(StatusCode::FORBIDDEN)
-                },
-                RepositoryError::Validation { .. } => {
-                    warn!(
-                        "Room join failed - invalid room identifier format: {}",
-                        room_id_or_alias
-                    );
-                    Err(StatusCode::BAD_REQUEST)
-                },
-                _ => {
-                    error!("Room join failed - internal error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                },
-            }
+        Err(e) => match e {
+            RepositoryError::NotFound { .. } => {
+                warn!("Room join failed - room not found: {}", room_id_or_alias);
+                Err(StatusCode::NOT_FOUND)
+            },
+            RepositoryError::Unauthorized { .. } => {
+                warn!(
+                    "Room join failed - user {} not authorized to join room {}",
+                    user_id, room_id_or_alias
+                );
+                Err(StatusCode::FORBIDDEN)
+            },
+            RepositoryError::Validation { .. } => {
+                warn!("Room join failed - invalid room identifier format: {}", room_id_or_alias);
+                Err(StatusCode::BAD_REQUEST)
+            },
+            _ => {
+                error!("Room join failed - internal error: {}", e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            },
         },
     }
 }

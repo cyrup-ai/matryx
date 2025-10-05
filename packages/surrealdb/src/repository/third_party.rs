@@ -410,18 +410,64 @@ impl<C: Connection> ThirdPartyRepository<C> {
     }
 
     /// Lookup third-party locations by protocol and search fields
-    #[allow(dead_code)]
-    pub async fn lookup_third_party_location(&self, _protocol: &str, _search_fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyLocation>, RepositoryError> {
-        // TODO: Fix lifetime issues
-        Ok(Vec::new())
+    pub async fn lookup_third_party_location(&self, protocol: &str, search_fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyLocation>, RepositoryError> {
+        // Build dynamic query based on search fields
+        let mut query = "SELECT * FROM thirdparty_locations WHERE protocol = $protocol".to_string();
+        
+        for (idx, field_name) in search_fields.keys().enumerate() {
+            query.push_str(&format!(" AND fields.{} = $field_{}", field_name, idx));
+        }
+        
+        let mut db_query = self.db.query(&query).bind(("protocol", protocol.to_string()));
+        
+        for (idx, (_field_name, field_value)) in search_fields.iter().enumerate() {
+            db_query = db_query.bind((format!("field_{}", idx), field_value.clone()));
+        }
+        
+        let mut result = db_query
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "lookup_third_party_location".to_string(),
+            })?;
+        
+        let locations: Vec<ThirdPartyLocation> = result.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "lookup_third_party_location_parse".to_string(),
+        })?;
+        
+        Ok(locations)
     }
 
 
     /// Lookup third-party users by protocol and search fields
-    #[allow(dead_code)]
-    pub async fn lookup_third_party_user(&self, _protocol: &str, _search_fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyUser>, RepositoryError> {
-        // TODO: Fix lifetime issues
-        Ok(Vec::new())
+    pub async fn lookup_third_party_user(&self, protocol: &str, search_fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyUser>, RepositoryError> {
+        // Build dynamic query based on search fields
+        let mut query = "SELECT * FROM thirdparty_users WHERE protocol = $protocol".to_string();
+        
+        for (idx, field_name) in search_fields.keys().enumerate() {
+            query.push_str(&format!(" AND fields.{} = $field_{}", field_name, idx));
+        }
+        
+        let mut db_query = self.db.query(&query).bind(("protocol", protocol.to_string()));
+        
+        for (idx, (_field_name, field_value)) in search_fields.iter().enumerate() {
+            db_query = db_query.bind((format!("field_{}", idx), field_value.clone()));
+        }
+        
+        let mut result = db_query
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "lookup_third_party_user".to_string(),
+            })?;
+        
+        let users: Vec<ThirdPartyUser> = result.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "lookup_third_party_user_parse".to_string(),
+        })?;
+        
+        Ok(users)
     }
 
 

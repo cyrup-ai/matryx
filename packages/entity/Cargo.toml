@@ -18,7 +18,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 bcrypt = "0.17.1"
 
 # Error handling
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 
 # URL utilities
 url = { version = "2.5", features = ["serde"] }

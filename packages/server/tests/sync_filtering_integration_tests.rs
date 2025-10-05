@@ -13,24 +13,30 @@ mod common;
 /// Test complete sync filtering integration with all filter types
 #[tokio::test]
 async fn test_complete_sync_filtering_integration() {
-    let test_db = TestDatabase::new().await.expect("Failed to create test database");
+    let test_db = TestDatabase::new().await
+        .expect("Test setup: failed to create test database for sync filtering tests");
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app).expect("Failed to create test server");
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server for sync filtering integration tests");
 
     // Create room with diverse event types
     let room_id = "!test:example.com";
     let user_id = "@user:example.com";
 
     // Create test events in the room
-    create_test_room_with_events(&test_db, room_id, vec![
-        ("m.room.message", json!({"body": "Hello world"})),
-        ("m.room.member", json!({"membership": "join"})),
-        ("m.typing", json!({"user_ids": [user_id]})),
-        ("m.room.message", json!({"body": "Check out https://matrix.org"})),
-        ("m.room.message", json!({"body": "Another message"})),
-    ])
+    create_test_room_with_events(
+        &test_db,
+        room_id,
+        vec![
+            ("m.room.message", json!({"body": "Hello world"})),
+            ("m.room.member", json!({"membership": "join"})),
+            ("m.typing", json!({"user_ids": [user_id]})),
+            ("m.room.message", json!({"body": "Check out https://matrix.org"})),
+            ("m.room.message", json!({"body": "Another message"})),
+        ],
+    )
     .await
-    .expect("Failed to create test events");
+    .expect("Test setup: failed to create test events for sync filtering tests");
 
     // Test comprehensive filter
     let filter = MatrixFilter {
@@ -65,47 +71,46 @@ async fn test_complete_sync_filtering_integration() {
 
     // Verify filtering was applied correctly
     if let Some(joined_rooms) = sync_response["rooms"]["join"].as_object()
-        && let Some(room_response) = joined_rooms.get(room_id) {
-            let timeline_events = &room_response["timeline"]["events"];
+        && let Some(room_response) = joined_rooms.get(room_id)
+    {
+        let timeline_events = &room_response["timeline"]["events"];
 
-            // Verify event type filtering - only m.room.message events
-            if let Some(events) = timeline_events.as_array() {
-                for event in events {
-                    assert_eq!(event["type"], "m.room.message", "Event type filtering failed");
-                }
-
-                // Verify contains_url filtering - only events with URLs
-                for event in events {
-                    if let Some(content) = event.get("content")
-                        && let Some(body) = content.get("body").and_then(|b| b.as_str()) {
-                            assert!(body.contains("http"), "Contains URL filtering failed");
-                        }
-                }
-
-                // Verify event_fields filtering
-                for event in events {
-                    assert!(event.get("type").is_some(), "Event type field should be present");
-                    assert!(
-                        event.get("content").and_then(|c| c.get("body")).is_some(),
-                        "Content body field should be present"
-                    );
-                    assert!(
-                        event.get("event_id").is_none(),
-                        "Event ID field should be filtered out"
-                    );
-                }
-
-                // Verify event limit
-                assert!(events.len() <= 5, "Event limit filtering failed");
+        // Verify event type filtering - only m.room.message events
+        if let Some(events) = timeline_events.as_array() {
+            for event in events {
+                assert_eq!(event["type"], "m.room.message", "Event type filtering failed");
             }
 
-            // Verify lazy loading reduced membership events
-            let state_events = &room_response["state"]["events"];
-            if let Some(events) = state_events.as_array() {
-                let member_events = events.iter().filter(|e| e["type"] == "m.room.member").count();
-                assert!(member_events <= 2, "Lazy loading should reduce membership events");
+            // Verify contains_url filtering - only events with URLs
+            for event in events {
+                if let Some(content) = event.get("content")
+                    && let Some(body) = content.get("body").and_then(|b| b.as_str())
+                {
+                    assert!(body.contains("http"), "Contains URL filtering failed");
+                }
             }
+
+            // Verify event_fields filtering
+            for event in events {
+                assert!(event.get("type").is_some(), "Event type field should be present");
+                assert!(
+                    event.get("content").and_then(|c| c.get("body")).is_some(),
+                    "Content body field should be present"
+                );
+                assert!(event.get("event_id").is_none(), "Event ID field should be filtered out");
+            }
+
+            // Verify event limit
+            assert!(events.len() <= 5, "Event limit filtering failed");
         }
+
+        // Verify lazy loading reduced membership events
+        let state_events = &room_response["state"]["events"];
+        if let Some(events) = state_events.as_array() {
+            let member_events = events.iter().filter(|e| e["type"] == "m.room.member").count();
+            assert!(member_events <= 2, "Lazy loading should reduce membership events");
+        }
+    }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
 }
@@ -113,22 +118,28 @@ async fn test_complete_sync_filtering_integration() {
 /// Test wildcard event type filtering patterns
 #[tokio::test]
 async fn test_wildcard_event_type_filtering() {
-    let test_db = TestDatabase::new().await.expect("Failed to create test database");
+    let test_db = TestDatabase::new().await
+        .expect("Test setup: failed to create test database for sync filtering tests");
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app).expect("Failed to create test server");
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server for sync filtering integration tests");
 
     let room_id = "!wildcard:example.com";
 
     // Create events with different types
-    create_test_room_with_events(&test_db, room_id, vec![
-        ("m.room.message", json!({"body": "Message"})),
-        ("m.room.member", json!({"membership": "join"})),
-        ("m.room.name", json!({"name": "Test Room"})),
-        ("m.typing", json!({"user_ids": []})),
-        ("m.receipt", json!({"receipts": {}})),
-    ])
+    create_test_room_with_events(
+        &test_db,
+        room_id,
+        vec![
+            ("m.room.message", json!({"body": "Message"})),
+            ("m.room.member", json!({"membership": "join"})),
+            ("m.room.name", json!({"name": "Test Room"})),
+            ("m.typing", json!({"user_ids": []})),
+            ("m.receipt", json!({"receipts": {}})),
+        ],
+    )
     .await
-    .expect("Failed to create test events");
+    .expect("Test setup: failed to create test events for sync filtering tests");
 
     // Test wildcard patterns
     let test_cases = vec![
@@ -164,9 +175,10 @@ async fn test_wildcard_event_type_filtering() {
         let sync_response: Value = response.json();
 
         if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
-            && let Some(events) = room_response["timeline"]["events"].as_array() {
-                assert_eq!(events.len(), expected_count, "Wildcard pattern '{}' failed", pattern);
-            }
+            && let Some(events) = room_response["timeline"]["events"].as_array()
+        {
+            assert_eq!(events.len(), expected_count, "Wildcard pattern '{}' failed", pattern);
+        }
     }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
@@ -175,19 +187,25 @@ async fn test_wildcard_event_type_filtering() {
 /// Test filter precedence rules (not_types takes precedence over types)
 #[tokio::test]
 async fn test_filter_precedence_rules() {
-    let test_db = TestDatabase::new().await.expect("Failed to create test database");
+    let test_db = TestDatabase::new().await
+        .expect("Test setup: failed to create test database for sync filtering tests");
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app).expect("Failed to create test server");
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server for sync filtering integration tests");
 
     let room_id = "!precedence:example.com";
 
-    create_test_room_with_events(&test_db, room_id, vec![
-        ("m.room.message", json!({"body": "Message"})),
-        ("m.room.member", json!({"membership": "join"})),
-        ("m.room.name", json!({"name": "Test Room"})),
-    ])
+    create_test_room_with_events(
+        &test_db,
+        room_id,
+        vec![
+            ("m.room.message", json!({"body": "Message"})),
+            ("m.room.member", json!({"membership": "join"})),
+            ("m.room.name", json!({"name": "Test Room"})),
+        ],
+    )
     .await
-    .expect("Failed to create test events");
+    .expect("Test setup: failed to create test events for sync filtering tests");
 
     // Test that not_types takes precedence over types
     let filter = MatrixFilter {
@@ -217,13 +235,14 @@ async fn test_filter_precedence_rules() {
     let sync_response: Value = response.json();
 
     if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
-        && let Some(events) = room_response["timeline"]["events"].as_array() {
-            // Should have message and name events, but not member events
-            assert_eq!(events.len(), 2, "Precedence rule failed");
-            for event in events {
-                assert_ne!(event["type"], "m.room.member", "not_types precedence failed");
-            }
+        && let Some(events) = room_response["timeline"]["events"].as_array()
+    {
+        // Should have message and name events, but not member events
+        assert_eq!(events.len(), 2, "Precedence rule failed");
+        for event in events {
+            assert_ne!(event["type"], "m.room.member", "not_types precedence failed");
         }
+    }
 
     test_db.cleanup().await.expect("Failed to cleanup test database");
 }
@@ -231,9 +250,11 @@ async fn test_filter_precedence_rules() {
 /// Test database-level filtering performance
 #[tokio::test]
 async fn test_database_level_filtering_performance() {
-    let test_db = TestDatabase::new().await.expect("Failed to create test database");
+    let test_db = TestDatabase::new().await
+        .expect("Test setup: failed to create test database for sync filtering tests");
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app).expect("Failed to create test server");
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server for sync filtering integration tests");
 
     let room_id = "!performance:example.com";
 
@@ -246,7 +267,7 @@ async fn test_database_level_filtering_performance() {
 
     create_test_room_with_events(&test_db, room_id, events)
         .await
-        .expect("Failed to create test events");
+        .expect("Test setup: failed to create test events for sync filtering tests");
 
     let filter = MatrixFilter {
         room: Some(RoomFilter {
@@ -280,12 +301,13 @@ async fn test_database_level_filtering_performance() {
 
     // Verify filtering worked correctly
     if let Some(room_response) = sync_response["rooms"]["join"][room_id].as_object()
-        && let Some(events) = room_response["timeline"]["events"].as_array() {
-            assert!(events.len() <= 10, "Event limit not respected");
-            for event in events {
-                assert_eq!(event["type"], "m.room.message", "Event type filtering failed");
-            }
+        && let Some(events) = room_response["timeline"]["events"].as_array()
+    {
+        assert!(events.len() <= 10, "Event limit not respected");
+        for event in events {
+            assert_eq!(event["type"], "m.room.message", "Event type filtering failed");
         }
+    }
 
     // Performance assertion - should complete within reasonable time
     assert!(duration.as_millis() < 1000, "Filtering took too long: {:?}", duration);

@@ -71,10 +71,7 @@ pub enum MembershipError {
     },
 
     /// DNS resolution failed for federation server
-    DnsResolutionError {
-        server_name: String,
-        error: String,
-    },
+    DnsResolutionError { server_name: String, error: String },
 
     /// Network timeout during federation request
     FederationTimeout {
@@ -186,8 +183,8 @@ impl MembershipError {
     /// Log error with appropriate level and context
     pub fn log_error(&self) {
         match self {
-            MembershipError::InternalError { context, error } |
-            MembershipError::DatabaseError { operation: context, error } => {
+            MembershipError::InternalError { context, error }
+            | MembershipError::DatabaseError { operation: context, error } => {
                 error!("Internal error in {}: {}", context, error);
             },
             MembershipError::FederationError { server_name, error_message, .. } => {
@@ -216,11 +213,9 @@ impl fmt::Display for MembershipError {
                     action, required_level, user_level
                 )
             },
-            MembershipError::UserBanned { user_id, reason, .. } => {
-                match reason {
-                    Some(r) => write!(f, "User {} is banned: {}", user_id, r),
-                    None => write!(f, "User {} is banned", user_id),
-                }
+            MembershipError::UserBanned { user_id, reason, .. } => match reason {
+                Some(r) => write!(f, "User {} is banned: {}", user_id, r),
+                None => write!(f, "User {} is banned", user_id),
             },
             MembershipError::InvalidMembershipTransition { from, to, user_id, .. } => {
                 write!(f, "Invalid membership transition for {}: {} -> {}", user_id, from, to)
@@ -259,11 +254,9 @@ impl fmt::Display for MembershipError {
                     operation, server_name, timeout_ms
                 )
             },
-            MembershipError::InvalidEvent { event_id, reason } => {
-                match event_id {
-                    Some(id) => write!(f, "Invalid event {}: {}", id, reason),
-                    None => write!(f, "Invalid event: {}", reason),
-                }
+            MembershipError::InvalidEvent { event_id, reason } => match event_id {
+                Some(id) => write!(f, "Invalid event {}: {}", id, reason),
+                None => write!(f, "Invalid event: {}", reason),
             },
             MembershipError::InvalidMatrixId { id, expected_type } => {
                 write!(f, "Invalid {} ID: {}", expected_type, id)

@@ -6,55 +6,51 @@ use axum::{
 };
 use chrono::Utc;
 use std::collections::HashMap;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::_matrix::client::v3::sync::data::{
-    convert_events_to_matrix_format,
-    get_invited_member_count,
-    get_invited_rooms,
-    get_joined_member_count,
-    get_joined_rooms,
-    get_left_rooms,
-    get_room_ephemeral_events,
-    get_room_heroes,
-    get_room_state_events,
-    get_room_timeline_events,
-    get_user_account_data,
-    get_user_presence_events,
-    set_user_presence,
-};
-use crate::_matrix::client::v3::sync::filters::{
-    apply_event_fields_filter,
-    apply_cache_aware_lazy_loading_filter,
-    get_filtered_timeline_events,
-    resolve_filter,
-    apply_room_event_filter,
-    apply_presence_filter,
-    apply_account_data_filter,
+    convert_events_to_matrix_format, get_invited_member_count, get_invited_rooms,
+    get_joined_member_count, get_joined_rooms, get_left_rooms, get_room_ephemeral_events,
+    get_room_heroes, get_room_state_events, get_room_timeline_events, get_user_account_data,
+    get_user_presence_events, set_user_presence,
 };
 use crate::_matrix::client::v3::sync::filters::basic_filters::apply_room_filter;
+use crate::_matrix::client::v3::sync::filters::{
+    apply_account_data_filter, apply_cache_aware_lazy_loading_filter, apply_event_fields_filter,
+    apply_presence_filter, apply_room_event_filter, get_filtered_timeline_events, resolve_filter,
+};
 use crate::_matrix::client::v3::sync::streaming::get_sse_stream;
-use crate::metrics::filter_metrics::FilterTimer;
 use crate::auth::AuthenticatedUser;
+use crate::metrics::filter_metrics::FilterTimer;
 use crate::state::AppState;
 use matryx_entity::types::{
-    AccountDataResponse,
-    DeviceListsResponse,
-    EphemeralResponse,
-    InvitedRoomResponse,
-    JoinedRoomResponse,
-    LeftRoomResponse,
-    MatrixFilter,
-    PresenceResponse,
-    RoomSummary,
-    RoomsResponse,
-    StateResponse,
-    SyncQuery,
-    SyncResponse,
-    TimelineResponse,
-    ToDeviceResponse,
+    AccountDataResponse, DeviceListsResponse, EphemeralResponse, Event, InvitedRoomResponse,
+    JoinedRoomResponse, LeftRoomResponse, MatrixFilter, PresenceResponse, RoomSummary,
+    RoomsResponse, StateResponse, SyncQuery, SyncResponse, TimelineResponse, ToDeviceResponse,
     UnreadNotifications,
 };
+
+/// Parse since token to extract received_ts value
+fn parse_since_token(since: &str) -> Option<i64> {
+    if !since.starts_with('s') {
+        return None;
+    }
+    since[1..].parse::<i64>().ok()
+}
+
+/// Generate next_batch token from maximum received_ts in events
+fn generate_next_batch_token(max_received_ts: i64) -> String {
+    format!("s{}", max_received_ts)
+}
+
+/// Extract maximum received_ts from a collection of events
+fn get_max_received_ts(events: &[Event]) -> i64 {
+    events
+        .iter()
+        .filter_map(|e| e.received_ts)
+        .max()
+        .unwrap_or(0)
+}
 
 /// GET /_matrix/client/v3/sync
 ///
@@ -97,11 +93,14 @@ pub async fn get_json_sync(
 
     let user_id = &auth.user_id;
 
-    // Handle sync parameters
-    let _since_token = query.since.as_deref();
+    // Handle sync parameters - parse since token
+    let since_ts: Option<i64> = query.since.as_ref().and_then(|s| parse_since_token(s));
     let filter_param = query.filter.as_deref();
     let _full_state = query.full_state.unwrap_or(false);
     let _timeout_ms = query.timeout.unwrap_or(30000); // Default 30 seconds
+    
+    // Track maximum received_ts across all events for next_batch generation
+    let mut max_received_ts: i64 = since_ts.unwrap_or(0);
 
     // Process filter parameter
     let applied_filter = if let Some(filter_param) = filter_param {
@@ -124,9 +123,6 @@ pub async fn get_json_sync(
         })?;
         tracing::debug!("Set user presence to: {}", presence);
     }
-
-    // Generate batch token - in production this would be more sophisticated
-    let next_batch = format!("s{}", Utc::now().timestamp_millis());
 
     // Get user's room memberships by state
     let mut joined_memberships = get_joined_rooms(&state, user_id)
@@ -153,15 +149,20 @@ pub async fn get_json_sync(
 
     // Process joined rooms
     for membership in joined_memberships {
-        let room_response = build_joined_room_response(
+        let (room_response, room_max_ts) = build_joined_room_response(
             &state,
             &membership.room_id,
             user_id,
             &query,
             applied_filter.as_ref(),
+            since_ts,
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        
+        // Update max_received_ts from room timeline events
+        max_received_ts = max_received_ts.max(room_max_ts);
+        
         joined_rooms.insert(membership.room_id, room_response);
     }
 
@@ -219,44 +220,47 @@ pub async fn get_json_sync(
             .trim_start_matches('s')
             .parse::<i64>()
             .unwrap_or_else(|_| Utc::now().timestamp_millis());
-        
-        // Query EDU repository for device list updates since last sync
-        use matryx_surrealdb::repository::EDURepository;
-        let edu_repo = EDURepository::new(state.db.clone());
-        let device_edus = edu_repo.get_by_type("m.device_list_update")
+
+        // Convert timestamp to DateTime for database query
+        let since_dt = chrono::DateTime::from_timestamp_millis(since_timestamp)
+            .unwrap_or_else(chrono::Utc::now);
+
+        // Query device EDUs with timestamp filter at database level
+        // EDU table has created_at field but Rust struct doesn't expose it
+        let device_edus: Vec<matryx_entity::types::EDU> = state.db
+            .query("SELECT * FROM edu WHERE edu_type = 'm.device_list_update' AND created_at > $since ORDER BY created_at DESC")
+            .bind(("since", since_dt))
             .await
-            .unwrap_or_default();
-        
-        // Filter EDUs after since_timestamp and extract changed user IDs
+            .map_err(|e| {
+                error!("Failed to query device EDUs: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .take(0)
+            .map_err(|e| {
+                error!("Failed to extract EDU query results: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        // Extract changed user IDs (filtering already done at DB level)
         let changed_users: Vec<String> = device_edus
             .iter()
             .filter_map(|edu| {
-                let stream_id = edu.ephemeral_event.content
-                    .get("stream_id")
-                    .and_then(|v| v.as_i64())?;
-                
-                if stream_id > since_timestamp {
-                    edu.ephemeral_event.content
-                        .get("user_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
+                edu.ephemeral_event
+                    .content
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
             })
             .collect();
-        
-        DeviceListsResponse {
-            changed: changed_users,
-            left: Vec::new(),
-        }
+
+        DeviceListsResponse { changed: changed_users, left: Vec::new() }
     } else {
         // Initial sync - no device list changes
-        DeviceListsResponse {
-            changed: Vec::new(),
-            left: Vec::new(),
-        }
+        DeviceListsResponse { changed: Vec::new(), left: Vec::new() }
     };
+
+    // Generate next_batch token from maximum received_ts seen
+    let next_batch = generate_next_batch_token(max_received_ts);
 
     let response = SyncResponse {
         next_batch,
@@ -298,11 +302,14 @@ pub async fn build_joined_room_response(
     user_id: &str,
     _query: &SyncQuery,
     filter: Option<&MatrixFilter>,
-) -> Result<JoinedRoomResponse, Box<dyn std::error::Error + Send + Sync>> {
+    since_ts: Option<i64>,
+) -> Result<(JoinedRoomResponse, i64), Box<dyn std::error::Error + Send + Sync>> {
     // Get room information using repository pattern
     use matryx_surrealdb::repository::RoomRepository;
     let room_repo = RoomRepository::new(state.db.clone());
-    let _room = room_repo.get_by_id(room_id).await
+    let _room = room_repo
+        .get_by_id(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         .ok_or("Room not found")?;
 
@@ -312,11 +319,11 @@ pub async fn build_joined_room_response(
     // Get timeline events with enhanced room filtering including URL and lazy loading
     let timeline_events =
         if let Some(timeline_filter) = room_filter.and_then(|rf| rf.timeline.as_ref()) {
-            let raw_events = get_filtered_timeline_events(state, room_id, timeline_filter).await?;
+            let raw_events = get_filtered_timeline_events(state, room_id, timeline_filter, since_ts).await?;
             // Apply enhanced room event filtering with URL detection and lazy loading
             apply_room_event_filter(raw_events, timeline_filter, room_id, user_id, state).await?
         } else {
-            get_room_timeline_events(state, room_id, None).await?
+            get_room_timeline_events(state, room_id, None, since_ts).await?
         };
 
     // Get state events
@@ -344,7 +351,8 @@ pub async fn build_joined_room_response(
             .await
             .map_err(|e| {
                 tracing::error!("Lazy loading filter failed: {}", e);
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) as Box<dyn std::error::Error + Send + Sync>
+                Box::new(std::io::Error::other(e.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
             })?
         } else {
             // Fallback if lazy cache not available
@@ -366,7 +374,10 @@ pub async fn build_joined_room_response(
     let joined_member_count = get_joined_member_count(state, room_id).await?;
     let invited_member_count = get_invited_member_count(state, room_id).await?;
 
-    Ok(JoinedRoomResponse {
+    // Calculate max received_ts from timeline events before converting to JSON
+    let max_ts = get_max_received_ts(&final_timeline);
+
+    let response = JoinedRoomResponse {
         summary: RoomSummary { heroes, joined_member_count, invited_member_count },
         state: StateResponse {
             events: convert_events_to_matrix_format(state_events),
@@ -384,7 +395,9 @@ pub async fn build_joined_room_response(
             highlight_count: 0, // TODO: Calculate actual counts
             notification_count: 0,
         },
-    })
+    };
+
+    Ok((response, max_ts))
 }
 
 pub async fn build_invited_room_response(
@@ -408,7 +421,7 @@ pub async fn build_left_room_response(
 ) -> Result<LeftRoomResponse, Box<dyn std::error::Error + Send + Sync>> {
     // Get limited state for left rooms
     let state_events = get_room_state_events(state, room_id).await?;
-    let timeline_events = get_room_timeline_events(state, room_id, None).await?;
+    let timeline_events = get_room_timeline_events(state, room_id, None, None).await?;
 
     Ok(LeftRoomResponse {
         state: StateResponse {

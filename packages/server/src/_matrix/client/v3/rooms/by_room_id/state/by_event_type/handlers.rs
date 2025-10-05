@@ -42,7 +42,8 @@ pub async fn get(
 
     // Check if user has permission to view room state
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let membership = membership_repo.get_user_membership_status(&room_id, &auth.user_id)
+    let membership = membership_repo
+        .get_user_membership_status(&room_id, &auth.user_id)
         .await
         .map_err(|e| {
             error!("Failed to check user membership: {}", e);
@@ -53,12 +54,10 @@ pub async fn get(
         matches!(membership.as_str(), "join" | "invite" | "leave")
     } else {
         // Check if room has world-readable history
-        room_repo.is_room_world_readable(&room_id)
-            .await
-            .map_err(|e| {
-                error!("Failed to check room world-readable status: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
+        room_repo.is_room_world_readable(&room_id).await.map_err(|e| {
+            error!("Failed to check room world-readable status: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     };
 
     if !has_permission {
@@ -68,7 +67,8 @@ pub async fn get(
 
     // Get current state event of the specified type (with empty state_key by default)
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let event = event_repo.get_current_state_event(&room_id, &event_type, "")
+    let event = event_repo
+        .get_current_state_event(&room_id, &event_type, "")
         .await
         .map_err(|e| {
             error!("Failed to get state event: {}", e);
@@ -93,5 +93,3 @@ pub async fn get(
     debug!("Retrieved state event {} for room {}", event_type, room_id);
     Ok(Json(state_event))
 }
-
-

@@ -1,11 +1,11 @@
 //! Module contains intentional library code not yet fully integrated
 #![allow(dead_code)]
 
-use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
 use moka::future::Cache;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info, warn};
 
 /// Well-known matrix server response
@@ -29,16 +29,16 @@ pub struct CachedWellKnown {
 pub enum WellKnownError {
     #[error("HTTP request failed: {0}")]
     HttpError(#[from] reqwest::Error),
-    
+
     #[error("JSON parsing failed: {0}")]
     JsonError(#[from] serde_json::Error),
-    
+
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
-    
+
     #[error("Too many redirects")]
     TooManyRedirects,
-    
+
     #[error("Cache error: {0}")]
     CacheError(String),
 }
@@ -65,7 +65,10 @@ impl WellKnownClient {
     }
 
     /// Fetch well-known server information with caching
-    pub async fn get_well_known(&self, hostname: &str) -> WellKnownResult<Option<WellKnownResponse>> {
+    pub async fn get_well_known(
+        &self,
+        hostname: &str,
+    ) -> WellKnownResult<Option<WellKnownResponse>> {
         // Check cache first
         if let Some(cached) = self.cache.get(hostname).await {
             if SystemTime::now() < cached.expires_at {
@@ -77,7 +80,7 @@ impl WellKnownClient {
         }
 
         debug!("Fetching well-known for {} from network", hostname);
-        
+
         // Fetch from network
         match self.fetch_well_known_from_network(hostname).await {
             Ok((response, ttl)) => {
@@ -87,11 +90,14 @@ impl WellKnownClient {
                     expires_at: SystemTime::now() + ttl,
                     is_error: false,
                 };
-                
+
                 self.cache.insert(hostname.to_string(), cached).await;
-                info!("Successfully fetched and cached well-known for {} (TTL: {:?})", hostname, ttl);
+                info!(
+                    "Successfully fetched and cached well-known for {} (TTL: {:?})",
+                    hostname, ttl
+                );
                 Ok(Some(response))
-            }
+            },
             Err(e) => {
                 // Cache errors for 1 hour
                 let error_ttl = Duration::from_secs(60 * 60);
@@ -101,24 +107,31 @@ impl WellKnownClient {
                     expires_at: SystemTime::now() + error_ttl,
                     is_error: true,
                 };
-                
+
                 self.cache.insert(hostname.to_string(), cached).await;
-                warn!("Failed to fetch well-known for {}, cached error for 1 hour: {}", hostname, e);
+                warn!(
+                    "Failed to fetch well-known for {}, cached error for 1 hour: {}",
+                    hostname, e
+                );
                 Ok(None) // Return None for errors to allow fallback discovery
-            }
+            },
         }
     }
 
     /// Fetch well-known from network with redirect handling
-    async fn fetch_well_known_from_network(&self, hostname: &str) -> WellKnownResult<(WellKnownResponse, Duration)> {
+    async fn fetch_well_known_from_network(
+        &self,
+        hostname: &str,
+    ) -> WellKnownResult<(WellKnownResponse, Duration)> {
         let url = format!("https://{}/.well-known/matrix/server", hostname);
         let mut current_url = url;
         let mut redirect_count = 0;
 
         loop {
             debug!("Requesting well-known from: {}", current_url);
-            
-            let response = self.http_client
+
+            let response = self
+                .http_client
                 .get(&current_url)
                 .header("User-Agent", "matryx-server/1.0")
                 // NOTE: .well-known discovery requests are exempt from X-Matrix signing
@@ -130,22 +143,27 @@ impl WellKnownClient {
                 .await?;
 
             let status = response.status();
-            
+
             // Handle redirects
             if status.is_redirection() {
                 if redirect_count >= self.max_redirects {
                     return Err(WellKnownError::TooManyRedirects);
                 }
-                
+
                 if let Some(location) = response.headers().get("location") {
-                    current_url = location.to_str()
-                        .map_err(|_| WellKnownError::InvalidResponse("Invalid redirect location".to_string()))?
+                    current_url = location
+                        .to_str()
+                        .map_err(|_| {
+                            WellKnownError::InvalidResponse("Invalid redirect location".to_string())
+                        })?
                         .to_string();
                     redirect_count += 1;
                     debug!("Following redirect {} to: {}", redirect_count, current_url);
                     continue;
                 } else {
-                    return Err(WellKnownError::InvalidResponse("Redirect without location header".to_string()));
+                    return Err(WellKnownError::InvalidResponse(
+                        "Redirect without location header".to_string(),
+                    ));
                 }
             }
 
@@ -159,20 +177,22 @@ impl WellKnownClient {
 
             // Parse response
             let text = response.text().await?;
-            
+
             // Try to parse as JSON, but handle gracefully if it fails
             match serde_json::from_str::<WellKnownResponse>(&text) {
                 Ok(well_known) => {
                     // Validate m.server field
                     if well_known.server.is_empty() {
-                        return Err(WellKnownError::InvalidResponse("Empty m.server field".to_string()));
+                        return Err(WellKnownError::InvalidResponse(
+                            "Empty m.server field".to_string(),
+                        ));
                     }
                     return Ok((well_known, cache_ttl));
-                }
+                },
                 Err(e) => {
                     debug!("Failed to parse well-known JSON for {}: {}", hostname, e);
                     return Err(WellKnownError::JsonError(e));
-                }
+                },
             }
         }
     }

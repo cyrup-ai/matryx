@@ -18,24 +18,20 @@ pub async fn post(
         "health" => {
             // Health check - verify database connectivity
             match state.db.health().await {
-                Ok(_) => {
-                    Ok(Json(json!({
-                        "status": "healthy",
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "server_name": state.homeserver_name,
-                        "database": "connected",
-                        "version": env!("CARGO_PKG_VERSION")
-                    })))
-                },
-                Err(_) => {
-                    Ok(Json(json!({
-                        "status": "unhealthy",
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "server_name": state.homeserver_name,
-                        "database": "disconnected",
-                        "version": env!("CARGO_PKG_VERSION")
-                    })))
-                },
+                Ok(_) => Ok(Json(json!({
+                    "status": "healthy",
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "server_name": state.homeserver_name,
+                    "database": "connected",
+                    "version": env!("CARGO_PKG_VERSION")
+                }))),
+                Err(_) => Ok(Json(json!({
+                    "status": "unhealthy",
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "server_name": state.homeserver_name,
+                    "database": "disconnected",
+                    "version": env!("CARGO_PKG_VERSION")
+                }))),
             }
         },
         "info" => {

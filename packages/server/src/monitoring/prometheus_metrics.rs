@@ -6,13 +6,7 @@ use prometheus::{Counter, CounterVec, Gauge, HistogramVec, Registry};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::{
-    Router,
-    extract::State,
-    http::StatusCode,
-    response::Response,
-    routing::get,
-};
+use axum::{Router, extract::State, http::StatusCode, response::Response, routing::get};
 use surrealdb::engine::any::Any;
 
 /// Prometheus metrics exporter for lazy loading performance
@@ -104,26 +98,50 @@ impl LazyLoadingPrometheusMetrics {
                 .unwrap_or_else(|e| panic!("Failed to create prometheus rollout percentage gauge - this indicates invalid metric configuration: {}", e));
 
         // Register all metrics
-        registry.register(Box::new(db_queries_total.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
-        registry.register(Box::new(db_query_duration.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
+        registry.register(Box::new(db_queries_total.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
+        registry.register(Box::new(db_query_duration.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
         registry.register(Box::new(db_queries_avoided.clone()))
             .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
         registry.register(Box::new(members_filtered_total.clone()))
             .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
-        registry.register(Box::new(processing_time.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
+        registry.register(Box::new(processing_time.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
         registry.register(Box::new(memory_usage_bytes.clone()))
             .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
         registry.register(Box::new(memory_growth_rate.clone()))
             .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
-        registry.register(Box::new(errors_total.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
-        registry.register(Box::new(feature_usage.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
-        registry.register(Box::new(migration_phase.clone()))
-            .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
+        registry.register(Box::new(errors_total.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
+        registry.register(Box::new(feature_usage.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
+        registry.register(Box::new(migration_phase.clone())).unwrap_or_else(|e| {
+            panic!(
+                "Failed to register prometheus metric - this indicates a duplicate metric name: {}",
+                e
+            )
+        });
         registry.register(Box::new(rollout_percentage.clone()))
             .unwrap_or_else(|e| panic!("Failed to register prometheus metric - this indicates a duplicate metric name: {}", e));
 
@@ -436,8 +454,11 @@ mod tests {
         let prometheus_metrics = LazyLoadingPrometheusMetrics::new(metrics_repo);
 
         // Test the prometheus metrics by recording a test metric
-        prometheus_metrics.record_request("small", "hit", "enhanced", std::time::Duration::from_millis(100)).await.unwrap();
-        
+        prometheus_metrics
+            .record_request("small", "hit", "enhanced", std::time::Duration::from_millis(100))
+            .await
+            .expect("Test: failed to record Prometheus metric for lazy loading performance tracking");
+
         // LazyLoadingPrometheusMetrics is not a Result type, no need to check is_ok()
         // Test passes by successful construction and metric recording
     }
@@ -452,8 +473,12 @@ mod tests {
         let prometheus_metrics = LazyLoadingPrometheusMetrics::new(metrics_repo);
 
         // Record some metrics
-        let _ = prometheus_metrics.record_request("medium", "hit", "enhanced", Duration::from_millis(50)).await;
-        let _ = prometheus_metrics.record_cache_operation("essential_members", "medium", true).await;
+        let _ = prometheus_metrics
+            .record_request("medium", "hit", "enhanced", Duration::from_millis(50))
+            .await;
+        let _ = prometheus_metrics
+            .record_cache_operation("essential_members", "medium", true)
+            .await;
         prometheus_metrics.record_db_query(
             "essential_members",
             "medium",

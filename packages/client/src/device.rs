@@ -252,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_device_management_creation() {
         let config = ClientConfig::default();
-        let client = MatrixClient::new(config).unwrap();
+        let client = MatrixClient::new(config).expect("Failed to create Matrix client");
 
         // Test that device management methods exist and compile
         assert!(!client.is_authenticated());

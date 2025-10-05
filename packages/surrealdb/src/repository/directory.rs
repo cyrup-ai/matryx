@@ -253,7 +253,35 @@ impl<C: Connection> DirectoryRepository<C> {
     pub async fn get_third_party_protocols(
         &self,
     ) -> Result<Vec<ThirdPartyProtocol>, RepositoryError> {
-        // Return empty list for now - third party protocols would be configured
-        Ok(vec![])
+        // Query configured application service protocols
+        let query = "
+            SELECT
+                user_fields,
+                location_fields,
+                icon,
+                field_types,
+                instances
+            FROM appservice_protocol
+            WHERE enabled = true
+        ";
+
+        let mut result = self.db.query(query).await?;
+        let protocol_rows: Vec<serde_json::Value> = result.take(0)?;
+
+        let protocols: Vec<ThirdPartyProtocol> = protocol_rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(ThirdPartyProtocol {
+                    user_fields: serde_json::from_value(row.get("user_fields")?.clone()).ok()?,
+                    location_fields: serde_json::from_value(row.get("location_fields")?.clone()).ok()?,
+                    icon: row.get("icon")?.as_str()?.to_string(),
+                    field_types: serde_json::from_value(row.get("field_types")?.clone()).ok()?,
+                    instances: serde_json::from_value(row.get("instances")?.clone()).ok()?,
+                })
+            })
+            .collect();
+
+        tracing::debug!("Found {} third party protocols", protocols.len());
+        Ok(protocols)
     }
 }

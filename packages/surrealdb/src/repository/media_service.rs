@@ -4,8 +4,10 @@ use crate::repository::media::{MediaInfo, MediaRepository};
 use crate::repository::membership::MembershipRepository;
 use crate::repository::room::RoomRepository;
 use chrono::{DateTime, Utc};
+use image::{ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Cursor;
 use std::sync::Arc;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -165,7 +167,7 @@ impl<C: Connection> MediaService<C> {
 
         // Store media with hash for deduplication
         self.media_repo
-            .store_media_with_hash(&media_id, server_name, content, content_type, &hash_string)
+            .store_media_with_hash(&media_id, server_name, content, content_type, &hash_string, user_id)
             .await?;
 
         Ok(MediaUploadResult {
@@ -204,6 +206,13 @@ impl<C: Connection> MediaService<C> {
                 .await
                 .map_err(MediaError::from)?
                 .ok_or(MediaError::NotFound)?;
+
+        // Check if media is quarantined
+        if media_info.quarantined.unwrap_or(false) {
+            return Err(MediaError::AccessDenied(
+                "Media has been quarantined by server administrators".to_string()
+            ));
+        }
 
         // Get media content
         let content = self
@@ -291,8 +300,7 @@ impl<C: Connection> MediaService<C> {
             .ok_or(MediaError::NotFound)?;
 
         // Generate thumbnail (simplified - in real implementation would use image processing library)
-        let thumbnail = self.process_thumbnail(&original_content, width, height, method)
-            .map_err(MediaError::from)?;
+        let thumbnail = self.process_thumbnail(&original_content, width, height, method)?;
 
         // Store generated thumbnail
         self.media_repo
@@ -339,13 +347,26 @@ impl<C: Connection> MediaService<C> {
             return Ok(false);
         }
 
-        // Check user upload quota (simplified - would check against user's quota)
-        // For now, allow all uploads for registered users
-        if user_id.contains(':') {
-            return Ok(true);
+        // Check user is registered
+        if !user_id.contains(':') {
+            return Ok(false);
         }
 
-        Ok(false)
+        // Extract server name for quota query
+        let server_name = user_id.split(':').nth(1).unwrap_or("localhost");
+
+        // Query user's current storage usage
+        let current_usage = self.media_repo
+            .get_user_storage_usage(user_id, server_name)
+            .await?;
+
+        // Check against quota (5GB default)
+        const DEFAULT_QUOTA: u64 = 5 * 1024 * 1024 * 1024;
+        if current_usage + content_length > DEFAULT_QUOTA {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     /// Validate media access permissions
@@ -398,11 +419,20 @@ impl<C: Connection> MediaService<C> {
                     let room_info = self.room_repo.get_by_id(&room_id).await?;
                     match room_info {
                         Some(room) => {
-                            // Check if room allows media access to non-members
-                            // For now, only allow if room is public
-                            Ok(room.is_public.unwrap_or(false))
+                            // Check history_visibility setting
+                            let visibility = serde_json::to_value(&room).ok()
+                                .and_then(|v| v.get("history_visibility").and_then(|h| h.as_str().map(|s| s.to_string())));
+                            
+                            if let Some(value) = visibility {
+                                match value.as_str() {
+                                    "world_readable" => Ok(true),
+                                    _ => Ok(room.is_public.unwrap_or(false))
+                                }
+                            } else {
+                                Ok(room.is_public.unwrap_or(false))
+                            }
                         },
-                        None => Ok(false), // Room doesn't exist
+                        None => Ok(false),
                     }
                 }
             }
@@ -421,26 +451,15 @@ impl<C: Connection> MediaService<C> {
         &self,
         media_info: &MediaInfo,
     ) -> Result<Option<String>, RepositoryError> {
-        // In a real implementation, media would have metadata linking it to rooms
-        // For now, we'll check if the media filename or metadata contains room information
-        
-        // TODO: In a real implementation, we would have a separate media_room_associations table
-        // or metadata field in MediaInfo to track room associations
-        // For now, we'll use a simplified approach without metadata
-        
-        // Check if upload_name follows Matrix media naming convention
-        // Matrix media URLs often include room context in the filename or path
-        if let Some(upload_name) = &media_info.upload_name
-            && upload_name.contains("room_")
-            && let Some(start) = upload_name.find("room_") {
-            let room_part = &upload_name[start + 5..];
-            if let Some(end) = room_part.find('_') {
-                let potential_room_id = &room_part[..end];
-                return Ok(Some(format!("!{}:example.com", potential_room_id)));
+        if let Some((room_id, is_profile)) = self.media_repo
+            .get_media_room_association(&media_info.media_id, &media_info.server_name)
+            .await? {
+            if is_profile {
+                return Ok(None);
             }
+            return Ok(Some(room_id));
         }
         
-        // No room association found - media is global/user-scoped
         Ok(None)
     }
 
@@ -522,8 +541,7 @@ impl<C: Connection> MediaService<C> {
         }
 
         // Get media content
-        let download_result = self.download_media(media_id, server_name, requesting_server).await
-            .map_err(MediaError::from)?;
+        let download_result = self.download_media(media_id, server_name, requesting_server).await?;
 
         Ok(MediaResponse {
             content: download_result.content,
@@ -561,33 +579,39 @@ impl<C: Connection> MediaService<C> {
             )),
         }
 
-        // For production use, this would integrate with an image processing library like image-rs
-        // For now, we'll create a thumbnail based on the requested dimensions and method
-        let thumbnail_size = match method {
+        // Decode image from bytes
+        let img = image::load_from_memory(original_content)
+            .map_err(|e| {
+                tracing::warn!("Failed to decode image: {}", e);
+                MediaError::UnsupportedFormat
+            })?;
+        
+        // Resize according to method
+        let resized = match method {
             "crop" => {
-                // Crop method preserves aspect ratio by cropping to fit
-                std::cmp::min(width, height)
+                img.resize_to_fill(width, height, FilterType::Lanczos3)
             },
             "scale" => {
-                // Scale method maintains aspect ratio by scaling down
-                std::cmp::max(width, height)
+                img.resize(width, height, FilterType::Lanczos3)
             },
-            _ => width, // fallback
+            _ => {
+                return Err(MediaError::Validation(
+                    "Method must be 'crop' or 'scale'".to_string()
+                ))
+            },
         };
-
-        // Generate a basic thumbnail representation with metadata about the processing
-        let thumbnail_data = format!(
-            "THUMBNAIL:{}x{}:{}:size={}", 
-            width, height, method, thumbnail_size
-        ).into_bytes();
-
-        // In a real implementation, this would:
-        // 1. Decode the original_content as an image
-        // 2. Resize according to width, height, and method
-        // 3. Encode as JPEG/PNG/WebP
-        // 4. Return the processed bytes
         
-        Ok(thumbnail_data)
+        // Encode as JPEG
+        let mut buffer = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+        
+        resized.write_to(&mut cursor, ImageFormat::Jpeg)
+            .map_err(|e| {
+                tracing::error!("Failed to encode thumbnail: {}", e);
+                MediaError::Database(format!("Encoding error: {}", e))
+            })?;
+        
+        Ok(buffer)
     }
 
     /// Update media metadata with new filename and content type

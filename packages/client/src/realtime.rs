@@ -191,8 +191,19 @@ impl RealtimeMatrixClient {
 
         let db = any::connect(self.config.surrealdb_url.to_string()).await?;
 
-        // Authenticate with SurrealDB (using root for now, should be configurable)
-        db.signin(Root { username: "root", password: "root" }).await?;
+        // Authenticate with SurrealDB using configurable credentials from environment
+        let db_user = std::env::var("SURREALDB_USER")
+            .or_else(|_| std::env::var("DB_USER"))
+            .map_err(|_| anyhow::anyhow!(
+                "Database username not configured. Set SURREALDB_USER or DB_USER environment variable."
+            ))?;
+        let db_pass = std::env::var("SURREALDB_PASS")
+            .or_else(|_| std::env::var("DB_PASS"))
+            .map_err(|_| anyhow::anyhow!(
+                "Database password not configured. Set SURREALDB_PASS or DB_PASS environment variable."
+            ))?;
+
+        db.signin(Root { username: &db_user, password: &db_pass }).await?;
 
         // Use the matryx namespace and matrix database
         db.use_ns("matryx").use_db("matrix").await?;
@@ -524,7 +535,7 @@ mod tests {
         let client = RealtimeMatrixClient::new(config);
         assert!(client.is_ok());
 
-        let client = client.unwrap();
+        let client = client.expect("Failed to create realtime client");
         assert!(!client.is_authenticated());
         assert!(client.user_id().is_none());
         assert_eq!(client.connection_status().await, ConnectionStatus::Disconnected);
@@ -533,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_status_changes() {
         let config = RealtimeConfig::default();
-        let client = RealtimeMatrixClient::new(config).unwrap();
+        let client = RealtimeMatrixClient::new(config).expect("Failed to create realtime client for test");
 
         assert_eq!(client.connection_status().await, ConnectionStatus::Disconnected);
 

@@ -4,9 +4,9 @@
 //! Returns homeserver discovery information for Matrix clients.
 //! Includes auto-discovery validation to ensure the homeserver is reachable.
 
-use crate::config::ServerConfig;
 use crate::auth::CaptchaService;
 use crate::auth::captcha::CaptchaConfig;
+use crate::config::ServerConfig;
 use axum::http::StatusCode;
 use matryx_surrealdb::repository::CaptchaRepository;
 use reqwest::Client;
@@ -62,7 +62,8 @@ pub async fn get() -> Result<impl axum::response::IntoResponse, StatusCode> {
 
     // Add identity server information if configured
     if let Ok(identity_server) = env::var("MATRIX_IDENTITY_SERVER")
-        && !identity_server.is_empty() {
+        && !identity_server.is_empty()
+    {
         discovery_info.as_object_mut().and_then(|obj| {
             obj.insert(
                 "m.identity_server".to_string(),
@@ -119,21 +120,21 @@ async fn validate_homeserver_reachability(base_url: &str) -> Result<bool, String
 async fn add_captcha_config(discovery_info: &mut Value) {
     // Get database connection from environment or use default
     let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "memory".to_string());
-    
+
     if let Ok(db) = surrealdb::engine::any::connect(&db_url).await {
         let captcha_config = CaptchaConfig::from_env();
         let captcha_repo = CaptchaRepository::new(db);
         let captcha_service = CaptchaService::new(captcha_repo, captcha_config);
-        
+
         // Get CAPTCHA public configuration for clients
         let captcha_client_config = captcha_service.get_public_config();
-        
-        if !captcha_client_config.is_empty() {
-            if let Some(obj) = discovery_info.as_object_mut() {
-                obj.insert("m.captcha".to_string(), json!(captcha_client_config));
-            }
+
+        if !captcha_client_config.is_empty()
+            && let Some(obj) = discovery_info.as_object_mut()
+        {
+            obj.insert("m.captcha".to_string(), json!(captcha_client_config));
         }
-        
+
         info!("Added CAPTCHA configuration to client discovery");
     } else {
         warn!("Failed to connect to database for CAPTCHA configuration");

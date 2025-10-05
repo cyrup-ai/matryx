@@ -1,4 +1,8 @@
-use axum::{Json, extract::{Path, Query, State}, http::{HeaderMap, StatusCode}};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+};
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -46,13 +50,13 @@ pub async fn get(
 
     // Use ThirdPartyService for location lookup
     let third_party_service = ThirdPartyService::new(state.db.clone());
-    
+
     let locations = match third_party_service.lookup_location(&protocol, &query.fields).await {
         Ok(locations) => locations,
         Err(e) => {
             error!("Failed to lookup third-party locations for protocol '{}': {}", protocol, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     // Convert to response format

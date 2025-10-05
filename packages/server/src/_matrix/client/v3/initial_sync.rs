@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 use crate::auth::extract_matrix_auth;
 use crate::state::AppState;
-use matryx_surrealdb::repository::sync::{SyncRepository, Filter, RoomFilter, RoomEventFilter};
+use matryx_surrealdb::repository::sync::{Filter, RoomEventFilter, RoomFilter, SyncRepository};
 
 #[derive(Deserialize)]
 pub struct InitialSyncQuery {
@@ -47,7 +47,7 @@ pub async fn get(
     if query.archived.unwrap_or(false) {
         tracing::info!("Initial sync requested archived rooms for user: {}", user_id);
     }
-    
+
     // Create filter if limit is specified
     let filter = query.limit.map(|limit| Filter {
         room: Some(RoomFilter {
@@ -76,8 +76,8 @@ pub async fn get(
         event_format: None,
         event_fields: None,
     });
-    
-    // Get initial sync data  
+
+    // Get initial sync data
     let initial_sync = match sync_repo.get_initial_sync_data(&user_id, filter.as_ref()).await {
         Ok(sync_data) => sync_data,
         Err(e) => {

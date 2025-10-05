@@ -7,20 +7,17 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::error;
-
+use tracing::{debug, error};
 
 use crate::auth::AuthenticatedUser;
-use crate::state::AppState;
 use crate::event_replacements::ReplacementValidator;
+use crate::federation::outbound_queue::OutboundEvent;
 use crate::mentions::MentionsProcessor;
+use crate::state::AppState;
 
-use matryx_entity::types::MembershipState;
+use matryx_entity::types::{MembershipState, PDU};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    MembershipRepository,
-    PowerLevelsRepository,
-    RoomRepository,
+    EventRepository, MembershipRepository, PowerLevelsRepository, RoomRepository,
 };
 
 #[derive(Deserialize)]
@@ -69,12 +66,17 @@ pub async fn put(
     }
 
     // Check resource-level access for specific event types that require elevated permissions
-    let can_access = auth.can_access_resource(&state, "room", room_id.as_str()).await
-        .map_err(|e| {
-            error!("Failed to check room access for user {} in room {}: {}", auth.user_id, room_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    
+    let can_access =
+        auth.can_access_resource(&state, "room", room_id.as_str())
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to check room access for user {} in room {}: {}",
+                    auth.user_id, room_id, e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
     if !can_access {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -107,27 +109,26 @@ pub async fn put(
     }
 
     // Check if this is a replacement event (message edit)
-    if let Some(relates_to) = request.content.get("m.relates_to") {
-        if relates_to.get("rel_type").and_then(|v| v.as_str()) == Some("m.replace") {
-            if let Some(event_id) = relates_to.get("event_id").and_then(|v| v.as_str()) {
-                // Validate replacement using ReplacementValidator
-                let replacement_validator = ReplacementValidator::new(&state);
-                
-                // Create a temporary event JSON for validation
-                let mut temp_event = request.content.clone();
-                temp_event["room_id"] = serde_json::json!(room_id);
-                
-                replacement_validator
-                    .validate_replacement(event_id, &temp_event, &auth.user_id)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!("Replacement validation failed: {}", e);
-                        StatusCode::FORBIDDEN
-                    })?;
-                    
-                tracing::info!("Validated replacement for event {} in room {}", event_id, room_id);
-            }
-        }
+    if let Some(relates_to) = request.content.get("m.relates_to")
+        && relates_to.get("rel_type").and_then(|v| v.as_str()) == Some("m.replace")
+        && let Some(event_id) = relates_to.get("event_id").and_then(|v| v.as_str())
+    {
+        // Validate replacement using ReplacementValidator
+        let replacement_validator = ReplacementValidator::new(&state);
+
+        // Create a temporary event JSON for validation
+        let mut temp_event = request.content.clone();
+        temp_event["room_id"] = serde_json::json!(room_id);
+
+        replacement_validator
+            .validate_replacement(event_id, &temp_event, &auth.user_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!("Replacement validation failed: {}", e);
+                StatusCode::FORBIDDEN
+            })?;
+
+        tracing::info!("Validated replacement for event {} in room {}", event_id, room_id);
     }
 
     // Process mentions in message content
@@ -149,19 +150,13 @@ pub async fn put(
         // Add m.mentions to content
         let mut mentions_json = serde_json::Map::new();
         if let Some(user_ids) = mentions.user_ids {
-            mentions_json.insert(
-                "user_ids".to_string(),
-                serde_json::json!(user_ids)
-            );
+            mentions_json.insert("user_ids".to_string(), serde_json::json!(user_ids));
         }
         if let Some(room) = mentions.room {
-            mentions_json.insert(
-                "room".to_string(),
-                serde_json::json!(room)
-            );
+            mentions_json.insert("room".to_string(), serde_json::json!(room));
         }
         event_content["m.mentions"] = serde_json::Value::Object(mentions_json);
-        
+
         tracing::info!("Processed mentions for event in room {}", room_id);
     }
 
@@ -170,7 +165,7 @@ pub async fn put(
         .create_complete_event(
             &room_id,
             &event_type,
-            &auth.matrix_id(),
+            auth.matrix_id(),
             event_content.clone(),
             None, // Message events don't have state keys
             Some(txn_id.clone()),
@@ -205,34 +200,80 @@ pub async fn put(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // If this was a replacement event, store the relationship
-    if let Some(relates_to) = event_content.get("m.relates_to") {
-        if relates_to.get("rel_type").and_then(|v| v.as_str()) == Some("m.replace") {
-            if let Some(original_event_id) = relates_to.get("event_id").and_then(|v| v.as_str()) {
-                let replacement_validator = ReplacementValidator::new(&state);
-                
-                // Create event JSON with the generated event_id
-                let mut replacement_event = event_content.clone();
-                replacement_event["event_id"] = serde_json::json!(&updated_event.event_id);
-                replacement_event["room_id"] = serde_json::json!(&room_id);
-                
-                if let Err(e) = replacement_validator
-                    .apply_replacement(original_event_id, &replacement_event)
-                    .await
-                {
-                    tracing::warn!(
-                        "Failed to store replacement relationship for event {}: {}",
-                        updated_event.event_id, e
-                    );
-                    // Don't fail the request if storage fails
-                    // The event was already created successfully
-                } else {
-                    tracing::info!(
-                        "Stored replacement: {} replaces {} in room {}",
-                        updated_event.event_id, original_event_id, room_id
-                    );
-                }
+    // Get remote servers in this room for federation
+    let remote_servers =
+        membership_repo.get_remote_servers_in_room(&room_id).await.map_err(|e| {
+            error!("Failed to get remote servers for room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Convert Event to PDU for federation
+    let pdu = PDU {
+        content: event.content.clone(),
+        event_id: updated_event.event_id.clone(),
+        origin_server_ts: updated_event.origin_server_ts,
+        room_id: room_id.clone(),
+        sender: auth.user_id.clone(),
+        event_type: event_type.clone(),
+        state_key: None,
+        prev_events: updated_event.prev_events.clone().unwrap_or_default(),
+        auth_events: updated_event.auth_events.clone().unwrap_or_default(),
+        depth: updated_event.depth.unwrap_or(0),
+        signatures: updated_event.signatures.clone().unwrap_or_default(),
+        hashes: updated_event.hashes.clone().unwrap_or_default(),
+        unsigned: None,
+    };
+
+    // Queue PDU for each remote server
+    for server in remote_servers {
+        if server != state.homeserver_name {
+            let outbound_event = OutboundEvent::Pdu {
+                destination: server.clone(),
+                pdu: Box::new(pdu.clone()),
+            };
+
+            if let Err(e) = state.outbound_tx.send(outbound_event) {
+                error!("Failed to queue outbound PDU for {}: {}", server, e);
+            } else {
+                debug!(
+                    event_id = %pdu.event_id,
+                    destination = %server,
+                    "Queued PDU for federation"
+                );
             }
+        }
+    }
+
+    // If this was a replacement event, store the relationship
+    if let Some(relates_to) = event_content.get("m.relates_to")
+        && relates_to.get("rel_type").and_then(|v| v.as_str()) == Some("m.replace")
+        && let Some(original_event_id) = relates_to.get("event_id").and_then(|v| v.as_str())
+    {
+        let replacement_validator = ReplacementValidator::new(&state);
+
+        // Create event JSON with the generated event_id
+        let mut replacement_event = event_content.clone();
+        replacement_event["event_id"] = serde_json::json!(&updated_event.event_id);
+        replacement_event["room_id"] = serde_json::json!(&room_id);
+
+        if let Err(e) = replacement_validator
+            .apply_replacement(original_event_id, &replacement_event)
+            .await
+        {
+            tracing::warn!(
+                "Failed to store replacement relationship for event {}: {}",
+                updated_event.event_id,
+                e
+            );
+            // Don't fail the request if storage fails
+            // The event was already created successfully
+        } else {
+            tracing::info!(
+                "Stored replacement: {} replaces {} in room {}",
+                updated_event.event_id,
+                original_event_id,
+                room_id
+            );
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::auth::authenticated_user::AuthenticatedUser;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -6,9 +7,7 @@ use axum::{
     response::Response,
 };
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
 use std::sync::Arc;
@@ -17,6 +16,7 @@ use std::sync::Arc;
 pub async fn get(
     State(state): State<AppState>,
     Path((server_name, media_id)): Path<(String, String)>,
+    user: AuthenticatedUser,
 ) -> Result<Response<Body>, StatusCode> {
     // Create MediaService instance with federation support
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
@@ -29,9 +29,9 @@ pub async fn get(
             state.homeserver_name.clone(),
         );
 
-    // Download media using MediaService (v1 API - anonymous access for now)
+    // Download media using MediaService with authenticated user
     let download_result = media_service
-        .download_media(&media_id, &server_name, "anonymous")
+        .download_media(&media_id, &server_name, &user.user_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
@@ -57,7 +57,8 @@ pub async fn get(
 pub async fn get_with_filename(
     State(state): State<AppState>,
     Path((server_name, media_id, _file_name)): Path<(String, String, String)>,
+    user: AuthenticatedUser,
 ) -> Result<Response<Body>, StatusCode> {
     // Same implementation as get() for v1 compatibility
-    get(State(state), Path((server_name, media_id))).await
+    get(State(state), Path((server_name, media_id)), user).await
 }

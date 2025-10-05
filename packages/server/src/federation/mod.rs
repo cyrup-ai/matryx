@@ -8,17 +8,18 @@ pub mod event_signing;
 pub mod key_management;
 pub mod media_client;
 pub mod membership_federation;
+pub mod outbound_queue;
 pub mod pdu_validator;
 pub mod server_discovery;
-pub mod state_resolution;
 pub mod well_known_client;
 
-use reqwest::{Client, ClientBuilder, Certificate, Identity};
+use crate::config::server_config::{ServerConfig, TlsConfig};
+use reqwest::{Certificate, Client, ClientBuilder, Identity};
 use std::fs;
 use std::time::Duration;
-use crate::config::server_config::{ServerConfig, TlsConfig};
 
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum TlsError {
     #[error("Failed to load client certificate: {0}")]
     ClientCertificateError(String),
@@ -57,24 +58,26 @@ pub fn create_http_client_with_config(tls_config: &TlsConfig) -> Result<Client, 
     }
 
     // Load client certificate if specified
-    if let (Some(cert_path), Some(key_path)) = (&tls_config.client_cert_path, &tls_config.client_key_path) {
-        let cert_pem = fs::read(cert_path)
-            .map_err(|e| TlsError::ClientCertificateError(format!("Failed to read certificate: {}", e)))?;
-        let key_pem = fs::read(key_path)
-            .map_err(|e| TlsError::ClientCertificateError(format!("Failed to read private key: {}", e)))?;
+    if let (Some(cert_path), Some(key_path)) =
+        (&tls_config.client_cert_path, &tls_config.client_key_path)
+    {
+        let cert_pem = fs::read(cert_path).map_err(|e| {
+            TlsError::ClientCertificateError(format!("Failed to read certificate: {}", e))
+        })?;
+        let key_pem = fs::read(key_path).map_err(|e| {
+            TlsError::ClientCertificateError(format!("Failed to read private key: {}", e))
+        })?;
 
         let mut identity_pem = cert_pem.clone();
         identity_pem.extend_from_slice(&key_pem);
 
         let identity = Identity::from_pkcs12_der(&identity_pem, "")
             .or_else(|_| Identity::from_pkcs8_pem(&cert_pem, &key_pem))
-            .map_err(|e| TlsError::ClientCertificateError(format!("Invalid client certificate: {}", e)))?;
+            .map_err(|e| {
+                TlsError::ClientCertificateError(format!("Invalid client certificate: {}", e))
+            })?;
         builder = builder.identity(identity);
     }
 
     builder.build().map_err(TlsError::ClientCreationError)
 }
-
-
-
-

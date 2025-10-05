@@ -35,17 +35,14 @@ impl<C: Connection> ThirdPartyService<C> {
 
     /// Lookup locations by protocol and search fields
     pub async fn lookup_location(&self, protocol: &str, fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyLocation>, RepositoryError> {
-        // Validate protocol exists
-        let protocol_config = self.third_party_repo.get_protocol_by_id(protocol).await?;
-        if protocol_config.is_none() {
-            return Err(RepositoryError::NotFound {
+        // Validate protocol exists and extract value
+        let protocol_config = self.third_party_repo.get_protocol_by_id(protocol).await?
+            .ok_or_else(|| RepositoryError::NotFound {
                 entity_type: "Protocol".to_string(),
                 id: protocol.to_string(),
-            });
-        }
+            })?;
 
         // Validate search fields against protocol configuration
-        let protocol_config = protocol_config.unwrap();
         for field_name in fields.keys() {
             let field_exists = protocol_config.location_fields
                 .iter()
@@ -65,17 +62,14 @@ impl<C: Connection> ThirdPartyService<C> {
 
     /// Lookup users by protocol and search fields
     pub async fn lookup_user(&self, protocol: &str, fields: &HashMap<String, String>) -> Result<Vec<ThirdPartyUser>, RepositoryError> {
-        // Validate protocol exists
-        let protocol_config = self.third_party_repo.get_protocol_by_id(protocol).await?;
-        if protocol_config.is_none() {
-            return Err(RepositoryError::NotFound {
+        // Validate protocol exists and extract value
+        let protocol_config = self.third_party_repo.get_protocol_by_id(protocol).await?
+            .ok_or_else(|| RepositoryError::NotFound {
                 entity_type: "Protocol".to_string(),
                 id: protocol.to_string(),
-            });
-        }
+            })?;
 
         // Validate search fields against protocol configuration
-        let protocol_config = protocol_config.unwrap();
         for field_name in fields.keys() {
             let field_exists = protocol_config.user_fields
                 .iter()

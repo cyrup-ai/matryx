@@ -430,7 +430,7 @@ impl UserRepository {
 
     /// Check if user is admin (for admin endpoints)
     pub async fn is_admin(&self, user_id: &str) -> Result<bool, RepositoryError> {
-        let query = "SELECT is_admin FROM users WHERE user_id = $user_id";
+        let query = "SELECT is_admin FROM user WHERE user_id = $user_id";
         let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
         
         let admin_flags: Vec<bool> = result.take(0)?;
@@ -439,7 +439,7 @@ impl UserRepository {
 
     /// Check if user exists (for admin endpoints)
     pub async fn user_exists_admin(&self, user_id: &str) -> Result<bool, RepositoryError> {
-        let query = "SELECT user_id FROM users WHERE user_id = $user_id";
+        let query = "SELECT user_id FROM user WHERE user_id = $user_id";
         let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;
         
         let users: Vec<String> = result.take(0)?;
@@ -458,7 +458,7 @@ impl UserRepository {
                 u.user_id,
                 up.display_name,
                 up.avatar_url
-            FROM users u
+            FROM user u
             LEFT JOIN user_profiles up ON u.user_id = up.user_id
             JOIN room_members rm1 ON u.user_id = rm1.user_id
             JOIN room_members rm2 ON rm1.room_id = rm2.room_id

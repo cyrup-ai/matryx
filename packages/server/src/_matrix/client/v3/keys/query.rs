@@ -25,7 +25,8 @@ use matryx_entity::types::DeviceKeys;
 
 #[derive(Serialize, Deserialize)]
 pub struct KeysQueryResponse {
-    pub device_keys: std::collections::HashMap<String, std::collections::HashMap<String, DeviceKeys>>,
+    pub device_keys:
+        std::collections::HashMap<String, std::collections::HashMap<String, DeviceKeys>>,
     pub failures: std::collections::HashMap<String, Value>,
     pub master_keys: std::collections::HashMap<String, Value>,
     pub self_signing_keys: std::collections::HashMap<String, Value>,
@@ -184,8 +185,8 @@ async fn query_federated_keys(
     // Make federation request to /_matrix/federation/v1/user/keys/query
     let endpoint = format!("https://{}/_matrix/federation/v1/user/keys/query", server_name);
 
-    let request_body =
-        serde_json::to_string(&federation_request).map_err(|_e| FederationError::InvalidResponse)?;
+    let request_body = serde_json::to_string(&federation_request)
+        .map_err(|_e| FederationError::InvalidResponse)?;
 
     info!("Querying keys from federated server: {} for {} users", server_name, user_requests.len());
 
@@ -281,13 +282,13 @@ async fn can_access_user_keys(
     state: &AppState,
 ) -> bool {
     let keys_repo = KeysRepository::new(state.db.clone());
-    
+
     match keys_repo.can_access_user_keys(requesting_user_id, target_user_id).await {
         Ok(can_access) => can_access,
         Err(e) => {
             error!("Failed to check user key access: {}", e);
             false
-        }
+        },
     }
 }
 

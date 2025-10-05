@@ -1,6 +1,6 @@
+use crate::utils::response_helpers::matrix_response;
 use axum::response::IntoResponse;
 use serde_json::json;
-use crate::utils::response_helpers::matrix_response;
 
 pub async fn get() -> impl IntoResponse {
     matrix_response(json!({

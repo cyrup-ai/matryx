@@ -1,4 +1,8 @@
-use axum::{Json, extract::{Path, Query, State}, http::{HeaderMap, StatusCode}};
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{error, info};
@@ -45,13 +49,13 @@ pub async fn get(
 
     // Use ThirdPartyService for user lookup
     let third_party_service = ThirdPartyService::new(state.db.clone());
-    
+
     let users = match third_party_service.lookup_user(&protocol, &query.fields).await {
         Ok(users) => users,
         Err(e) => {
             error!("Failed to lookup third-party users for protocol '{}': {}", protocol, e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     // Convert to response format

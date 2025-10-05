@@ -18,6 +18,4 @@ pub use middleware::*;
 pub use signing::verify_x_matrix_auth;
 // Re-exported selectively to avoid unused import warnings
 
-
 pub use session_service::*;
-

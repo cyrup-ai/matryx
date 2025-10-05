@@ -7,7 +7,8 @@ use common::*;
 #[tokio::test]
 async fn test_push_notification_flow() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // 1. Create test user with pusher
     let user_response = server
@@ -21,7 +22,8 @@ async fn test_push_notification_flow() {
 
     assert_eq!(user_response.status_code(), 200);
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     // Set up pusher
     let pusher_response = server
@@ -55,7 +57,8 @@ async fn test_push_notification_flow() {
 
     assert_eq!(room_response.status_code(), 200);
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // 3. Send message to room (this should trigger push notification)
     let message_response = server
@@ -78,13 +81,16 @@ async fn test_push_notification_flow() {
 
     assert_eq!(pushers_response.status_code(), 200);
     let pushers_data: Value = pushers_response.json();
-    assert!(!pushers_data["pushers"].as_array().unwrap().is_empty());
+    assert!(!pushers_data["pushers"].as_array()
+        .expect("Test assertion: pushers response must contain pushers array")
+        .is_empty());
 }
 
 #[tokio::test]
 async fn test_room_preview_world_readable() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // 1. Create room with world_readable history
     let user_response = server
@@ -97,7 +103,8 @@ async fn test_room_preview_world_readable() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     let room_response = server
         .post("/_matrix/client/v3/createRoom")
@@ -115,7 +122,8 @@ async fn test_room_preview_world_readable() {
         .await;
 
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // Send a test message
     server
@@ -144,7 +152,8 @@ async fn test_room_preview_world_readable() {
 #[tokio::test]
 async fn test_room_preview_forbidden_for_non_world_readable() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // Create room with default (shared) history visibility
     let user_response = server
@@ -157,7 +166,8 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     let room_response = server
         .post("/_matrix/client/v3/createRoom")
@@ -169,7 +179,8 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
         .await;
 
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // Try to preview without authentication - should be forbidden
     let preview_response = server
@@ -182,7 +193,8 @@ async fn test_room_preview_forbidden_for_non_world_readable() {
 #[tokio::test]
 async fn test_guest_access_restrictions() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // 1. Enable guest access on room
     let user_response = server
@@ -195,7 +207,8 @@ async fn test_guest_access_restrictions() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     let room_response = server
         .post("/_matrix/client/v3/createRoom")
@@ -213,7 +226,8 @@ async fn test_guest_access_restrictions() {
         .await;
 
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // 2. Test guest user registration
     let guest_response = server
@@ -230,7 +244,7 @@ async fn test_guest_access_restrictions() {
     // Validate that the room_id is properly formatted
     assert!(room_id.starts_with('!'), "Room ID should be properly formatted: {}", room_id);
     assert!(room_id.contains(':'), "Room ID should contain server name: {}", room_id);
-    
+
     // In a full implementation, we would test guest access to this specific room
     // For now, we verify the room was created with the intended guest access configuration
 }
@@ -238,7 +252,8 @@ async fn test_guest_access_restrictions() {
 #[tokio::test]
 async fn test_room_history_visibility_enforcement() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // Test all history visibility modes
     let visibility_modes = vec!["invited", "joined", "shared", "world_readable"];
@@ -254,7 +269,8 @@ async fn test_room_history_visibility_enforcement() {
             .await;
 
         let user_data: Value = user_response.json();
-        let access_token = user_data["access_token"].as_str().unwrap();
+        let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
         let room_response = server
             .post("/_matrix/client/v3/createRoom")
@@ -278,7 +294,8 @@ async fn test_room_history_visibility_enforcement() {
 #[tokio::test]
 async fn test_room_tagging_operations() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // Create user and room
     let user_response = server
@@ -291,8 +308,10 @@ async fn test_room_tagging_operations() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
-    let user_id = user_data["user_id"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
+    let user_id = user_data["user_id"].as_str()
+        .expect("Test assertion: user response must contain user_id field");
 
     let room_response = server
         .post("/_matrix/client/v3/createRoom")
@@ -303,7 +322,8 @@ async fn test_room_tagging_operations() {
         .await;
 
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // Test Matrix reserved tags
     let reserved_tags = vec!["m.favourite", "m.lowpriority"];
@@ -339,14 +359,19 @@ async fn test_room_tagging_operations() {
 
     assert_eq!(get_tags_response.status_code(), 200);
     let tags_data: Value = get_tags_response.json();
-    assert!(tags_data["tags"].as_object().unwrap().contains_key("m.favourite"));
-    assert!(tags_data["tags"].as_object().unwrap().contains_key("u.work"));
+    assert!(tags_data["tags"].as_object()
+        .expect("Test assertion: tags response must contain tags object")
+        .contains_key("m.favourite"));
+    assert!(tags_data["tags"].as_object()
+        .expect("Test assertion: tags response must contain tags object")
+        .contains_key("u.work"));
 }
 
 #[tokio::test]
 async fn test_server_side_search() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // Create user and room with messages
     let user_response = server
@@ -359,7 +384,8 @@ async fn test_server_side_search() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     let room_response = server
         .post("/_matrix/client/v3/createRoom")
@@ -370,12 +396,15 @@ async fn test_server_side_search() {
         .await;
 
     let room_data: Value = room_response.json();
-    let room_id = room_data["room_id"].as_str().unwrap();
+    let room_id = room_data["room_id"].as_str()
+        .expect("Test assertion: room response must contain room_id field");
 
     // Send searchable messages
-    let messages = ["Hello world, this is a test message",
+    let messages = [
+        "Hello world, this is a test message",
         "Another message with different content",
-        "Final message for search testing"];
+        "Final message for search testing",
+    ];
 
     for (i, message) in messages.iter().enumerate() {
         server
@@ -417,7 +446,8 @@ async fn test_server_side_search() {
 #[tokio::test]
 async fn test_third_party_invites() {
     let app = create_test_app().await;
-    let server = TestServer::new(app).unwrap();
+    let server = TestServer::new(app)
+        .expect("Test setup: failed to create test server");
 
     // Create user and room
     let user_response = server
@@ -430,7 +460,8 @@ async fn test_third_party_invites() {
         .await;
 
     let user_data: Value = user_response.json();
-    let access_token = user_data["access_token"].as_str().unwrap();
+    let access_token = user_data["access_token"].as_str()
+        .expect("Test assertion: user response must contain access_token field");
 
     // Test 3PID endpoints exist and respond
     let threepid_response = server

@@ -600,7 +600,9 @@ mod tests {
         let db = surrealdb::engine::any::connect("memory")
             .await
             .expect("Failed to connect to in-memory database");
-        db.use_ns("test").use_db("test").await.unwrap();
+        db.use_ns("test").use_db("test")
+            .await
+            .expect("Failed to set test namespace and database");
         db
     }
 
@@ -652,9 +654,9 @@ mod tests {
             state.joined_rooms.insert(room_id.to_string(), JoinedRoomState::default());
         }
 
-        sync.update_state_with_event(room_id, event).await.unwrap();
+        sync.update_state_with_event(room_id, event).await.expect("Failed to update sync state with event");
 
         let state = sync.get_sync_state().await;
-        assert_eq!(state.joined_rooms.get(room_id).unwrap().timeline.len(), 1);
+        assert_eq!(state.joined_rooms.get(room_id).expect("Room should be in joined_rooms").timeline.len(), 1);
     }
 }

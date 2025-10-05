@@ -2,15 +2,12 @@
 #![allow(dead_code)]
 
 use crate::state::AppState;
-use matryx_surrealdb::repository::{
-    monitoring::MonitoringRepository,
-    metrics::HealthStatus,
-};
+use matryx_surrealdb::repository::{metrics::HealthStatus, monitoring::MonitoringRepository};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::interval;
-use tracing::{info, warn, error};
 use surrealdb::engine::any::Any;
+use tokio::time::interval;
+use tracing::{error, info, warn};
 
 pub struct HealthScheduler {
     app_state: Arc<AppState>,
@@ -21,7 +18,7 @@ pub struct HealthScheduler {
 impl HealthScheduler {
     pub fn new(app_state: Arc<AppState>, check_interval_seconds: u64) -> Self {
         let monitoring_repo = MonitoringRepository::new(app_state.db.clone());
-        
+
         Self {
             app_state,
             monitoring_repo,
@@ -32,11 +29,11 @@ impl HealthScheduler {
     /// Start periodic health checks
     pub async fn start(&self) {
         let mut interval = interval(self.check_interval);
-        
+
         info!("Starting health check scheduler with interval: {:?}", self.check_interval);
-        
+
         loop {
-            interval.tick().await;            
+            interval.tick().await;
             if let Err(e) = self.perform_health_check().await {
                 error!("Health check failed: {}", e);
             }
@@ -48,13 +45,11 @@ impl HealthScheduler {
 
         // Check database health
         let db_health = self.app_state.database_health_repo.comprehensive_health_check().await?;
-        
+
         // Record to monitoring system
-        self.monitoring_repo.record_health_check(
-            "database",
-            db_health.status.clone(),
-            db_health.details.as_deref()
-        ).await?;
+        self.monitoring_repo
+            .record_health_check("database", db_health.status.clone(), db_health.details.as_deref())
+            .await?;
 
         // Log health status
         match db_health.status {
@@ -62,13 +57,17 @@ impl HealthScheduler {
                 info!("Database health check: HEALTHY ({}ms)", db_health.response_time_ms);
             },
             HealthStatus::Degraded => {
-                warn!("Database health check: DEGRADED ({}ms) - {}", 
-                      db_health.response_time_ms, 
-                      db_health.details.unwrap_or_default());
+                warn!(
+                    "Database health check: DEGRADED ({}ms) - {}",
+                    db_health.response_time_ms,
+                    db_health.details.unwrap_or_default()
+                );
             },
             HealthStatus::Unhealthy => {
-                error!("Database health check: UNHEALTHY - {}", 
-                       db_health.details.unwrap_or_default());
+                error!(
+                    "Database health check: UNHEALTHY - {}",
+                    db_health.details.unwrap_or_default()
+                );
             },
         }
 
@@ -87,7 +86,7 @@ impl AppState {
     /// Start background health monitoring
     pub fn start_health_monitoring(self: Arc<Self>) {
         let scheduler = HealthScheduler::new(self.clone(), 60); // Check every minute
-        
+
         tokio::spawn(async move {
             scheduler.start().await;
         });

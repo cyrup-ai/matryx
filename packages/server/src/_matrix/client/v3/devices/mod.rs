@@ -105,7 +105,7 @@ pub async fn get(
         None => {
             warn!("Device list failed - user authentication required");
             return Err(StatusCode::UNAUTHORIZED);
-        }
+        },
     };
 
     info!("Processing device list request for user: {} from: {}", user_id, addr);
@@ -141,18 +141,16 @@ pub async fn get(
     // Convert to Matrix API format
     let device_infos: Vec<ClientDeviceInfo> = devices
         .into_iter()
-        .map(|device| {
-            ClientDeviceInfo {
-                device_id: device.device_id.clone(),
-                display_name: device.display_name.clone(),
-                last_seen_ip: device.last_seen_ip.clone(),
-                last_seen_ts: device.last_seen_ts.map(|ts| ts as u64),
-                user_id: device.user_id.clone(),
-                created_ts: device.created_at.timestamp() as u64,
-                device_keys: device.device_keys.and_then(|keys| serde_json::from_value(keys).ok()),
-                trust_level: TrustLevel::default(),
-                is_deleted: false,
-            }
+        .map(|device| ClientDeviceInfo {
+            device_id: device.device_id.clone(),
+            display_name: device.display_name.clone(),
+            last_seen_ip: device.last_seen_ip.clone(),
+            last_seen_ts: device.last_seen_ts.map(|ts| ts as u64),
+            user_id: device.user_id.clone(),
+            created_ts: device.created_at.timestamp() as u64,
+            device_keys: device.device_keys.and_then(|keys| serde_json::from_value(keys).ok()),
+            trust_level: TrustLevel::default(),
+            is_deleted: false,
         })
         .collect();
 
@@ -204,15 +202,13 @@ pub async fn register_device_with_keys(
         initial_device_display_name: request.initial_device_display_name.clone(),
     };
 
-    let initial_keys = request.initial_device_keys.map(|keys| {
-        matryx_entity::types::DeviceKey {
-            user_id: keys.user_id,
-            device_id: keys.device_id,
-            algorithms: keys.algorithms,
-            keys: keys.keys,
-            signatures: keys.signatures,
-            unsigned: None,
-        }
+    let initial_keys = request.initial_device_keys.map(|keys| matryx_entity::types::DeviceKey {
+        user_id: keys.user_id,
+        device_id: keys.device_id,
+        algorithms: keys.algorithms,
+        keys: keys.keys,
+        signatures: keys.signatures,
+        unsigned: None,
     });
 
     let created_device = device_repo
@@ -220,8 +216,15 @@ pub async fn register_device_with_keys(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Generate access token (placeholder implementation)
-    let access_token = format!("syt_{}_{}", user_id, chrono::Utc::now().timestamp());
+    // Generate JWT access token
+    let access_token = state
+        .session_service
+        .create_access_token(&user_id, &request.device_id)
+        .await
+        .map_err(|auth_error| {
+            error!("Failed to create JWT access token: {:?}", auth_error);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     info!("Device registration completed for user: {} device: {}", user_id, request.device_id);
 

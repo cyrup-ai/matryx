@@ -4,6 +4,30 @@ use serde_json::Value;
 use surrealdb::{Connection, Surreal};
 use uuid::Uuid;
 
+/// Parameters for creating a user report
+pub struct CreateReportParams<'a> {
+    pub reporter_id: &'a str,
+    pub reported_user_id: &'a str,
+    pub reason: &'a str,
+    pub content: Option<Value>,
+}
+
+/// Repository dependencies for report operations
+pub struct ReportRepositories<'a> {
+    pub membership_repo: &'a crate::repository::membership::MembershipRepository,
+    pub room_repo: &'a crate::repository::room::RoomRepository,
+    pub event_repo: &'a crate::repository::event::EventRepository,
+}
+
+/// Parameters for validating report authorization
+pub struct ValidateReportParams<'a> {
+    pub reporter_id: &'a str,
+    pub reported_user_id: &'a str,
+    pub room_id: Option<&'a str>,
+    pub event_id: Option<&'a str>,
+    pub reason: &'a str,
+}
+
 #[derive(Clone)]
 pub struct ReportsRepository<C: Connection> {
     db: Surreal<C>,
@@ -17,35 +41,49 @@ impl<C: Connection> ReportsRepository<C> {
     /// Create a new user report
     pub async fn create_user_report(
         &self,
-        reporter_id: &str,
-        reported_user_id: &str,
-        reason: &str,
-        content: Option<Value>,
+        params: CreateReportParams<'_>,
+        repos: ReportRepositories<'_>,
     ) -> Result<Report, RepositoryError> {
         // Validate parameters
-        if reason.is_empty() {
+        if params.reason.is_empty() {
             return Err(RepositoryError::Validation {
                 field: "reason".to_string(),
                 message: "Report reason cannot be empty".to_string(),
             });
         }
 
-        if reporter_id == reported_user_id {
+        if params.reporter_id == params.reported_user_id {
             return Err(RepositoryError::Validation {
                 field: "reported_user_id".to_string(),
                 message: "User cannot report themselves".to_string(),
             });
         }
 
-        // Validate report permissions
-        if !self.validate_report_permissions(reporter_id, reported_user_id).await? {
+        // Extract room_id and event_id from content parameter if available
+        let report_room_id = params.content.as_ref()
+            .and_then(|c| c.get("room_id"))
+            .and_then(|v| v.as_str());
+        let report_event_id = params.content.as_ref()
+            .and_then(|c| c.get("event_id"))
+            .and_then(|v| v.as_str());
+
+        // Validate report authorization
+        let validate_params = ValidateReportParams {
+            reporter_id: params.reporter_id,
+            reported_user_id: params.reported_user_id,
+            room_id: report_room_id,
+            event_id: report_event_id,
+            reason: params.reason,
+        };
+        
+        if !self.validate_report_authorization(validate_params, repos).await? {
             return Err(RepositoryError::Unauthorized {
-                reason: "User does not have permission to report this user".to_string(),
+                reason: "User does not have permission to report this content".to_string(),
             });
         }
 
         // Check for existing active report
-        if self.check_existing_report(reporter_id, reported_user_id).await? {
+        if self.check_existing_report(params.reporter_id, params.reported_user_id).await? {
             return Err(RepositoryError::Conflict {
                 message: "An active report already exists for this user".to_string(),
             });
@@ -54,10 +92,10 @@ impl<C: Connection> ReportsRepository<C> {
         let report_id = Uuid::new_v4().to_string();
         let report = Report::new(
             report_id.clone(),
-            reporter_id.to_string(),
-            reported_user_id.to_string(),
-            reason.to_string(),
-            content,
+            params.reporter_id.to_string(),
+            params.reported_user_id.to_string(),
+            params.reason.to_string(),
+            params.content,
         );
 
         let report_content = report.clone();
@@ -182,18 +220,18 @@ impl<C: Connection> ReportsRepository<C> {
         Ok(count.unwrap_or(0) > 0)
     }
 
-    /// Validate report permissions
-    pub async fn validate_report_permissions(
+    /// Validate report authorization
+    pub async fn validate_report_authorization(
         &self,
-        reporter_id: &str,
-        reported_user_id: &str,
+        params: ValidateReportParams<'_>,
+        repos: ReportRepositories<'_>,
     ) -> Result<bool, RepositoryError> {
         // Check if reporter exists and is active
         let reporter_query = "SELECT is_active FROM user WHERE user_id = $reporter_id LIMIT 1";
         let mut result = self
             .db
             .query(reporter_query)
-            .bind(("reporter_id", reporter_id.to_string()))
+            .bind(("reporter_id", params.reporter_id.to_string()))
             .await?;
 
         let reporter_rows: Vec<serde_json::Value> = result.take(0)?;
@@ -214,7 +252,7 @@ impl<C: Connection> ReportsRepository<C> {
         let mut result = self
             .db
             .query(reported_query)
-            .bind(("reported_user_id", reported_user_id.to_string()))
+            .bind(("reported_user_id", params.reported_user_id.to_string()))
             .await?;
 
         let reported_rows: Vec<serde_json::Value> = result.take(0)?;
@@ -222,8 +260,74 @@ impl<C: Connection> ReportsRepository<C> {
             return Ok(false);
         }
 
-        // Additional validation: check if users have interacted (optional)
-        // For now, allow any active user to report any existing user
+        // Validate reason length
+        if params.reason.is_empty() {
+            return Err(RepositoryError::Validation {
+                field: "reason".to_string(),
+                message: "Report reason is required".to_string(),
+            });
+        }
+
+        if params.reason.len() > 256 {
+            return Err(RepositoryError::Validation {
+                field: "reason".to_string(),
+                message: "Report reason too long (max 256 chars)".to_string(),
+            });
+        }
+
+        // Validate event existence and room visibility for event reports
+        if let Some(event_id_val) = params.event_id {
+            // Verify event exists
+            let event = repos.event_repo.get_event_by_id(event_id_val).await?;
+            if event.is_none() {
+                return Err(RepositoryError::NotFound {
+                    entity_type: "event".to_string(),
+                    id: event_id_val.to_string(),
+                });
+            }
+
+            // Verify reporter can see the content (if room_id provided)
+            if let Some(room_id_val) = params.room_id {
+                let membership = repos.membership_repo
+                    .get_membership(room_id_val, params.reporter_id)
+                    .await?;
+
+                if membership.is_none() {
+                    // Check if room is world_readable
+                    let visibility = repos.room_repo.get_room_history_visibility(room_id_val).await?;
+                    if visibility != "world_readable" {
+                        return Err(RepositoryError::Forbidden {
+                            reason: "Cannot report content in room you cannot access".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check rate limiting (max 10 reports per hour per user)
+        let rate_limit_query = "
+            SELECT count() as report_count FROM user_reports
+            WHERE reporter_id = $reporter_id
+            AND created_at > time::now() - 1h
+            GROUP ALL
+        ";
+
+        let mut result = self
+            .db
+            .query(rate_limit_query)
+            .bind(("reporter_id", params.reporter_id.to_string()))
+            .await?;
+
+        let rate_limit_rows: Vec<serde_json::Value> = result.take(0)?;
+        if let Some(row) = rate_limit_rows.first()
+            && let Some(count) = row.get("report_count").and_then(|v| v.as_i64())
+            && count >= 10
+        {
+            return Err(RepositoryError::Forbidden {
+                reason: "Too many reports, please try again later".to_string(),
+            });
+        }
+
         Ok(true)
     }
 }

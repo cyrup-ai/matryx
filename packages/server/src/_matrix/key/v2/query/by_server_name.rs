@@ -42,8 +42,14 @@ pub async fn get(
     let server_discovery = ServerDiscoveryOrchestrator::new(state.dns_resolver.clone());
 
     // Fetch and sign server keys using repository
-    match fetch_server_keys(&infrastructure_service, &server_discovery, &client, &server_name, &state.homeserver_name)
-        .await
+    match fetch_server_keys(
+        &infrastructure_service,
+        &server_discovery,
+        &client,
+        &server_name,
+        &state.homeserver_name,
+    )
+    .await
     {
         Ok(server_keys) => {
             info!("Successfully fetched keys for server: {}", server_name);

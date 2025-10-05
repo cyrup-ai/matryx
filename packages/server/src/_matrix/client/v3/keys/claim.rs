@@ -98,7 +98,7 @@ pub async fn post(
                                     "error": "Failed to query fallback keys"
                                 }),
                             );
-                        }
+                        },
                     }
                 },
                 Err(e) => {
@@ -112,7 +112,7 @@ pub async fn post(
                             "error": "Failed to claim one-time keys"
                         }),
                     );
-                }
+                },
             }
         }
 

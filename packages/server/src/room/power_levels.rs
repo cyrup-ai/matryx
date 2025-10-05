@@ -365,9 +365,10 @@ impl PowerLevelValidator {
     pub fn get_user_power_level(&self, power_levels: &Value, user_id: &str) -> i64 {
         // Check for user-specific power level
         if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
-            && let Some(level) = users.get(user_id).and_then(|v| v.as_i64()) {
-                return level;
-            }
+            && let Some(level) = users.get(user_id).and_then(|v| v.as_i64())
+        {
+            return level;
+        }
 
         // Fall back to users_default
         if let Some(default_level) = power_levels.get("users_default").and_then(|v| v.as_i64()) {
@@ -433,7 +434,11 @@ impl PowerLevelValidator {
     ///
     /// # Errors
     /// * `StatusCode::INTERNAL_SERVER_ERROR` - Database query error
-    pub async fn get_bulk_user_power_levels(&self, room_id: String, user_ids: Vec<String>) -> Result<Vec<(String, i64)>, StatusCode> {
+    pub async fn get_bulk_user_power_levels(
+        &self,
+        room_id: String,
+        user_ids: Vec<String>,
+    ) -> Result<Vec<(String, i64)>, StatusCode> {
         debug!("Getting bulk power levels for {} users in room {}", user_ids.len(), room_id);
 
         // First get room power levels configuration
@@ -447,7 +452,8 @@ impl PowerLevelValidator {
             WHERE room_id = $room_id AND user_id IN $user_ids
         ";
 
-        let mut result = self.db
+        let mut result = self
+            .db
             .query(query)
             .bind(("room_id", room_id.clone()))
             .bind(("user_ids", user_ids.clone()))
@@ -519,9 +525,10 @@ impl PowerLevelValidator {
     ) -> i64 {
         // Check for event-type specific power level
         if let Some(events) = power_levels.get("events").and_then(|e| e.as_object())
-            && let Some(level) = events.get(event_type).and_then(|v| v.as_i64()) {
-                return level;
-            }
+            && let Some(level) = events.get(event_type).and_then(|v| v.as_i64())
+        {
+            return level;
+        }
 
         // Fall back to state_default
         power_levels.get("state_default").and_then(|v| v.as_i64()).unwrap_or(50) // Matrix default state_default is 50
@@ -606,7 +613,10 @@ impl PowerLevelValidator {
         match self.membership_repo.get_membership(room_id, user_id).await {
             Ok(Some(membership)) => {
                 if membership.membership != matryx_entity::MembershipState::Join {
-                    debug!("User {} is not joined to room {} (membership: {:?})", user_id, room_id, membership.membership);
+                    debug!(
+                        "User {} is not joined to room {} (membership: {:?})",
+                        user_id, room_id, membership.membership
+                    );
                     return Ok(false);
                 }
             },
@@ -615,9 +625,12 @@ impl PowerLevelValidator {
                 return Ok(false);
             },
             Err(e) => {
-                error!("Failed to check membership for user {} in room {}: {:?}", user_id, room_id, e);
+                error!(
+                    "Failed to check membership for user {} in room {}: {:?}",
+                    user_id, room_id, e
+                );
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
+            },
         }
 
         let power_levels = self.get_room_power_levels(room_id).await?;
@@ -655,7 +668,10 @@ impl PowerLevelValidator {
         match self.membership_repo.get_membership(room_id, user_id).await {
             Ok(Some(membership)) => {
                 if membership.membership != matryx_entity::MembershipState::Join {
-                    debug!("User {} is not joined to room {} (membership: {:?})", user_id, room_id, membership.membership);
+                    debug!(
+                        "User {} is not joined to room {} (membership: {:?})",
+                        user_id, room_id, membership.membership
+                    );
                     return Ok(false);
                 }
             },
@@ -664,9 +680,12 @@ impl PowerLevelValidator {
                 return Ok(false);
             },
             Err(e) => {
-                error!("Failed to check membership for user {} in room {}: {:?}", user_id, room_id, e);
+                error!(
+                    "Failed to check membership for user {} in room {}: {:?}",
+                    user_id, room_id, e
+                );
                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
-            }
+            },
         }
 
         let power_levels = self.get_room_power_levels(room_id).await?;

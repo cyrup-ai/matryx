@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XMatrixAuth {
     pub origin: String,
-    pub destination: Option<String>,  // v1.3+ required
+    pub destination: Option<String>, // v1.3+ required
     pub key_id: String,
     pub signature: String,
 }
@@ -39,25 +39,25 @@ impl std::fmt::Display for XMatrixParseError {
         match self {
             XMatrixParseError::InvalidScheme => {
                 write!(f, "Authorization header must start with 'X-Matrix '")
-            }
+            },
             XMatrixParseError::InvalidParameterSyntax => {
                 write!(f, "Invalid parameter syntax in X-Matrix header")
-            }
+            },
             XMatrixParseError::InvalidToken => {
                 write!(f, "Invalid token characters in parameter")
-            }
+            },
             XMatrixParseError::UnterminatedQuotedString => {
                 write!(f, "Unterminated quoted string in parameter value")
-            }
+            },
             XMatrixParseError::InvalidEscapeSequence => {
                 write!(f, "Invalid escape sequence in quoted string")
-            }
+            },
             XMatrixParseError::MissingRequiredParameter(param) => {
                 write!(f, "Missing required parameter: {}", param)
-            }
+            },
             XMatrixParseError::InvalidParameterValue(param) => {
                 write!(f, "Invalid value for parameter: {}", param)
-            }
+            },
         }
     }
 }
@@ -109,7 +109,7 @@ pub fn parse_x_matrix_header(auth_header: &str) -> Result<XMatrixAuth, XMatrixPa
         .get("key")
         .ok_or_else(|| XMatrixParseError::MissingRequiredParameter("key".to_string()))?;
 
-    // Parse key parameter - must be in format "ed25519:keyid"  
+    // Parse key parameter - must be in format "ed25519:keyid"
     let key_id = if let Some(key_id) = key_param.strip_prefix("ed25519:") {
         key_id.to_string()
     } else {
@@ -124,13 +124,9 @@ pub fn parse_x_matrix_header(auth_header: &str) -> Result<XMatrixAuth, XMatrixPa
     // Destination parameter is optional for backward compatibility
     let destination = params.get("destination").cloned();
 
-    Ok(XMatrixAuth {
-        origin,
-        destination,
-        key_id,
-        signature,
-    })
-}/// Parse authentication parameters according to RFC 9110 Section 11.4
+    Ok(XMatrixAuth { origin, destination, key_id, signature })
+}
+/// Parse authentication parameters according to RFC 9110 Section 11.4
 ///
 /// Handles comma-separated name=value pairs with proper quoted-string support
 /// and Matrix compatibility mode for unquoted colons.
@@ -164,7 +160,7 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                 } else {
                     return Err(XMatrixParseError::InvalidToken);
                 }
-            }
+            },
 
             ParseState::ExpectingEquals => {
                 if ch == '=' {
@@ -174,7 +170,7 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                 } else {
                     return Err(XMatrixParseError::InvalidParameterSyntax);
                 }
-            }
+            },
 
             ParseState::ExpectingParamValue => {
                 if ch == '"' {
@@ -189,7 +185,7 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                 } else {
                     return Err(XMatrixParseError::InvalidParameterSyntax);
                 }
-            }
+            },
 
             ParseState::InQuotedString => {
                 if ch == '"' {
@@ -201,13 +197,13 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                     // Regular character in quoted string
                     current_value.push(ch);
                 }
-            }
+            },
 
             ParseState::AfterBackslash => {
                 // RFC 9110: any character can be escaped in quoted-string
                 current_value.push(ch);
                 state = ParseState::InQuotedString;
-            }
+            },
 
             ParseState::ExpectingCommaOrEnd => {
                 if ch == ',' {
@@ -216,7 +212,7 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                     current_name.clear();
                     current_value.clear();
                     state = ParseState::ExpectingParamName;
-                    
+
                     // Skip whitespace after comma
                     while chars.peek() == Some(&' ') || chars.peek() == Some(&'\t') {
                         chars.next();
@@ -229,7 +225,7 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
                 } else {
                     return Err(XMatrixParseError::InvalidParameterSyntax);
                 }
-            }
+            },
         }
     }
 
@@ -237,18 +233,18 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
     match state {
         ParseState::InQuotedString | ParseState::AfterBackslash => {
             return Err(XMatrixParseError::UnterminatedQuotedString);
-        }
+        },
         ParseState::ExpectingParamValue => {
             return Err(XMatrixParseError::InvalidParameterSyntax);
-        }
+        },
         ParseState::ExpectingCommaOrEnd | ParseState::ExpectingEquals => {
             if !current_name.is_empty() {
                 params.insert(current_name.trim().to_lowercase(), current_value.clone());
             }
-        }
+        },
         ParseState::ExpectingParamName => {
             // Empty parameters string is valid
-        }
+        },
     }
 
     Ok(params)
@@ -261,8 +257,8 @@ fn parse_auth_params(params_str: &str) -> Result<HashMap<String, String>, XMatri
 fn is_valid_token_char_with_matrix_compat(ch: char) -> bool {
     match ch {
         // RFC 9110 tchar characters
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-        '^' | '_' | '`' | '|' | '~' => true,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|'
+        | '~' => true,
         // Matrix compatibility: allow colons in unquoted values
         ':' => true,
         // ALPHA / DIGIT
@@ -279,7 +275,7 @@ mod tests {
     fn test_basic_x_matrix_parsing() {
         let header = "X-Matrix origin=example.com,key=ed25519:abc123,sig=def456";
         let auth = parse_x_matrix_header(header).unwrap();
-        
+
         assert_eq!(auth.origin, "example.com");
         assert_eq!(auth.key_id, "abc123");
         assert_eq!(auth.signature, "def456");
@@ -290,7 +286,7 @@ mod tests {
     fn test_quoted_values() {
         let header = r#"X-Matrix origin="example.com",key="ed25519:abc123",sig="def,456""#;
         let auth = parse_x_matrix_header(header).unwrap();
-        
+
         assert_eq!(auth.origin, "example.com");
         assert_eq!(auth.key_id, "abc123");
         assert_eq!(auth.signature, "def,456");
@@ -300,7 +296,7 @@ mod tests {
     fn test_escaped_quotes() {
         let header = r#"X-Matrix origin=example.com,key=ed25519:abc123,sig="def\"456""#;
         let auth = parse_x_matrix_header(header).unwrap();
-        
+
         assert_eq!(auth.signature, "def\"456");
     }
 
@@ -308,15 +304,16 @@ mod tests {
     fn test_matrix_compatibility_colons() {
         let header = "X-Matrix origin=matrix.example.com:8448,key=ed25519:abc123,sig=def456";
         let auth = parse_x_matrix_header(header).unwrap();
-        
+
         assert_eq!(auth.origin, "matrix.example.com:8448");
     }
 
     #[test]
     fn test_destination_parameter() {
-        let header = "X-Matrix origin=example.com,destination=target.com,key=ed25519:abc123,sig=def456";
+        let header =
+            "X-Matrix origin=example.com,destination=target.com,key=ed25519:abc123,sig=def456";
         let auth = parse_x_matrix_header(header).unwrap();
-        
+
         assert_eq!(auth.destination, Some("target.com".to_string()));
     }
 
@@ -324,7 +321,7 @@ mod tests {
     fn test_invalid_scheme() {
         let header = "Bearer token123";
         let result = parse_x_matrix_header(header);
-        
+
         assert!(matches!(result, Err(XMatrixParseError::InvalidScheme)));
     }
 
@@ -332,7 +329,7 @@ mod tests {
     fn test_missing_required_parameter() {
         let header = "X-Matrix origin=example.com,key=ed25519:abc123";
         let result = parse_x_matrix_header(header);
-        
+
         assert!(matches!(result, Err(XMatrixParseError::MissingRequiredParameter(_))));
     }
 
@@ -340,7 +337,7 @@ mod tests {
     fn test_invalid_key_format() {
         let header = "X-Matrix origin=example.com,key=rsa:abc123,sig=def456";
         let result = parse_x_matrix_header(header);
-        
+
         assert!(matches!(result, Err(XMatrixParseError::InvalidParameterValue(_))));
     }
 }

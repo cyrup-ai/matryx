@@ -3,18 +3,17 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
+use matryx_surrealdb::KeyBackupRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{error, info};
-use matryx_surrealdb::KeyBackupRepository;
 
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
     crypto::MatryxCryptoProvider,
 };
-
 
 #[derive(Deserialize)]
 pub struct CreateBackupVersionRequest {
@@ -41,8 +40,6 @@ pub struct BackupVersionInfo {
     pub etag: String,
     pub version: String,
 }
-
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
@@ -82,7 +79,7 @@ pub async fn get(
             // Convert auth_data from serde_json::Value to AuthData struct
             let auth_data: AuthData = serde_json::from_value(backup_version.auth_data.clone())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            
+
             let response = BackupVersionInfo {
                 algorithm: backup_version.algorithm.clone(),
                 auth_data,
@@ -90,8 +87,11 @@ pub async fn get(
                 etag: backup_version.etag.clone(),
                 version: backup_version.version.clone(),
             };
-            
-            info!("Retrieved backup version {} (created: {})", backup_version.version, backup_version.created_at);
+
+            info!(
+                "Retrieved backup version {} (created: {})",
+                backup_version.version, backup_version.created_at
+            );
             Ok(Json(response))
         },
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -151,8 +151,6 @@ pub async fn post(
     Ok(Json(CreateBackupVersionResponse { version }))
 }
 
-
-
 // Database operations
 pub async fn get_current_backup_version(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
@@ -161,11 +159,9 @@ pub async fn get_current_backup_version(
     let backup_repo = KeyBackupRepository::new(db.clone());
     match backup_repo.get_latest_backup_version(user_id).await {
         Ok(Some(backup_version)) => {
-            let count = get_backup_count(db, user_id, &backup_version.version)
-                .await
-                .unwrap_or(0);
+            let count = get_backup_count(db, user_id, &backup_version.version).await.unwrap_or(0);
             let etag = generate_backup_etag(user_id, &backup_version.version);
-            
+
             Ok(Some(BackupVersion {
                 version: backup_version.version.clone(),
                 algorithm: backup_version.algorithm,
@@ -190,7 +186,7 @@ async fn create_backup_version(
     let backup_repo = KeyBackupRepository::new(db.clone());
     let auth_data_json = serde_json::to_value(&request.auth_data)
         .map_err(|e| BackupError::Crypto(format!("Failed to serialize auth_data: {}", e)))?;
-    
+
     backup_repo
         .create_backup_version(user_id, &request.algorithm, &auth_data_json)
         .await
@@ -228,14 +224,10 @@ pub fn generate_backup_etag(user_id: &str, version: &str) -> String {
     format!("{}:{}", user_id, version)
 }
 
-// Helper function to extract version from query parameters
-pub fn extract_version_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
-    // In a real implementation, this would parse query parameters
-    // For now, we'll look for a custom header (this is a simplified approach)
-    headers
-        .get("X-Matrix-Backup-Version")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+// Query parameter struct for backup version
+#[derive(Deserialize)]
+pub struct BackupVersionQuery {
+    pub version: Option<String>,
 }
 
 // Validate backup version format (Matrix spec requires numeric versions)
@@ -254,16 +246,14 @@ pub async fn validate_backup_version(
     if !is_valid_backup_version(version) {
         return Err(BackupError::InvalidVersion);
     }
-    
+
     // Check if version exists for user
     let backup_repo = KeyBackupRepository::new(db.clone());
     match backup_repo.get_backup_version(user_id, version).await {
         Ok(Some(backup_version)) => {
-            let count = get_backup_count(db, user_id, version)
-                .await
-                .unwrap_or(0);
+            let count = get_backup_count(db, user_id, version).await.unwrap_or(0);
             let etag = generate_backup_etag(user_id, version);
-            
+
             Ok(BackupVersion {
                 version: backup_version.version,
                 algorithm: backup_version.algorithm,

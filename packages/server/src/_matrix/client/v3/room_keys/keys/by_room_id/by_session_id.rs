@@ -105,20 +105,21 @@ pub async fn get(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Get specific session key backup
-    match backup_repo.get_room_key(&user_id, &backup_version, &room_id, &session_id).await {
-        Ok(Some(room_key)) => {
-            Ok(Json(json!({
-                "first_message_index": room_key.first_message_index,
-                "forwarded_count": room_key.forwarded_count,
-                "is_verified": room_key.is_verified,
-                "session_data": room_key.session_data
-            })))
-        },
+    match backup_repo
+        .get_room_key(&user_id, &backup_version, &room_id, &session_id)
+        .await
+    {
+        Ok(Some(room_key)) => Ok(Json(json!({
+            "first_message_index": room_key.first_message_index,
+            "forwarded_count": room_key.forwarded_count,
+            "is_verified": room_key.is_verified,
+            "session_data": room_key.session_data
+        }))),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             error!("Failed to get session key backup: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        },
     }
 }
 

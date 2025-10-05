@@ -8,10 +8,10 @@ use std::sync::Arc;
 use tracing::{debug, error, warn};
 
 use crate::auth::AuthenticatedUser;
-use crate::state::AppState;
 use crate::federation::event_signer::EventSigner;
+use crate::state::AppState;
 use matryx_entity::types::Event;
-use matryx_surrealdb::repository::{EventRepository, RoomRepository, MembershipRepository};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}
 ///
@@ -144,7 +144,9 @@ async fn check_room_state_permission(
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Check user's membership in the room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let membership = membership_repo.get_user_membership_status(room_id, user_id).await
+    let membership = membership_repo
+        .get_user_membership_status(room_id, user_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     // User can view state if they are joined, invited, or have left (for historical state)
@@ -154,7 +156,9 @@ async fn check_room_state_permission(
 
     // Check if room has world-readable history
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let world_readable = room_repo.is_room_world_readable(room_id).await
+    let world_readable = room_repo
+        .is_room_world_readable(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(world_readable)
 }
@@ -168,7 +172,9 @@ async fn check_state_send_permission(
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // User must be joined to send state events
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let membership = membership_repo.get_user_membership_status(room_id, user_id).await
+    let membership = membership_repo
+        .get_user_membership_status(room_id, user_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     if !matches!(membership, Some(ref m) if m == "join") {
@@ -183,8 +189,6 @@ async fn check_state_send_permission(
     Ok(user_power >= required_power)
 }
 
-
-
 /// Get current state event by type and state_key using repository
 async fn get_current_state_event(
     state: &AppState,
@@ -193,7 +197,9 @@ async fn get_current_state_event(
     state_key: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let event = event_repo.get_current_state_event(room_id, event_type, state_key).await
+    let event = event_repo
+        .get_current_state_event(room_id, event_type, state_key)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     if let Some(event) = event {
@@ -219,7 +225,9 @@ async fn get_room_power_levels(
     room_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let power_levels = event_repo.get_room_power_levels(room_id).await
+    let power_levels = event_repo
+        .get_room_power_levels(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(power_levels)
 }
@@ -231,9 +239,10 @@ fn get_user_power_level(
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     // Check explicit user power levels
     if let Some(users) = power_levels.get("users").and_then(|u| u.as_object())
-        && let Some(user_power) = users.get(user_id).and_then(|p| p.as_i64()) {
-            return Ok(user_power);
-        }
+        && let Some(user_power) = users.get(user_id).and_then(|p| p.as_i64())
+    {
+        return Ok(user_power);
+    }
 
     // Default user power level
     Ok(power_levels.get("users_default").and_then(|d| d.as_i64()).unwrap_or(0))
@@ -246,9 +255,10 @@ fn get_required_power_level(
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     // Check specific event type power levels
     if let Some(events) = power_levels.get("events").and_then(|e| e.as_object())
-        && let Some(required_power) = events.get(event_type).and_then(|p| p.as_i64()) {
-            return Ok(required_power);
-        }
+        && let Some(required_power) = events.get(event_type).and_then(|p| p.as_i64())
+    {
+        return Ok(required_power);
+    }
 
     // Default state event power level
     Ok(power_levels.get("state_default").and_then(|d| d.as_i64()).unwrap_or(50))
@@ -259,27 +269,32 @@ fn validate_state_event_content(event_type: &str, content: &Value) -> Result<(),
     match event_type {
         "m.room.name" => {
             if let Some(name) = content.get("name")
-                && !name.is_string() {
-                    return Err("name must be a string".to_string());
-                }
+                && !name.is_string()
+            {
+                return Err("name must be a string".to_string());
+            }
         },
         "m.room.topic" => {
             if let Some(topic) = content.get("topic")
-                && !topic.is_string() {
-                    return Err("topic must be a string".to_string());
-                }
+                && !topic.is_string()
+            {
+                return Err("topic must be a string".to_string());
+            }
         },
         "m.room.avatar" => {
             if let Some(url) = content.get("url")
-                && !url.is_string() {
-                    return Err("url must be a string".to_string());
-                }
+                && !url.is_string()
+            {
+                return Err("url must be a string".to_string());
+            }
         },
         "m.room.canonical_alias" => {
             if let Some(alias) = content.get("alias")
-                && !alias.is_string() && !alias.is_null() {
-                    return Err("alias must be a string or null".to_string());
-                }
+                && !alias.is_string()
+                && !alias.is_null()
+            {
+                return Err("alias must be a string or null".to_string());
+            }
         },
         _ => {
             // Allow other event types without validation
@@ -302,8 +317,24 @@ async fn send_state_event(
     let event_id = format!("${}", uuid::Uuid::new_v4());
     let origin_server_ts = chrono::Utc::now().timestamp_millis();
 
-    // Get current depth for the room
-    let depth = get_room_current_depth(state, room_id).await?;
+    // Get forward extremities for prev_events (DAG compliance)
+    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
+    let prev_events = event_repo.get_prev_events(room_id).await.map_err(|e| {
+        error!("Failed to get prev_events for room {}: {}", room_id, e);
+        Box::new(std::io::Error::other("Failed to get prev_events")) as Box<dyn std::error::Error + Send + Sync>
+    })?;
+
+    // Calculate depth per Matrix spec: max(prev_events.depth) + 1
+    let depth = event_repo.calculate_event_depth(&prev_events).await.map_err(|e| {
+        error!("Failed to calculate event depth: {}", e);
+        Box::new(std::io::Error::other("Failed to calculate depth")) as Box<dyn std::error::Error + Send + Sync>
+    })?;
+
+    // Get auth events for authorization validation (DAG compliance)
+    let auth_events = event_repo.get_auth_events(room_id, event_type, sender, state_key).await.map_err(|e| {
+        error!("Failed to get auth_events for room {}: {}", room_id, e);
+        Box::new(std::io::Error::other("Failed to get auth_events")) as Box<dyn std::error::Error + Send + Sync>
+    })?;
 
     // Create the event using the entity constructor
     let mut event = Event::new(
@@ -317,17 +348,15 @@ async fn send_state_event(
 
     // Set additional fields for state events
     event.state_key = Some(state_key.to_string());
-    event.depth = Some(depth + 1);
+    event.depth = Some(depth);
     event.received_ts = Some(chrono::Utc::now().timestamp_millis());
     event.outlier = Some(false);
 
-    // TODO: Populate with proper auth events (for Matrix DAG compliance)
-    // This should include room creation event, power levels, etc.
-    event.auth_events = Some(vec![]);
+    // Populate with proper auth events (for Matrix DAG compliance)
+    event.auth_events = Some(auth_events);
 
-    // TODO: Populate with prev events (for Matrix DAG compliance)
-    // This should include references to previous events in the room
-    event.prev_events = Some(vec![]);
+    // Populate with prev events (for Matrix DAG compliance)
+    event.prev_events = Some(prev_events);
 
     // Sign the event using proper Matrix cryptographic signatures
     // This replaces the dangerous Default::default() stubs
@@ -340,15 +369,15 @@ async fn send_state_event(
         Ok(signer) => signer,
         Err(e) => {
             error!("Failed to create event signer: {:?}", e);
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to create event signer")));
-        }
+            return Err(Box::new(std::io::Error::other("Failed to create event signer")));
+        },
     };
 
     // Sign the event with proper Matrix signatures and hashes
     let mut signed_event = event.clone();
     if let Err(e) = event_signer.sign_outgoing_event(&mut signed_event, None).await {
         error!("Failed to sign state event: {:?}", e);
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to sign state event")));
+        return Err(Box::new(std::io::Error::other("Failed to sign state event")));
     }
 
     // Store the properly signed event
@@ -356,15 +385,4 @@ async fn send_state_event(
     event_repo.create(&signed_event).await?;
 
     Ok(event_id)
-}
-
-/// Get current depth for a room using repository
-async fn get_room_current_depth(
-    state: &AppState,
-    room_id: &str,
-) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let depth = event_repo.get_room_current_depth(room_id).await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    Ok(depth)
 }

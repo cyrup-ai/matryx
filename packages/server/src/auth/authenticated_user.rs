@@ -30,16 +30,25 @@ impl AuthenticatedUser {
     /// Check if this user can access a specific room
     pub async fn can_access_room(&self, state: &AppState, room_id: String) -> bool {
         let auth_repo = AuthRepository::new(state.db.clone());
-        
-        auth_repo.check_user_membership(&self.user_id, &room_id).await.unwrap_or_default()
+
+        auth_repo
+            .check_user_membership(&self.user_id, &room_id)
+            .await
+            .unwrap_or_default()
     }
 
     /// Check if this user can access a specific resource
-    pub async fn can_access_resource(&self, state: &AppState, resource_type: &str, resource_id: &str) -> Result<bool, crate::auth::MatrixAuthError> {
+    pub async fn can_access_resource(
+        &self,
+        state: &AppState,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<bool, crate::auth::MatrixAuthError> {
         match resource_type {
             "room" => {
                 let auth_repo = AuthRepository::new(state.db.clone());
-                auth_repo.check_user_membership(&self.user_id, resource_id)
+                auth_repo
+                    .check_user_membership(&self.user_id, resource_id)
                     .await
                     .map_err(|e| crate::auth::MatrixAuthError::DatabaseError(e.to_string()))
             },
@@ -49,22 +58,22 @@ impl AuthenticatedUser {
                     Ok(true)
                 } else {
                     self.is_admin(state).await
-                        .map_err(|e| e)
                 }
             },
             _ => {
                 // Default: deny access to unknown resource types
                 Ok(false)
-            }
+            },
         }
     }
 
     /// Check if this user has admin privileges
     pub async fn is_admin(&self, state: &AppState) -> Result<bool, crate::auth::MatrixAuthError> {
         let auth_repo = AuthRepository::new(state.db.clone());
-        
+
         // Check if user has admin role in the database
-        auth_repo.is_user_admin(&self.user_id)
+        auth_repo
+            .is_user_admin(&self.user_id)
             .await
             .map_err(|e| crate::auth::MatrixAuthError::DatabaseError(e.to_string()))
     }
@@ -79,13 +88,13 @@ impl AuthenticatedUser {
     pub fn localpart(&self) -> Option<&str> {
         // Matrix user IDs are in format @localpart:homeserver
         // Extract everything after @ and before :
-        if let Some(stripped) = self.user_id.strip_prefix('@') {
-            if let Some(colon_pos) = stripped.find(':') {
-                let localpart = &stripped[..colon_pos];
-                // Validate that localpart is not empty
-                if !localpart.is_empty() {
-                    return Some(localpart);
-                }
+        if let Some(stripped) = self.user_id.strip_prefix('@')
+            && let Some(colon_pos) = stripped.find(':')
+        {
+            let localpart = &stripped[..colon_pos];
+            // Validate that localpart is not empty
+            if !localpart.is_empty() {
+                return Some(localpart);
             }
         }
         // Return None for malformed user IDs
@@ -135,7 +144,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     token: access_token.clone(),
                     user_id: user_id.clone(),
                     device_id: device_id.clone(),
-                    expires_at: claims.exp.map(|exp| exp as i64),
+                    expires_at: claims.exp,
                 };
                 let matrix_auth = crate::auth::MatrixAuth::User(matrix_token);
 
@@ -153,7 +162,9 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                 let auth_repo = AuthRepository::new(state.db.clone());
 
                 // Check if user exists and is active
-                let user_active = auth_repo.is_user_active(&user_id).await
+                let user_active = auth_repo
+                    .is_user_active(&user_id)
+                    .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
                 if !user_active {
@@ -161,7 +172,9 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                 }
 
                 // Verify device exists and is associated with user
-                let device_valid = auth_repo.validate_device(&device_id, &user_id).await
+                let device_valid = auth_repo
+                    .validate_device(&device_id, &user_id)
+                    .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
                 if !device_valid {

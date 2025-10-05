@@ -1,6 +1,8 @@
 use crate::repository::error::RepositoryError;
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{SigningKey, Signer};
+use matryx_entity::utils::canonical_json::canonical_json_for_signing;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
@@ -337,14 +339,21 @@ impl CryptoRepository {
                             Ok(()) => {
                                 // Signature is valid
                             },
-                            Err(_) => {
-                                // Signature verification failed - for now, we'll still proceed
-                                // but in production this should return an error
+                            Err(sig_error) => {
+                                // Signature verification failed - reject per Matrix spec
+                                return Err(RepositoryError::Validation {
+                                    field: "signature".to_string(),
+                                    message: format!("Ed25519 signature verification failed: {}", sig_error),
+                                });
                             }
                         }
                     },
-                    Err(_) => {
-                        // Invalid key format - proceed with basic validation
+                    Err(key_error) => {
+                        // Invalid key format - reject
+                        return Err(RepositoryError::Validation {
+                            field: "signing_key".to_string(),
+                            message: format!("Invalid Ed25519 key format: {}", key_error),
+                        });
                     }
                 }
             }
@@ -375,24 +384,27 @@ impl CryptoRepository {
             });
         }
 
-        // Create canonical JSON
-        let mut canonical_value = key.clone();
-        if let Some(obj) = canonical_value.as_object_mut() {
-            obj.remove("signatures");
-            obj.remove("unsigned");
-        }
+        // Get canonical JSON for signing (removes signatures and unsigned)
+        let canonical_json = canonical_json_for_signing(key)
+            .map_err(|e| RepositoryError::SerializationError {
+                message: format!("Canonical JSON error: {}", e),
+            })?;
 
-        let canonical_json = serde_json::to_string(&canonical_value)
-            .map_err(RepositoryError::Serialization)?;
+        // Convert signing key bytes to fixed-size array
+        let key_array: [u8; 32] = signing_key_bytes.try_into()
+            .map_err(|_| RepositoryError::Validation {
+                field: "signing_key".to_string(),
+                message: "Signing key must be exactly 32 bytes".to_string(),
+            })?;
 
-        // In a real implementation, this would use actual ed25519 signing
-        // For now, create a mock signature based on the content
-        let signature_content = format!("{}:{}", canonical_json, signing_key);
-        let mock_signature = general_purpose::STANDARD.encode(signature_content.as_bytes());
+        // Create signing key and sign the canonical JSON
+        let signing_key_obj = SigningKey::from_bytes(&key_array);
+        let signature = signing_key_obj.sign(canonical_json.as_bytes());
+        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         Ok(Signature {
-            signature: mock_signature,
-            key_id: "mock_key_id".to_string(),
+            signature: signature_b64,
+            key_id: "key".to_string(),
             algorithm: "ed25519".to_string(),
         })
     }

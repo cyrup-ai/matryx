@@ -3,11 +3,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use surrealdb::engine::any::Any;
+use tokio::task::JoinHandle;
+use tokio::time::{interval, Duration as TokioDuration};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::MatrixAuthError;
-use matryx_surrealdb::repository::{AuthRepository, uia::{UiaRepository, UiaSession}};
+use matryx_surrealdb::repository::{
+    AuthRepository,
+    uia::{UiaRepository, UiaSession},
+};
 
 // Re-export UiaFlow for use by other modules in the server crate
 pub use matryx_surrealdb::repository::uia::UiaFlow;
@@ -98,11 +103,16 @@ pub struct UiaService {
     session_lifetime: Duration,
     require_captcha: bool,
     require_email_verification: bool,
-    _cleanup_interval_hours: u64, // TODO: Implement periodic cleanup task
+    cleanup_task: Option<JoinHandle<()>>,
 }
 
 impl UiaService {
-    pub fn new(uia_repo: UiaRepository<Any>, auth_repo: AuthRepository<Any>, homeserver_name: String, config: UiaConfig) -> Self {
+    pub fn new(
+        uia_repo: UiaRepository<Any>,
+        auth_repo: AuthRepository<Any>,
+        homeserver_name: String,
+        config: UiaConfig,
+    ) -> Self {
         Self {
             uia_repo,
             auth_repo,
@@ -110,7 +120,7 @@ impl UiaService {
             session_lifetime: Duration::minutes(config.session_lifetime_minutes),
             require_captcha: config.require_captcha,
             require_email_verification: config.require_email_verification,
-            _cleanup_interval_hours: config.cleanup_interval_hours,
+            cleanup_task: None,
         }
     }
 
@@ -250,16 +260,14 @@ impl UiaService {
                     })
                 }
             },
-            Err(e) => {
-                Err(UiaErrorResponse {
-                    flows: session.flows.clone(),
-                    params: session.params.clone(),
-                    session: Some(session_id.to_string()),
-                    completed: Some(session.completed_stages.clone()),
-                    error: format!("Authentication error: {:?}", e),
-                    errcode: "M_FORBIDDEN".to_string(),
-                })
-            },
+            Err(e) => Err(UiaErrorResponse {
+                flows: session.flows.clone(),
+                params: session.params.clone(),
+                session: Some(session_id.to_string()),
+                completed: Some(session.completed_stages.clone()),
+                error: format!("Authentication error: {:?}", e),
+                errcode: "M_FORBIDDEN".to_string(),
+            }),
         }
     }
 
@@ -462,8 +470,6 @@ impl UiaService {
         }
     }
 
-
-
     /// Verify CAPTCHA response using existing CaptchaService
     async fn verify_captcha_response(&self, response: &str) -> Result<bool, MatrixAuthError> {
         // Use existing CaptchaService from captcha.rs
@@ -497,11 +503,10 @@ impl UiaService {
         if threepid_creds.id_server.is_some() || threepid_creds.id_access_token.is_some() {
             tracing::debug!("Identity server parameters provided (deprecated in Matrix spec)");
         }
-        
+
         // Use existing ThirdPartyValidationSessionRepository
         use matryx_surrealdb::repository::{
-            ThirdPartyValidationSessionRepository,
-            ThirdPartyValidationSessionRepositoryTrait,
+            ThirdPartyValidationSessionRepository, ThirdPartyValidationSessionRepositoryTrait,
         };
 
         let any_db = self.uia_repo.get_db().clone();
@@ -525,7 +530,10 @@ impl UiaService {
     }
 
     /// Resolve user identifier to Matrix user ID
-    async fn resolve_user_identifier(&self, identifier: &UserIdentifier) -> Result<String, MatrixAuthError> {
+    async fn resolve_user_identifier(
+        &self,
+        identifier: &UserIdentifier,
+    ) -> Result<String, MatrixAuthError> {
         match identifier.id_type.as_str() {
             "m.id.user" => {
                 // Direct user ID or localpart
@@ -543,42 +551,44 @@ impl UiaService {
             },
             "m.id.thirdparty" => {
                 // Third-party identifier (email, phone, etc.)
-                let medium = identifier.medium.as_ref()
-                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
-                let address = identifier.address.as_ref()
-                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
-                
+                let medium =
+                    identifier.medium.as_ref().ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+                let address =
+                    identifier.address.as_ref().ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+
                 // Look up user by third-party identifier
                 match self.auth_repo.get_user_by_threepid(medium, address).await {
                     Ok(Some(user_id)) => Ok(user_id),
                     Ok(None) => Err(MatrixAuthError::InvalidCredentials),
-                    Err(_) => Err(MatrixAuthError::DatabaseError("Failed to resolve user identifier".to_string())),
+                    Err(_) => Err(MatrixAuthError::DatabaseError(
+                        "Failed to resolve user identifier".to_string(),
+                    )),
                 }
             },
             "m.id.phone" => {
                 // Phone number identifier
-                let phone = identifier.address.as_ref()
-                    .ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
-                
+                let phone =
+                    identifier.address.as_ref().ok_or(MatrixAuthError::InvalidXMatrixFormat)?;
+
                 match self.auth_repo.get_user_by_threepid("msisdn", phone).await {
                     Ok(Some(user_id)) => Ok(user_id),
                     Ok(None) => Err(MatrixAuthError::InvalidCredentials),
-                    Err(_) => Err(MatrixAuthError::DatabaseError("Failed to resolve phone identifier".to_string())),
+                    Err(_) => Err(MatrixAuthError::DatabaseError(
+                        "Failed to resolve phone identifier".to_string(),
+                    )),
                 }
             },
             _ => {
                 warn!("Unknown user identifier type: {}", identifier.id_type);
                 Err(MatrixAuthError::InvalidXMatrixFormat)
-            }
+            },
         }
     }
 
     /// Get default UIA flows for different operations
     fn get_default_flows(&self) -> Vec<UiaFlow> {
-        let mut flows = vec![
-            UiaFlow { stages: vec!["m.login.password".to_string()] },
-        ];
-        
+        let mut flows = vec![UiaFlow { stages: vec!["m.login.password".to_string()] }];
+
         // Add captcha flow if configured
         if self.require_captcha {
             flows.push(UiaFlow {
@@ -588,7 +598,7 @@ impl UiaService {
                 ],
             });
         }
-        
+
         // Add email verification flow if configured
         if self.require_email_verification {
             flows.push(UiaFlow {
@@ -598,8 +608,49 @@ impl UiaService {
                 ],
             });
         }
-        
+
         flows
+    }
+
+    /// Start the periodic cleanup task
+    pub fn start_cleanup_task(&mut self, interval_hours: u64) {
+        let repo = self.uia_repo.clone();
+        let interval_duration = TokioDuration::from_secs(interval_hours * 3600);
+        
+        let handle = tokio::spawn(async move {
+            let mut interval = interval(interval_duration);
+            
+            loop {
+                interval.tick().await;
+                
+                match repo.cleanup_expired_sessions().await {
+                    Ok(count) => {
+                        tracing::info!("UIA cleanup: deleted {} expired sessions", count);
+                    }
+                    Err(e) => {
+                        tracing::error!("UIA cleanup failed: {}", e);
+                    }
+                }
+            }
+        });
+        
+        self.cleanup_task = Some(handle);
+    }
+    
+    /// Stop the cleanup task gracefully
+    pub async fn stop_cleanup_task(&mut self) {
+        if let Some(handle) = self.cleanup_task.take() {
+            handle.abort();
+            tracing::info!("UIA cleanup task stopped");
+        }
+    }
+}
+
+impl Drop for UiaService {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.cleanup_task {
+            handle.abort();
+        }
     }
 }
 

@@ -76,9 +76,8 @@ pub struct ThreadParticipation {
     pub room_id: String,
     pub thread_root_id: String,
     pub user_id: String,
-    pub first_event_id: String,
-    pub latest_event_id: String,
-    pub event_count: u32,
+    pub participating: bool,
+    pub last_read_event_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -97,6 +96,7 @@ impl<C: Connection> ThreadsRepository<C> {
     pub async fn get_thread_roots(
         &self,
         room_id: &str,
+        user_id: Option<&str>,
         include: Option<ThreadInclude>,
         since: Option<&str>,
         limit: Option<u32>,
@@ -115,8 +115,21 @@ impl<C: Connection> ThreadsRepository<C> {
 
         // Add include filter
         if let Some(ThreadInclude::Participated) = include {
-            // This would need user_id parameter to filter participated threads
-            // For now, we'll ignore this filter
+            if let Some(uid) = user_id {
+                // Filter to threads where user has participated
+                query.push_str(" AND (
+                    thread_metadata.root_event_sender = $user_id OR
+                    EXISTS (
+                        SELECT 1 FROM thread_event
+                        WHERE thread_event.thread_id = thread_metadata.thread_id
+                        AND thread_event.sender = $user_id
+                    )
+                )");
+                params.push(("user_id", uid.to_string()));
+            } else {
+                // Cannot filter by participation without user_id
+                tracing::warn!("ThreadInclude::Participated requested but no user_id provided");
+            }
         }
 
         // Add since filter
@@ -152,18 +165,24 @@ impl<C: Connection> ThreadsRepository<C> {
             let events: Vec<Event> = event_result.take(0)?;
 
             if let Some(latest_event) = events.into_iter().next() {
+                let thread_root_id = data
+                    .get("thread_root_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
                 let thread_summary = ThreadSummary {
                     latest_event: latest_event.clone(),
                     count: data.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    current_user_participated: false, // TODO: Check user participation
+                    current_user_participated: if let Some(uid) = user_id {
+                        self.check_user_participated(room_id, &thread_root_id, uid).await.unwrap_or(false)
+                    } else {
+                        false
+                    },
                 };
 
                 let thread_root = ThreadRoot {
-                    event_id: data
-                        .get("thread_root_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    event_id: thread_root_id,
                     latest_event,
                     unsigned: ThreadUnsigned { thread: thread_summary },
                 };
@@ -234,12 +253,16 @@ impl<C: Connection> ThreadsRepository<C> {
         let mut query_result = result.await?;
         let events: Vec<Event> = query_result.take(0)?;
 
+        // Generate pagination tokens
+        let (start, end) = crate::pagination::generate_timeline_tokens(&events, room_id);
+        let next_batch = crate::pagination::generate_next_batch(&events, room_id, limit_value as usize);
+
         Ok(ThreadsListResponse {
             chunk: events,
-            start: None, // TODO: Implement pagination tokens
-            end: None,   // TODO: Implement pagination tokens
-            prev_batch: None,
-            next_batch: None,
+            start,
+            end,
+            prev_batch: None, // No prev_batch for initial query
+            next_batch,
         })
     }
 
@@ -340,6 +363,7 @@ impl<C: Connection> ThreadsRepository<C> {
         &self,
         room_id: &str,
         thread_root_id: &str,
+        user_id: Option<&str>,
     ) -> Result<ThreadSummary, RepositoryError> {
         // Get thread metadata
         let metadata_query = "
@@ -384,7 +408,11 @@ impl<C: Connection> ThreadsRepository<C> {
         Ok(ThreadSummary {
             latest_event,
             count: thread_data.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            current_user_participated: false, // TODO: Check user participation
+            current_user_participated: if let Some(uid) = user_id {
+                self.check_user_participated(room_id, thread_root_id, uid).await.unwrap_or(false)
+            } else {
+                false
+            },
         })
     }
 
@@ -540,12 +568,10 @@ impl<C: Connection> ThreadsRepository<C> {
             let insert_query = "
                 INSERT INTO thread_participation (
                     id, room_id, thread_root_id, user_id,
-                    first_event_id, latest_event_id, event_count,
-                    created_at, updated_at
+                    participating, created_at, updated_at
                 ) VALUES (
                     $id, $room_id, $thread_root_id, $user_id,
-                    $first_event_id, $latest_event_id, $event_count,
-                    $created_at, $updated_at
+                    true, $created_at, $updated_at
                 )
             ";
 
@@ -555,9 +581,6 @@ impl<C: Connection> ThreadsRepository<C> {
                 .bind(("room_id", room_id.to_string()))
                 .bind(("thread_root_id", thread_root_id.to_string()))
                 .bind(("user_id", user_id.to_string()))
-                .bind(("first_event_id", event_id.to_string()))
-                .bind(("latest_event_id", event_id.to_string()))
-                .bind(("event_count", 1u32))
                 .bind(("created_at", Utc::now()))
                 .bind(("updated_at", Utc::now()))
                 .await?;
@@ -565,8 +588,7 @@ impl<C: Connection> ThreadsRepository<C> {
             // Update existing participation
             let update_query = "
                 UPDATE thread_participation SET
-                    latest_event_id = $latest_event_id,
-                    event_count = event_count + 1,
+                    participating = true,
                     updated_at = $updated_at
                 WHERE room_id = $room_id
                 AND thread_root_id = $thread_root_id
@@ -575,7 +597,6 @@ impl<C: Connection> ThreadsRepository<C> {
 
             self.db
                 .query(update_query)
-                .bind(("latest_event_id", event_id.to_string()))
                 .bind(("updated_at", Utc::now()))
                 .bind(("room_id", room_id.to_string()))
                 .bind(("thread_root_id", thread_root_id.to_string()))
@@ -584,6 +605,21 @@ impl<C: Connection> ThreadsRepository<C> {
         }
 
         Ok(())
+    }
+
+    /// Check if a user has participated in a thread
+    /// Returns true if user has posted to the thread, false otherwise
+    async fn check_user_participated(
+        &self,
+        room_id: &str,
+        thread_root_id: &str,
+        user_id: &str,
+    ) -> Result<bool, RepositoryError> {
+        let participation = self
+            .get_user_participation(room_id, thread_root_id, user_id)
+            .await?;
+        
+        Ok(participation.map(|p| p.participating).unwrap_or(false))
     }
 
     /// Get user's participation in a thread
@@ -619,17 +655,8 @@ impl<C: Connection> ThreadsRepository<C> {
                     .unwrap_or("")
                     .to_string(),
                 user_id: data.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                first_event_id: data
-                    .get("first_event_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                latest_event_id: data
-                    .get("latest_event_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                event_count: data.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                participating: data.get("participating").and_then(|v| v.as_bool()).unwrap_or(true),
+                last_read_event_id: data.get("last_read_event_id").and_then(|v| v.as_str()).map(String::from),
                 created_at: data
                     .get("created_at")
                     .and_then(|v| v.as_str())
@@ -679,17 +706,8 @@ impl<C: Connection> ThreadsRepository<C> {
                     .unwrap_or("")
                     .to_string(),
                 user_id: data.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                first_event_id: data
-                    .get("first_event_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                latest_event_id: data
-                    .get("latest_event_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                event_count: data.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                participating: data.get("participating").and_then(|v| v.as_bool()).unwrap_or(true),
+                last_read_event_id: data.get("last_read_event_id").and_then(|v| v.as_str()).map(String::from),
                 created_at: data
                     .get("created_at")
                     .and_then(|v| v.as_str())

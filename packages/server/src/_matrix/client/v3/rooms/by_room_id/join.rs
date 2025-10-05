@@ -12,16 +12,13 @@ use serde_json::Value;
 
 use tracing::{error, info, warn};
 
-
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
 use matryx_entity::types::{Membership, MembershipState, Room};
 use matryx_surrealdb::repository::{
-    event::EventRepository,
-    membership::MembershipRepository,
-    room::RoomRepository,
+    event::EventRepository, membership::MembershipRepository, room::RoomRepository,
     user::UserRepository,
 };
 
@@ -230,9 +227,10 @@ async fn can_user_join_via_repositories(
             // First check for pending invite
             if let Ok(Some(membership)) =
                 membership_repo.get_by_room_user(&room.room_id, user_id).await
-                && membership.membership == MembershipState::Invite {
-                    return Ok(true);
-                }
+                && membership.membership == MembershipState::Invite
+            {
+                return Ok(true);
+            }
 
             // Check allow conditions from room's join_rules state event
             let allow_conditions = room_repo
@@ -251,18 +249,19 @@ async fn can_user_join_via_repositories(
                 if condition.get("type").and_then(|v| v.as_str()) == Some("m.room_membership")
                     && let Some(allowed_room_id) = condition.get("room_id").and_then(|v| v.as_str())
                     && let Ok(Some(membership)) =
-                            membership_repo.get_by_room_user(allowed_room_id, user_id).await
-                    && membership.membership == MembershipState::Join {
-                                info!(
-                                    "User {} allowed to join restricted room {} via membership in room {}",
-                                    user_id, room.room_id, allowed_room_id
-                                );
-                                return Ok(true);
-                            }
+                        membership_repo.get_by_room_user(allowed_room_id, user_id).await
+                    && membership.membership == MembershipState::Join
+                {
+                    info!(
+                        "User {} allowed to join restricted room {} via membership in room {}",
+                        user_id, room.room_id, allowed_room_id
+                    );
+                    return Ok(true);
+                }
             }
             Ok(false)
         },
         Some("private") => Ok(false), // Private join rule
-        _ => Ok(false), // Unknown join rule
+        _ => Ok(false),               // Unknown join rule
     }
 }

@@ -6,17 +6,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use surrealdb::engine::any::Any;
 
-
-use base64::Engine;
 use rand::Rng;
 use reqwest::Client;
 use serde_json::{Value, json};
-use sha2::Digest;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::auth::session_service::MatrixSessionService;
+use crate::auth::signing::FederationRequestSigner;
 use crate::federation::event_signer::EventSigner;
 use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
 use crate::room::membership_errors::{MembershipError, MembershipResult};
@@ -86,36 +84,38 @@ impl RetryConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
-                
+
             base_delay_ms: std::env::var("MATRIX_FEDERATION_BASE_DELAY_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
-                
+
             max_delay_ms: std::env::var("MATRIX_FEDERATION_MAX_DELAY_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30000),
-                
+
             jitter_factor: std::env::var("MATRIX_FEDERATION_JITTER_FACTOR")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.1),
-                
+
             request_timeout_ms: std::env::var("MATRIX_FEDERATION_REQUEST_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10000),
-                
+
             circuit_breaker_threshold: std::env::var("MATRIX_FEDERATION_CIRCUIT_BREAKER_THRESHOLD")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
-                
-            circuit_breaker_recovery_ms: std::env::var("MATRIX_FEDERATION_CIRCUIT_BREAKER_RECOVERY_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60000),
+
+            circuit_breaker_recovery_ms: std::env::var(
+                "MATRIX_FEDERATION_CIRCUIT_BREAKER_RECOVERY_MS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60000),
         }
     }
 }
@@ -289,6 +289,7 @@ impl FederationRetryManager {
                 Err(e) => {
                     // Categorize the error before moving
                     let error_category = self.categorize_error(&e);
+                    let error_msg = e.to_string();
                     last_error = Some(e);
 
                     match error_category {
@@ -297,7 +298,7 @@ impl FederationRetryManager {
                                 "Temporary federation error to {} (attempt {}): {}",
                                 server_name,
                                 attempt + 1,
-                                last_error.as_ref().unwrap()
+                                error_msg
                             );
                             // Continue retrying for temporary errors
                         },
@@ -306,7 +307,7 @@ impl FederationRetryManager {
                                 "Permanent federation error to {} (attempt {}): {}",
                                 server_name,
                                 attempt + 1,
-                                last_error.as_ref().unwrap()
+                                error_msg
                             );
                             // Don't retry permanent errors
                             break;
@@ -316,7 +317,7 @@ impl FederationRetryManager {
                                 "Federation timeout to {} (attempt {}): {}",
                                 server_name,
                                 attempt + 1,
-                                last_error.as_ref().unwrap()
+                                error_msg
                             );
                             // Retry timeouts with backoff
                         },
@@ -343,7 +344,11 @@ impl FederationRetryManager {
                     start_time.elapsed(),
                     final_error
                 );
-                Err(self.convert_reqwest_error_to_membership_error(server_name, operation, &final_error))
+                Err(self.convert_reqwest_error_to_membership_error(
+                    server_name,
+                    operation,
+                    &final_error,
+                ))
             },
             None => {
                 // This should not happen if retry loop ran at least once
@@ -357,7 +362,7 @@ impl FederationRetryManager {
                     error_message: "Federation request failed with unknown error".to_string(),
                     retry_after: None,
                 })
-            }
+            },
         }
     }
 
@@ -445,13 +450,14 @@ impl FederationRetryManager {
         );
 
         // Step 1: make_join request - discover server using ServerDiscoveryOrchestrator
-        let connection = self.server_discovery.discover_server(server_name).await
-            .map_err(|e| MembershipError::FederationError {
+        let connection = self.server_discovery.discover_server(server_name).await.map_err(|e| {
+            MembershipError::FederationError {
                 server_name: server_name.to_string(),
                 error_code: None,
                 error_message: format!("Server discovery failed: {}", e),
                 retry_after: None,
-            })?;
+            }
+        })?;
 
         let make_join_url = format!(
             "{}/_matrix/federation/v1/make_join/{}/{}",
@@ -472,12 +478,11 @@ impl FederationRetryManager {
             .await?;
 
         // Parse make_join response
-        let join_event_template: Value = make_join_response.json().await.map_err(|e| {
-            MembershipError::JsonError {
+        let join_event_template: Value =
+            make_join_response.json().await.map_err(|e| MembershipError::JsonError {
                 context: "make_join response".to_string(),
                 error: e.to_string(),
-            }
-        })?;
+            })?;
 
         // Step 2: Create and sign join event
         let signed_join_event =
@@ -513,12 +518,11 @@ impl FederationRetryManager {
             })
             .await?;
 
-        let join_result: Value = send_join_response.json().await.map_err(|e| {
-            MembershipError::JsonError {
+        let join_result: Value =
+            send_join_response.json().await.map_err(|e| MembershipError::JsonError {
                 context: "send_join response".to_string(),
                 error: e.to_string(),
-            }
-        })?;
+            })?;
 
         info!(
             "Federation join request completed successfully for user {} in room {}",
@@ -541,13 +545,14 @@ impl FederationRetryManager {
         );
 
         // Step 1: make_leave request - discover server using ServerDiscoveryOrchestrator
-        let connection = self.server_discovery.discover_server(server_name).await
-            .map_err(|e| MembershipError::FederationError {
+        let connection = self.server_discovery.discover_server(server_name).await.map_err(|e| {
+            MembershipError::FederationError {
                 server_name: server_name.to_string(),
                 error_code: None,
                 error_message: format!("Server discovery failed: {}", e),
                 retry_after: None,
-            })?;
+            }
+        })?;
         let make_leave_url = format!(
             "{}/_matrix/federation/v1/make_leave/{}/{}",
             connection.base_url, room_id, user_id
@@ -567,12 +572,11 @@ impl FederationRetryManager {
             })
             .await?;
 
-        let leave_event_template: Value = make_leave_response.json().await.map_err(|e| {
-            MembershipError::JsonError {
+        let leave_event_template: Value =
+            make_leave_response.json().await.map_err(|e| MembershipError::JsonError {
                 context: "make_leave response".to_string(),
                 error: e.to_string(),
-            }
-        })?;
+            })?;
 
         // Step 2: Create and sign leave event
         let mut leave_content = json!({ "membership": "leave" });
@@ -588,11 +592,9 @@ impl FederationRetryManager {
             signed_leave_event
                 .get("event_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    MembershipError::InvalidEvent {
-                        event_id: None,
-                        reason: "Leave event missing event_id".to_string(),
-                    }
+                .ok_or_else(|| MembershipError::InvalidEvent {
+                    event_id: None,
+                    reason: "Leave event missing event_id".to_string(),
                 })?;
 
         let send_leave_url = format!(
@@ -616,12 +618,11 @@ impl FederationRetryManager {
             })
             .await?;
 
-        let leave_result: Value = send_leave_response.json().await.map_err(|e| {
-            MembershipError::JsonError {
+        let leave_result: Value =
+            send_leave_response.json().await.map_err(|e| MembershipError::JsonError {
                 context: "send_leave response".to_string(),
                 error: e.to_string(),
-            }
-        })?;
+            })?;
 
         info!(
             "Federation leave request completed successfully for user {} in room {}",
@@ -644,13 +645,14 @@ impl FederationRetryManager {
         );
 
         // Discover server using ServerDiscoveryOrchestrator
-        let connection = self.server_discovery.discover_server(server_name).await
-            .map_err(|e| MembershipError::FederationError {
+        let connection = self.server_discovery.discover_server(server_name).await.map_err(|e| {
+            MembershipError::FederationError {
                 server_name: server_name.to_string(),
                 error_code: None,
                 error_message: format!("Server discovery failed: {}", e),
                 retry_after: None,
-            })?;
+            }
+        })?;
         let invite_url = format!(
             "{}/_matrix/federation/v1/invite/{}/{}",
             connection.base_url, room_id, event_id
@@ -672,12 +674,11 @@ impl FederationRetryManager {
             })
             .await?;
 
-        let invite_result: Value = invite_response.json().await.map_err(|e| {
-            MembershipError::JsonError {
+        let invite_result: Value =
+            invite_response.json().await.map_err(|e| MembershipError::JsonError {
                 context: "federation invite response".to_string(),
                 error: e.to_string(),
-            }
-        })?;
+            })?;
 
         info!(
             "Federation invite request completed successfully for event {} in room {}",
@@ -702,30 +703,24 @@ impl FederationRetryManager {
 
         // Convert to Event struct for proper signing
         let mut event: matryx_entity::types::Event = serde_json::from_value(join_event.clone())
-            .map_err(|e| {
-                MembershipError::JsonError {
-                    context: "join event conversion".to_string(),
-                    error: e.to_string(),
-                }
+            .map_err(|e| MembershipError::JsonError {
+                context: "join event conversion".to_string(),
+                error: e.to_string(),
             })?;
 
         // Sign the event using the event signer
         self.event_signer
             .sign_outgoing_event(&mut event, None)
             .await
-            .map_err(|e| {
-                MembershipError::InternalError {
-                    context: "join event signing".to_string(),
-                    error: format!("Failed to sign join event: {:?}", e),
-                }
+            .map_err(|e| MembershipError::InternalError {
+                context: "join event signing".to_string(),
+                error: format!("Failed to sign join event: {:?}", e),
             })?;
 
         // Convert back to Value
-        serde_json::to_value(event).map_err(|e| {
-            MembershipError::JsonError {
-                context: "signed join event conversion".to_string(),
-                error: e.to_string(),
-            }
+        serde_json::to_value(event).map_err(|e| MembershipError::JsonError {
+            context: "signed join event conversion".to_string(),
+            error: e.to_string(),
         })
     }
 
@@ -744,30 +739,24 @@ impl FederationRetryManager {
 
         // Convert to Event struct for proper signing
         let mut event: matryx_entity::types::Event = serde_json::from_value(leave_event.clone())
-            .map_err(|e| {
-                MembershipError::JsonError {
-                    context: "leave event conversion".to_string(),
-                    error: e.to_string(),
-                }
+            .map_err(|e| MembershipError::JsonError {
+                context: "leave event conversion".to_string(),
+                error: e.to_string(),
             })?;
 
         // Sign the event using the event signer
         self.event_signer
             .sign_outgoing_event(&mut event, None)
             .await
-            .map_err(|e| {
-                MembershipError::InternalError {
-                    context: "leave event signing".to_string(),
-                    error: format!("Failed to sign leave event: {:?}", e),
-                }
+            .map_err(|e| MembershipError::InternalError {
+                context: "leave event signing".to_string(),
+                error: format!("Failed to sign leave event: {:?}", e),
             })?;
 
         // Convert back to Value
-        serde_json::to_value(event).map_err(|e| {
-            MembershipError::JsonError {
-                context: "signed leave event conversion".to_string(),
-                error: e.to_string(),
-            }
+        serde_json::to_value(event).map_err(|e| MembershipError::JsonError {
+            context: "signed leave event conversion".to_string(),
+            error: e.to_string(),
         })
     }
 
@@ -777,13 +766,11 @@ impl FederationRetryManager {
         server_name: &str,
     ) -> Option<CircuitBreakerStatus> {
         let breakers = self.server_circuit_breakers.read().await;
-        breakers.get(server_name).map(|cb| {
-            CircuitBreakerStatus {
-                state: cb.state.clone(),
-                failure_count: cb.failure_count,
-                last_failure_time: cb.last_failure_time,
-                last_success_time: cb.last_success_time,
-            }
+        breakers.get(server_name).map(|cb| CircuitBreakerStatus {
+            state: cb.state.clone(),
+            failure_count: cb.failure_count,
+            last_failure_time: cb.last_failure_time,
+            last_success_time: cb.last_success_time,
         })
     }
 
@@ -809,78 +796,46 @@ impl FederationRetryManager {
         content: Option<&Value>,
     ) -> MembershipResult<String> {
         // Parse the URI to get the destination server and path
-        let url = uri.parse::<reqwest::Url>().map_err(|e| {
-            MembershipError::InternalError {
-                context: "auth header".to_string(),
-                error: format!("Invalid URI: {}", e),
-            }
+        let url = uri.parse::<reqwest::Url>().map_err(|e| MembershipError::InternalError {
+            context: "auth header".to_string(),
+            error: format!("Invalid URI: {}", e),
         })?;
 
-        let destination = url.host_str().ok_or_else(|| {
-            MembershipError::InternalError {
-                context: "auth header".to_string(),
-                error: "No host in URI".to_string(),
-            }
+        let destination = url.host_str().ok_or_else(|| MembershipError::InternalError {
+            context: "auth header".to_string(),
+            error: "No host in URI".to_string(),
         })?;
 
         let path_and_query =
             format!("{}{}", url.path(), url.query().map(|q| format!("?{}", q)).unwrap_or_default());
 
-        // Create the canonical request for signing
-        let mut canonical_request = json!({
-            "method": method,
-            "uri": path_and_query,
-            "origin": self.homeserver_name,
-            "destination": destination
-        });
+        // Get signing engine from event_signer (FederationRetryManager has Arc<EventSigner>)
+        let signing_engine = self.event_signer.get_signing_engine().clone();
 
-        // Add content hash if there's a request body
-        if let Some(body) = content {
-            let content_json = serde_json::to_string(body).map_err(|e| {
-                MembershipError::JsonError {
-                    context: "auth header content".to_string(),
-                    error: e.to_string(),
+        // Create federation request signer with proper Matrix specification implementation
+        let signer = FederationRequestSigner::new(signing_engine, self.homeserver_name.clone());
+
+        // Generate properly formatted X-Matrix authorization header
+        // This handles:
+        // - Canonical JSON serialization
+        // - Dynamic key_id selection
+        // - Proper content inclusion (full JSON, not hash)
+        // - X-Matrix header with destination and quotes
+        let auth_header = signer
+            .create_authorization_header(
+                method,
+                &path_and_query,
+                destination,
+                content.cloned(), // Convert Option<&Value> to Option<Value>
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to sign federation request: {}", e);
+                MembershipError::InternalError {
+                    context: "federation signing".to_string(),
+                    error: format!("Signature generation failed: {:?}", e),
                 }
             })?;
-
-            // Calculate SHA-256 hash of the content
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(content_json.as_bytes());
-            let hash = hasher.finalize();
-            let content_hash = base64::engine::general_purpose::STANDARD_NO_PAD.encode(hash);
-
-            canonical_request["content"] = json!({
-                "sha256": content_hash
-            });
-        }
-
-        // Convert to canonical JSON for signing
-        let canonical_json = serde_json::to_string(&canonical_request).map_err(|e| {
-            MembershipError::JsonError {
-                context: "canonical request".to_string(),
-                error: e.to_string(),
-            }
-        })?;
-
-        // Sign the canonical request (simplified - would use proper key ID in production)
-        let key_id = "ed25519:auto";
-
-        // Replace with actual cryptographic signature
-        let signature =
-            self.session_service
-                .sign_json(&canonical_json, key_id)
-                .await
-                .map_err(|e| {
-                    error!("Failed to sign federation request: {}", e);
-                    MembershipError::InternalError {
-                        context: "federation signing".to_string(),
-                        error: format!("Signature generation failed: {:?}", e),
-                    }
-                })?;
-
-        // Construct the X-Matrix authorization header
-        let auth_header =
-            format!("X-Matrix origin={},key={},sig={}", self.homeserver_name, key_id, signature);
 
         debug!("Created Matrix auth header for {} {}: {}", method, path_and_query, auth_header);
 
@@ -906,33 +861,42 @@ pub struct CircuitBreakerStatus {
 }
 
 /// Federation Join Validation
-/// 
+///
 /// Validates whether a federation join request should be allowed based on:
 /// - Matrix room join rules (public, invite, restricted, knock)
 /// - Server ACL validation
 /// - User membership state validation
 /// - Authorization rules per Matrix Server-Server API specification
-/// 
+///
 /// Returns true if the federation join is allowed, false otherwise.
-pub fn validate_federation_join_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> bool {
+pub fn validate_federation_join_allowed(
+    room: &matryx_entity::types::Room,
+    origin_server: &str,
+) -> bool {
     // 1. Check if room allows federation joins based on join rules
     let join_rules = room.join_rules.as_deref().unwrap_or("invite");
     if !validate_room_join_rules_allow_federation(join_rules, origin_server) {
-        debug!("Federation join denied for {} - join rules do not permit federation", origin_server);
+        debug!(
+            "Federation join denied for {} - join rules do not permit federation",
+            origin_server
+        );
         return false;
     }
 
     // 2. Check if room allows federation
     if let Some(federate) = room.federate
-        && !federate {
-            debug!("Federation join denied for {} - room has federation disabled", origin_server);
-            return false;
-        }
+        && !federate
+    {
+        debug!("Federation join denied for {} - room has federation disabled", origin_server);
+        return false;
+    }
 
     // 3. Check room version compatibility
     if !validate_room_version_supports_federation(&room.room_version) {
-        debug!("Federation join denied for {} - room version {} does not support federation properly", 
-               origin_server, room.room_version);
+        debug!(
+            "Federation join denied for {} - room version {} does not support federation properly",
+            origin_server, room.room_version
+        );
         return false;
     }
 
@@ -941,23 +905,29 @@ pub fn validate_federation_join_allowed(room: &matryx_entity::types::Room, origi
 }
 
 /// Federation Leave Validation
-/// 
+///
 /// Validates whether a federation leave request should be allowed.
 /// Leave requests are generally more permissive than joins per Matrix specification.
-/// 
+///
 /// Returns true if the federation leave is allowed, false otherwise.
-pub fn validate_federation_leave_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> bool {
+pub fn validate_federation_leave_allowed(
+    room: &matryx_entity::types::Room,
+    origin_server: &str,
+) -> bool {
     // 1. Check if room allows federation
     if let Some(federate) = room.federate
-        && !federate {
-            debug!("Federation leave denied for {} - room has federation disabled", origin_server);
-            return false;
-        }
+        && !federate
+    {
+        debug!("Federation leave denied for {} - room has federation disabled", origin_server);
+        return false;
+    }
 
     // 2. Check room version compatibility
     if !validate_room_version_supports_federation(&room.room_version) {
-        debug!("Federation leave denied for {} - room version {} does not support federation", 
-               origin_server, room.room_version);
+        debug!(
+            "Federation leave denied for {} - room version {} does not support federation",
+            origin_server, room.room_version
+        );
         return false;
     }
 
@@ -967,17 +937,20 @@ pub fn validate_federation_leave_allowed(room: &matryx_entity::types::Room, orig
 }
 
 /// Room Knock Validation
-/// 
+///
 /// Validates whether a room knock request should be allowed based on:
 /// - Room join rules must permit knocking (knock or knock_restricted)
 /// - Room version must support knocking (v7+)
 /// - Server ACL validation
 /// - User must not already be in the room
-/// 
+///
 /// Returns a Result indicating success or the specific error.
-pub async fn validate_room_knock_allowed(room: &matryx_entity::types::Room, origin_server: &str) -> Result<bool, String> {
+pub async fn validate_room_knock_allowed(
+    room: &matryx_entity::types::Room,
+    origin_server: &str,
+) -> Result<bool, String> {
     let join_rules = room.join_rules.as_deref().unwrap_or("invite");
-    
+
     // 1. Check if room join rules allow knocking
     if !room_supports_knocking(join_rules) {
         return Err(format!("Room join rules '{}' do not permit knocking", join_rules));
@@ -985,16 +958,23 @@ pub async fn validate_room_knock_allowed(room: &matryx_entity::types::Room, orig
 
     // 2. Validate room version supports knocking (v7+)
     if !room_version_supports_knocking(&room.room_version) {
-        return Err(format!("Room version '{}' does not support knocking (requires v7+)", room.room_version));
+        return Err(format!(
+            "Room version '{}' does not support knocking (requires v7+)",
+            room.room_version
+        ));
     }
 
     // 3. Check if room allows federation
     if let Some(federate) = room.federate
-        && !federate {
-            return Err("Room has federation disabled".to_string());
-        }
+        && !federate
+    {
+        return Err("Room has federation disabled".to_string());
+    }
 
-    debug!("Room knock validation passed for {} in room with join_rules: {}", origin_server, join_rules);
+    debug!(
+        "Room knock validation passed for {} in room with join_rules: {}",
+        origin_server, join_rules
+    );
     Ok(true)
 }
 
@@ -1004,7 +984,7 @@ fn validate_room_join_rules_allow_federation(join_rules: &str, _origin_server: &
         "public" => true,           // Public rooms allow anyone to join
         "invite" => true,           // Invite rooms allow federation (with proper invite)
         "restricted" => true,       // Restricted rooms allow federation (with authorization)
-        "knock" => true,           // Knock rooms allow federation knocking
+        "knock" => true,            // Knock rooms allow federation knocking
         "knock_restricted" => true, // Combined knock+restricted rules
         "private" => false,         // Private rooms block federation
         _ => false,                 // Unknown join rules default to deny
@@ -1021,7 +1001,7 @@ fn validate_room_version_supports_federation(room_version: &str) -> bool {
             // For future room versions or custom versions, default to true
             // unless we know they don't support federation
             true
-        }
+        },
     }
 }
 
@@ -1041,7 +1021,7 @@ fn room_version_supports_knocking(room_version: &str) -> bool {
             } else {
                 false
             }
-        }
+        },
     }
 }
 
@@ -1079,29 +1059,42 @@ mod tests {
         let db = surrealdb::engine::any::connect("memory")
             .await
             .expect("Failed to connect to in-memory test database - this should never fail");
-        
-        let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
-        let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
-        
+
+        let session_repo =
+            matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+        let key_server_repo =
+            matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+
         let session_service = Arc::new(crate::auth::session_service::MatrixSessionService::new(
-            vec![1, 2, 3, 4], // dummy JWT secret
+            &[1, 2, 3, 4], // dummy JWT secret (private key)
+            &[1, 2, 3, 4], // dummy JWT secret (public key)
             "test.homeserver.com".to_string(),
             session_repo,
             key_server_repo,
         ));
         // Create test DNS resolver
         let http_client = Arc::new(reqwest::Client::new());
-        let well_known_client = Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
-        let dns_resolver = Arc::new(crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
-        let server_discovery = Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(dns_resolver.clone()));
+        let well_known_client =
+            Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
+        let dns_resolver = Arc::new(
+            crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
+                .expect("Failed to create DNS resolver"),
+        );
+        let server_discovery =
+            Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(
+                dns_resolver.clone(),
+            ));
 
-        let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
-            session_service.clone(),
-            db,
-            dns_resolver.clone(),
-            "test.homeserver.com".to_string(),
-            "ed25519:auto".to_string(),
-        ).expect("Failed to create test event signer"));
+        let event_signer = Arc::new(
+            crate::federation::event_signer::EventSigner::new(
+                session_service.clone(),
+                db,
+                dns_resolver.clone(),
+                "test.homeserver.com".to_string(),
+                "ed25519:auto".to_string(),
+            )
+            .expect("Failed to create test event signer"),
+        );
 
         FederationRetryManager::new(
             Some(create_test_retry_config()),
@@ -1268,30 +1261,43 @@ mod tests {
             let db = surrealdb::engine::any::connect("memory")
                 .await
                 .expect("Failed to connect to in-memory test database");
-            
-            let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
-            let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
-            
+
+            let session_repo =
+                matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+            let key_server_repo =
+                matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+
             let session_service =
                 Arc::new(crate::auth::session_service::MatrixSessionService::new(
-                    vec![1, 2, 3, 4], // dummy JWT secret
+                    &[1, 2, 3, 4], // dummy JWT secret (private key)
+                    &[1, 2, 3, 4], // dummy JWT secret (public key)
                     "test.homeserver.com".to_string(),
                     session_repo,
                     key_server_repo,
                 ));
             // Create test DNS resolver
             let http_client = Arc::new(reqwest::Client::new());
-            let well_known_client = Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
-            let dns_resolver = Arc::new(crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
-            let server_discovery = Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(dns_resolver.clone()));
+            let well_known_client =
+                Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
+            let dns_resolver = Arc::new(
+                crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
+                    .expect("Failed to create DNS resolver"),
+            );
+            let server_discovery =
+                Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(
+                    dns_resolver.clone(),
+                ));
 
-            let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
-                session_service.clone(),
-                db,
-                dns_resolver.clone(),
-                "test.homeserver.com".to_string(),
-                "ed25519:auto".to_string(),
-            ).expect("Failed to create test event signer"));
+            let event_signer = Arc::new(
+                crate::federation::event_signer::EventSigner::new(
+                    session_service.clone(),
+                    db,
+                    dns_resolver.clone(),
+                    "test.homeserver.com".to_string(),
+                    "ed25519:auto".to_string(),
+                )
+                .expect("Failed to create test event signer"),
+            );
             let manager = FederationRetryManager::new(
                 Some(config),
                 event_signer,
@@ -1366,30 +1372,43 @@ mod tests {
             let db = surrealdb::engine::any::connect("memory")
                 .await
                 .expect("Failed to connect to in-memory test database");
-            
-            let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
-            let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
-            
+
+            let session_repo =
+                matryx_surrealdb::repository::session::SessionRepository::new(db.clone());
+            let key_server_repo =
+                matryx_surrealdb::repository::key_server::KeyServerRepository::new(db.clone());
+
             let session_service =
                 Arc::new(crate::auth::session_service::MatrixSessionService::new(
-                    vec![1, 2, 3, 4], // dummy JWT secret
+                    &[1, 2, 3, 4], // dummy JWT secret (private key)
+                    &[1, 2, 3, 4], // dummy JWT secret (public key)
                     "test.homeserver.com".to_string(),
                     session_repo,
                     key_server_repo,
                 ));
             // Create test DNS resolver
             let http_client = Arc::new(reqwest::Client::new());
-            let well_known_client = Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
-            let dns_resolver = Arc::new(crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
-            let server_discovery = Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(dns_resolver.clone()));
+            let well_known_client =
+                Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client));
+            let dns_resolver = Arc::new(
+                crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
+                    .expect("Failed to create DNS resolver"),
+            );
+            let server_discovery =
+                Arc::new(crate::federation::server_discovery::ServerDiscoveryOrchestrator::new(
+                    dns_resolver.clone(),
+                ));
 
-            let event_signer = Arc::new(crate::federation::event_signer::EventSigner::new(
-                session_service.clone(),
-                db,
-                dns_resolver.clone(),
-                "test.homeserver.com".to_string(),
-                "ed25519:auto".to_string(),
-            ).expect("Failed to create test event signer"));
+            let event_signer = Arc::new(
+                crate::federation::event_signer::EventSigner::new(
+                    session_service.clone(),
+                    db,
+                    dns_resolver.clone(),
+                    "test.homeserver.com".to_string(),
+                    "ed25519:auto".to_string(),
+                )
+                .expect("Failed to create test event signer"),
+            );
 
             let manager = FederationRetryManager::new(
                 None, // Use default config
@@ -1439,14 +1458,12 @@ mod tests {
                 .retry_federation_request(
                     &mock_server.address().to_string(),
                     "test_operation",
-                    || {
-                        async {
-                            manager
-                                .http_client
-                                .get(format!("http://{}/test", mock_server.address()))
-                                .send()
-                                .await
-                        }
+                    || async {
+                        manager
+                            .http_client
+                            .get(format!("http://{}/test", mock_server.address()))
+                            .send()
+                            .await
                     },
                 )
                 .await;
@@ -1477,14 +1494,12 @@ mod tests {
                 .retry_federation_request(
                     &mock_server.address().to_string(),
                     "test_operation",
-                    || {
-                        async {
-                            manager
-                                .http_client
-                                .get(format!("http://{}/test", mock_server.address()))
-                                .send()
-                                .await
-                        }
+                    || async {
+                        manager
+                            .http_client
+                            .get(format!("http://{}/test", mock_server.address()))
+                            .send()
+                            .await
                     },
                 )
                 .await;
@@ -1508,14 +1523,12 @@ mod tests {
                 .retry_federation_request(
                     &mock_server.address().to_string(),
                     "test_operation",
-                    || {
-                        async {
-                            manager
-                                .http_client
-                                .get(format!("http://{}/test", mock_server.address()))
-                                .send()
-                                .await
-                        }
+                    || async {
+                        manager
+                            .http_client
+                            .get(format!("http://{}/test", mock_server.address()))
+                            .send()
+                            .await
                     },
                 )
                 .await;
@@ -1546,14 +1559,12 @@ mod tests {
                 .retry_federation_request(
                     &mock_server.address().to_string(),
                     "test_operation",
-                    || {
-                        async {
-                            manager
-                                .http_client
-                                .get(format!("http://{}/test", mock_server.address()))
-                                .send()
-                                .await
-                        }
+                    || async {
+                        manager
+                            .http_client
+                            .get(format!("http://{}/test", mock_server.address()))
+                            .send()
+                            .await
                     },
                 )
                 .await;
@@ -1635,14 +1646,12 @@ mod tests {
             // Make requests until circuit breaker opens (threshold = 3 in test config)
             for _ in 0..3 {
                 let _ = manager
-                    .retry_federation_request(&server_name, "test_operation", || {
-                        async {
-                            manager
-                                .http_client
-                                .get(format!("http://{}/test", mock_server.address()))
-                                .send()
-                                .await
-                        }
+                    .retry_federation_request(&server_name, "test_operation", || async {
+                        manager
+                            .http_client
+                            .get(format!("http://{}/test", mock_server.address()))
+                            .send()
+                            .await
                     })
                     .await;
             }
@@ -1650,7 +1659,7 @@ mod tests {
             // Check circuit breaker status
             let status = manager.get_circuit_breaker_status(&server_name).await;
             assert!(status.is_some());
-            let status = status.unwrap();
+            let status = status.expect("Test: Circuit breaker status should be Some after assertion");
             assert_eq!(status.state, CircuitBreakerState::Open);
             assert!(status.failure_count >= 3);
         }
@@ -1682,14 +1691,12 @@ mod tests {
 
             // Make successful request
             let result = manager
-                .retry_federation_request(&server_name, "test_operation", || {
-                    async {
-                        manager
-                            .http_client
-                            .get(format!("http://{}/test", mock_server.address()))
-                            .send()
-                            .await
-                    }
+                .retry_federation_request(&server_name, "test_operation", || async {
+                    manager
+                        .http_client
+                        .get(format!("http://{}/test", mock_server.address()))
+                        .send()
+                        .await
                 })
                 .await;
 
@@ -1697,7 +1704,7 @@ mod tests {
                 // Check that circuit breaker was reset
                 let status = manager.get_circuit_breaker_status(&server_name).await;
                 assert!(status.is_some());
-                let status = status.unwrap();
+                let status = status.expect("Test: Circuit breaker status should be Some after assertion");
                 assert_eq!(status.state, CircuitBreakerState::Closed);
                 assert_eq!(status.failure_count, 0);
             }
@@ -1724,7 +1731,7 @@ mod tests {
             // Verify it was reset
             let status = manager.get_circuit_breaker_status(server_name).await;
             assert!(status.is_some());
-            let status = status.unwrap();
+            let status = status.expect("Test: Circuit breaker status should be Some after assertion");
             assert_eq!(status.state, CircuitBreakerState::Closed);
             assert_eq!(status.failure_count, 0);
         }

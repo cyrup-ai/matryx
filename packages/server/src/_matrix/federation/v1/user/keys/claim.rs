@@ -1,9 +1,9 @@
-use axum::{Json, extract::State, http::StatusCode};
-use serde::{Deserialize, Serialize};
 use crate::state::AppState;
+use axum::{Json, extract::State, http::StatusCode};
 use matryx_surrealdb::{CryptoKeysRepository, OneTimeKeysClaim};
-use tracing::{debug, error};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::{debug, error};
 
 #[derive(Debug, Deserialize)]
 pub struct ClaimRequest {
@@ -17,7 +17,10 @@ pub struct KeyObject {
 
 #[derive(Debug, Serialize)]
 pub struct ClaimResponse {
-    pub one_time_keys: std::collections::HashMap<String, std::collections::HashMap<String, std::collections::HashMap<String, KeyObject>>>,
+    pub one_time_keys: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashMap<String, KeyObject>>,
+    >,
 }
 
 pub async fn post(
@@ -44,7 +47,7 @@ pub async fn post(
             device_claim.insert(device_id.clone(), algorithm.clone());
             let mut claim_request = HashMap::new();
             claim_request.insert(user_id.clone(), device_claim);
-            
+
             let one_time_keys_claim = OneTimeKeysClaim {
                 one_time_keys: claim_request,
                 timeout: Some(10000), // 10 second timeout as per Matrix spec
@@ -55,17 +58,23 @@ pub async fn post(
                 Ok(response) => {
                     // Extract keys from the OneTimeKeysResponse
                     if let Some(user_keys_map) = response.one_time_keys.get(&user_id)
-                        && let Some(device_keys_map) = user_keys_map.get(&device_id) {
+                        && let Some(device_keys_map) = user_keys_map.get(&device_id)
+                    {
                         for (key_id, key_value) in device_keys_map {
-                            if let Ok(key_obj) = serde_json::from_value::<KeyObject>(key_value.clone()) {
+                            if let Ok(key_obj) =
+                                serde_json::from_value::<KeyObject>(key_value.clone())
+                            {
                                 device_keys.insert(key_id.clone(), key_obj);
                             }
                         }
                     }
-                    
+
                     // If no keys were claimed, the response will be empty - this is normal
                     if device_keys.is_empty() {
-                        debug!("No one-time keys available for user {} device {} algorithm {}", user_id, device_id, algorithm);
+                        debug!(
+                            "No one-time keys available for user {} device {} algorithm {}",
+                            user_id, device_id, algorithm
+                        );
                     }
                 },
                 Err(e) => {

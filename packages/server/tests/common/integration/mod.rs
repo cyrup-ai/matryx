@@ -23,11 +23,14 @@ pub struct MatrixTestServer {
 impl MatrixTestServer {
     pub async fn new() -> Self {
         let app = create_test_app().await;
-        let server = TestServer::new(app).unwrap();
+        let server = TestServer::new(app)
+            .expect("Test setup: failed to create test server for integration tests");
         let mock_server = MockServer::start().await;
 
         // Create test app state
-        let db_any = any::connect("surrealkv://test_data/integration_test.db").await.expect("Failed to connect to test database");
+        let db_any = any::connect("surrealkv://test_data/integration_test.db")
+            .await
+            .expect("Failed to connect to test database");
         db_any
             .use_ns("test")
             .use_db("matrix")
@@ -65,27 +68,45 @@ impl MatrixTestServer {
             },
             push_cache_config: PushCacheConfig::default(),
             transaction_config: TransactionConfig::from_env(),
+            tls_config: matryx_server::config::TlsConfig::default(),
+            rate_limiting: matryx_server::config::RateLimitConfig::default(),
+            captcha: matryx_server::auth::captcha::CaptchaConfig::from_env(),
         };
 
         let jwt_secret = "test_secret".to_string().into_bytes();
-        let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db_any.clone());
-        let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db_any.clone());
-        let session_service =
-            Arc::new(MatrixSessionService::new(jwt_secret, config.homeserver_name.clone(), session_repo, key_server_repo));
+        let session_repo =
+            matryx_surrealdb::repository::session::SessionRepository::new(db_any.clone());
+        let key_server_repo =
+            matryx_surrealdb::repository::key_server::KeyServerRepository::new(db_any.clone());
+        let session_service = Arc::new(MatrixSessionService::new(
+            &jwt_secret,
+            &jwt_secret, // Using same secret for public key in tests
+            config.homeserver_name.clone(),
+            session_repo,
+            key_server_repo,
+        ));
 
         let http_client = Arc::new(reqwest::Client::new());
 
         // Create DNS resolver for event signer
-        let well_known_client = Arc::new(matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()));
-        let dns_resolver = Arc::new(matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
+        let well_known_client = Arc::new(
+            matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()),
+        );
+        let dns_resolver = Arc::new(
+            matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
+                .expect("Failed to create DNS resolver"),
+        );
 
-        let event_signer = Arc::new(matryx_server::federation::event_signer::EventSigner::new(
-            session_service.clone(),
-            db_any.clone(),
-            dns_resolver,
-            config.homeserver_name.clone(),
-            "ed25519:auto".to_string(),
-        ).expect("Failed to create test event signer"));
+        let event_signer = Arc::new(
+            matryx_server::federation::event_signer::EventSigner::new(
+                session_service.clone(),
+                db_any.clone(),
+                dns_resolver.clone(),
+                config.homeserver_name.clone(),
+                "ed25519:auto".to_string(),
+            )
+            .expect("Failed to create test event signer"),
+        );
 
         let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
         let app_state = AppState::new(
@@ -95,10 +116,14 @@ impl MatrixTestServer {
             config_static,
             http_client,
             event_signer,
-        );
+            dns_resolver,
+        )
+        .expect("Failed to create AppState");
 
         Self {
-            base_url: server.server_address().unwrap().to_string(),
+            base_url: server.server_address()
+                .expect("Test setup: failed to get test server address for integration tests")
+                .to_string(),
             server,
             mock_server,
             app_state,
@@ -165,7 +190,7 @@ impl MatrixTestServer {
     /// Set up federation mock for testing server-to-server interactions
     pub async fn setup_federation_mock(&self, homeserver_name: &str) {
         use wiremock::{Mock, ResponseTemplate};
-        
+
         // Mock well-known server discovery
         Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/.well-known/matrix/server"))
@@ -250,27 +275,45 @@ async fn create_test_app() -> Router {
         },
         push_cache_config: PushCacheConfig::default(),
         transaction_config: TransactionConfig::from_env(),
+        tls_config: matryx_server::config::TlsConfig::default(),
+        rate_limiting: matryx_server::config::RateLimitConfig::default(),
+        captcha: matryx_server::auth::captcha::CaptchaConfig::from_env(),
     };
 
     let jwt_secret = "test_secret".to_string().into_bytes();
-    let session_repo = matryx_surrealdb::repository::session::SessionRepository::new(db_any.clone());
-    let key_server_repo = matryx_surrealdb::repository::key_server::KeyServerRepository::new(db_any.clone());
-    let session_service =
-        Arc::new(MatrixSessionService::new(jwt_secret, config.homeserver_name.clone(), session_repo, key_server_repo));
+    let session_repo =
+        matryx_surrealdb::repository::session::SessionRepository::new(db_any.clone());
+    let key_server_repo =
+        matryx_surrealdb::repository::key_server::KeyServerRepository::new(db_any.clone());
+    let session_service = Arc::new(MatrixSessionService::new(
+        &jwt_secret,
+        &jwt_secret, // Using same secret for public key in tests
+        config.homeserver_name.clone(),
+        session_repo,
+        key_server_repo,
+    ));
 
     let http_client = Arc::new(reqwest::Client::new());
 
     // Create DNS resolver for event signer
-    let well_known_client = Arc::new(matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()));
-    let dns_resolver = Arc::new(matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client).expect("Failed to create DNS resolver"));
+    let well_known_client = Arc::new(
+        matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()),
+    );
+    let dns_resolver = Arc::new(
+        matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
+            .expect("Failed to create DNS resolver"),
+    );
 
-    let event_signer = Arc::new(matryx_server::federation::event_signer::EventSigner::new(
-        session_service.clone(),
-        db_any.clone(),
-        dns_resolver,
-        config.homeserver_name.clone(),
-        "ed25519:auto".to_string(),
-    ).expect("Failed to create test event signer"));
+    let event_signer = Arc::new(
+        matryx_server::federation::event_signer::EventSigner::new(
+            session_service.clone(),
+            db_any.clone(),
+            dns_resolver.clone(),
+            config.homeserver_name.clone(),
+            "ed25519:auto".to_string(),
+        )
+        .expect("Failed to create test event signer"),
+    );
 
     let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
     let app_state = AppState::new(
@@ -280,7 +323,9 @@ async fn create_test_app() -> Router {
         config_static,
         http_client,
         event_signer,
-    );
+        dns_resolver,
+    )
+    .expect("Failed to create AppState");
 
     // Create a simple test router for now
     Router::new()
@@ -317,8 +362,12 @@ pub async fn create_test_user(
 
     if response.status_code() == 200 {
         let body: Value = response.json();
-        let user_id = body["user_id"].as_str().unwrap().to_string();
-        let access_token = body["access_token"].as_str().unwrap().to_string();
+        let user_id = body["user_id"].as_str()
+            .expect("Test assertion: registration response must contain user_id field")
+            .to_string();
+        let access_token = body["access_token"].as_str()
+            .expect("Test assertion: registration response must contain access_token field")
+            .to_string();
         Ok((user_id, access_token))
     } else {
         Err(format!("Failed to create test user: {}", response.status_code()).into())
@@ -348,7 +397,9 @@ pub async fn create_test_room(
 
     if response.status_code() == 200 {
         let body: Value = response.json();
-        let room_id = body["room_id"].as_str().unwrap().to_string();
+        let room_id = body["room_id"].as_str()
+            .expect("Test assertion: createRoom response must contain room_id field")
+            .to_string();
         Ok(room_id)
     } else {
         Err(format!("Failed to create test room: {}", response.status_code()).into())
@@ -362,20 +413,20 @@ mod tests {
     #[tokio::test]
     async fn test_matrix_test_server_functionality() {
         let server = MatrixTestServer::new().await;
-        
+
         // Test accessing app state
         let _app_state = server.get_app_state();
-        
+
         // Test accessing mock server
         let _mock_server = server.get_mock_server();
-        
+
         // Set up federation mock
         server.setup_federation_mock("test.localhost").await;
-        
+
         // Test federation request
         let _response = server.test_federation_request("/_matrix/federation/v1/version").await;
     }
-    
+
     #[tokio::test]
     async fn test_helper_functions() {
         let _config = test_database_config();

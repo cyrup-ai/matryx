@@ -1,3 +1,4 @@
+use futures::stream::StreamExt;
 use matryx_entity::types::Event;
 use matryx_surrealdb::repository::membership::MembershipRepository;
 use moka::future::Cache;
@@ -18,7 +19,6 @@ pub struct LazyLoadingCacheConfig {
     pub membership_events_ttl: Duration,
     pub membership_events_capacity: u64,
 }
-
 
 /// Specialized cache for lazy loading optimization
 #[derive(Clone)]
@@ -65,8 +65,11 @@ impl LazyLoadingCache {
     #[allow(dead_code)]
     pub async fn store_essential_members(&self, cache_key: &str, members: &HashSet<String>) {
         self.essential_members.insert(cache_key.to_string(), members.clone()).await;
-        tracing::debug!("Stored {} essential members in cache with key: {}",
-            members.len(), cache_key);
+        tracing::debug!(
+            "Stored {} essential members in cache with key: {}",
+            members.len(),
+            cache_key
+        );
     }
 
     /// Get essential members with multi-level caching
@@ -155,7 +158,8 @@ impl LazyLoadingCache {
         let room_id_prefix = format!("{}:", room_id);
 
         // Invalidate essential members cache
-        let _ = self.essential_members
+        let _ = self
+            .essential_members
             .invalidate_entries_if(move |key, _| key.starts_with(&room_id_prefix));
 
         // Invalidate power hierarchies cache
@@ -166,7 +170,8 @@ impl LazyLoadingCache {
 
         // Invalidate membership events cache
         let room_id_prefix_2 = format!("{}:", room_id);
-        let _ = self.membership_events
+        let _ = self
+            .membership_events
             .invalidate_entries_if(move |key, _| key.starts_with(&room_id_prefix_2));
     }
 
@@ -191,15 +196,15 @@ impl LazyLoadingCache {
     /// Calculate cache hit ratio for performance monitoring
     pub async fn get_cache_hit_ratio(&self) -> f64 {
         let stats = self.get_cache_stats().await;
-        let total_hits = stats.essential_members_hit_count +
-            stats.power_hierarchies_hit_count +
-            stats.room_creators_hit_count +
-            stats.membership_events_hit_count;
-        let total_requests = total_hits +
-            stats.essential_members_miss_count +
-            stats.power_hierarchies_miss_count +
-            stats.room_creators_miss_count +
-            stats.membership_events_miss_count;
+        let total_hits = stats.essential_members_hit_count
+            + stats.power_hierarchies_hit_count
+            + stats.room_creators_hit_count
+            + stats.membership_events_hit_count;
+        let total_requests = total_hits
+            + stats.essential_members_miss_count
+            + stats.power_hierarchies_miss_count
+            + stats.room_creators_miss_count
+            + stats.membership_events_miss_count;
 
         if total_requests > 0 {
             total_hits as f64 / total_requests as f64
@@ -260,19 +265,53 @@ impl LazyLoadingCache {
 
         // Spawn background tasks to manage the streams and handle cache invalidation
         let room_id_clone = room_id.to_string();
+        let cache_clone = self.clone();
         tokio::spawn(async move {
-            // Handle membership stream events for cache invalidation
-            debug!("Managing membership stream for room {}", room_id_clone);
-            // In production, this would process the stream and invalidate specific cache entries
-            std::mem::drop(membership_stream);
+            debug!("Starting membership stream processing for room {}", room_id_clone);
+            
+            let mut stream = membership_stream;
+            while let Some(memberships) = stream.next().await {
+                if !memberships.is_empty() {
+                    tracing::debug!(
+                        room_id = %room_id_clone,
+                        count = memberships.len(),
+                        "Processing membership changes for cache invalidation"
+                    );
+                    
+                    // Invalidate cache for this room
+                    cache_clone.invalidate_room_cache(&room_id_clone).await;
+                }
+            }
+            
+            tracing::warn!(
+                room_id = %room_id_clone,
+                "Membership stream terminated"
+            );
         });
 
         let room_id_clone2 = room_id.to_string();
+        let cache_clone2 = self.clone();
         tokio::spawn(async move {
-            // Handle power levels stream events for cache invalidation
-            debug!("Managing power levels stream for room {}", room_id_clone2);
-            // In production, this would process the stream and invalidate specific cache entries
-            std::mem::drop(power_levels_stream);
+            debug!("Starting power levels stream processing for room {}", room_id_clone2);
+            
+            let mut stream = power_levels_stream;
+            while let Some(power_levels) = stream.next().await {
+                if !power_levels.is_empty() {
+                    tracing::debug!(
+                        room_id = %room_id_clone2,
+                        count = power_levels.len(),
+                        "Processing power level changes for cache invalidation"
+                    );
+                    
+                    // Invalidate cache for this room
+                    cache_clone2.invalidate_room_cache(&room_id_clone2).await;
+                }
+            }
+            
+            tracing::warn!(
+                room_id = %room_id_clone2,
+                "Power levels stream terminated"
+            );
         });
 
         tracing::debug!(
@@ -293,10 +332,10 @@ impl LazyLoadingCache {
         let room_creators_memory = stats.room_creators_size as usize * 64; // ~64 bytes per entry
         let membership_events_memory = stats.membership_events_size as usize * 1024; // ~1KB per event set
 
-        essential_members_memory +
-            power_hierarchies_memory +
-            room_creators_memory +
-            membership_events_memory
+        essential_members_memory
+            + power_hierarchies_memory
+            + room_creators_memory
+            + membership_events_memory
     }
 }
 
@@ -431,10 +470,10 @@ impl LazyLoadingCache {
             status,
             cache_hit_ratio: hit_ratio,
             memory_usage_bytes: memory_usage,
-            total_entries: stats.essential_members_size +
-                stats.power_hierarchies_size +
-                stats.room_creators_size +
-                stats.membership_events_size,
+            total_entries: stats.essential_members_size
+                + stats.power_hierarchies_size
+                + stats.room_creators_size
+                + stats.membership_events_size,
             issues,
         }
     }

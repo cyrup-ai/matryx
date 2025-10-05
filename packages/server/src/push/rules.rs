@@ -3,18 +3,12 @@
 
 use matryx_entity::PDU;
 use matryx_surrealdb::repository::push::{
-    PushEvent,
-    PushAction,
-    PushCondition,
-    PushRule,
-    PushRuleEvaluation,
-    RoomContext,
+    PushAction, PushCondition, PushEvent, PushRule, PushRuleEvaluation, RoomContext,
 };
 use matryx_surrealdb::repository::{PushRepository, RepositoryError};
 
-
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 // Types are now imported from the repository module
 
@@ -127,23 +121,56 @@ impl PushRuleEngine {
     }
 
     fn evaluate_event_match(&self, key: &str, pattern: &str, event: &PDU) -> bool {
-        // Simple pattern matching - in production this would use glob patterns
-        match key {
-            "type" => event.event_type.contains(pattern),
-            "content.msgtype" => {
-                if let Some(msgtype) = event.content.get("msgtype") {
-                    msgtype.as_str().unwrap_or("").contains(pattern)
+        // Parse the dot-separated path
+        let path_parts = Self::parse_dot_path(key);
+
+        if path_parts.is_empty() {
+            return false;
+        }
+
+        // Special case: content.body uses word boundary matching
+        if key == "content.body" {
+            if let Some(body_value) = event.content.get("body")
+                && let Some(body_str) = body_value.as_str()
+            {
+                return Self::match_at_word_boundary(body_str, pattern);
+            }
+            return false;
+        }
+
+        // Get the value to match against based on the first path part
+        match path_parts[0].as_str() {
+            // Top-level PDU fields
+            "type" => Self::glob_match(pattern, &event.event_type),
+            "sender" => Self::glob_match(pattern, &event.sender),
+            "room_id" => Self::glob_match(pattern, &event.room_id),
+            "state_key" => {
+                if let Some(state_key) = &event.state_key {
+                    Self::glob_match(pattern, state_key)
                 } else {
                     false
                 }
             },
-            "content.body" => {
-                if let Some(body) = event.content.get("body") {
-                    body.as_str().unwrap_or("").contains(pattern)
-                } else {
-                    false
+
+            // Content fields - need to navigate path
+            "content" if path_parts.len() > 1 => {
+                // Convert EventContent to JSON for navigation
+                if let Ok(content_json) = serde_json::to_value(&event.content)
+                    && let Some(content_obj) = content_json.as_object()
+                {
+                    // Navigate the remaining path parts
+                    let remaining_path = &path_parts[1..];
+                    let content_value = serde_json::Value::Object(content_obj.clone());
+                    if let Some(value) = Self::get_nested_value(&content_value, remaining_path) {
+                        // Must be a string value
+                        if let Some(value_str) = value.as_str() {
+                            return Self::glob_match(pattern, value_str);
+                        }
+                    }
                 }
+                false
             },
+
             _ => false,
         }
     }
@@ -151,9 +178,10 @@ impl PushRuleEngine {
     fn evaluate_contains_display_name(&self, event: &PDU, context: &RoomContext) -> bool {
         if let Some(display_name) = &context.user_display_name
             && let Some(body) = event.content.get("body")
-            && let Some(body_str) = body.as_str() {
-                return body_str.contains(display_name);
-            }
+            && let Some(body_str) = body.as_str()
+        {
+            return body_str.contains(display_name);
+        }
         false
     }
 
@@ -168,9 +196,10 @@ impl PushRuleEngine {
                 return context.member_count > num;
             }
         } else if let Some(num_str) = is_condition.strip_prefix("<")
-            && let Ok(num) = num_str.parse::<u64>() {
-                return context.member_count < num;
-            }
+            && let Ok(num) = num_str.parse::<u64>()
+        {
+            return context.member_count < num;
+        }
         false
     }
 
@@ -195,28 +224,30 @@ impl PushRuleEngine {
 
     fn evaluate_event_property_contains(&self, key: &str, value: &str, event: &PDU) -> bool {
         // For Matrix v1.7 user mentions: "content.m\\.mentions.user_ids"
-        if key == "content.m\\.mentions.user_ids" {
-            if let Some(mentions) = event.content.get("m.mentions") {
-                if let Some(user_ids) = mentions.get("user_ids") {
-                    if let Some(user_ids_array) = user_ids.as_array() {
-                        return user_ids_array.iter().any(|id| {
-                            id.as_str().map_or(false, |id_str| id_str.contains(value))
-                        });
-                    }
-                }
-            }
+        if key == "content.m\\.mentions.user_ids"
+            && let Some(mentions) = event.content.get("m.mentions")
+            && let Some(user_ids) = mentions.get("user_ids")
+            && let Some(user_ids_array) = user_ids.as_array()
+        {
+            return user_ids_array
+                .iter()
+                .any(|id| id.as_str().is_some_and(|id_str| id_str.contains(value)));
         }
         false
     }
 
-    fn evaluate_event_property_is(&self, key: &str, value: &serde_json::Value, event: &PDU) -> bool {
+    fn evaluate_event_property_is(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        event: &PDU,
+    ) -> bool {
         // For Matrix v1.7 room mentions: "content.m\\.mentions.room"
-        if key == "content.m\\.mentions.room" {
-            if let Some(mentions) = event.content.get("m.mentions") {
-                if let Some(room_mention) = mentions.get("room") {
-                    return room_mention == value;
-                }
-            }
+        if key == "content.m\\.mentions.room"
+            && let Some(mentions) = event.content.get("m.mentions")
+            && let Some(room_mention) = mentions.get("room")
+        {
+            return room_mention == value;
         }
         false
     }
@@ -346,9 +377,7 @@ impl PushRuleEngine {
                         key: "content.m\\.mentions.room".to_string(),
                         value: serde_json::Value::Bool(true),
                     },
-                    PushCondition::SenderNotificationPermission {
-                        key: "room".to_string(),
-                    },
+                    PushCondition::SenderNotificationPermission { key: "room".to_string() },
                 ],
                 actions: vec![
                     PushAction::Notify,
@@ -380,5 +409,155 @@ impl PushRuleEngine {
                 enabled: true,
             },
         ]
+    }
+
+    // Helper functions for event matching
+
+    /// Match a string against a glob pattern case-insensitively
+    /// Supports: * (zero or more chars), ? (exactly one char)
+    fn glob_match(pattern: &str, value: &str) -> bool {
+        let pattern_lower = pattern.to_lowercase();
+        let value_lower = value.to_lowercase();
+
+        Self::glob_match_internal(pattern_lower.as_str(), value_lower.as_str())
+    }
+
+    fn glob_match_internal(pattern: &str, value: &str) -> bool {
+        let mut p_chars = pattern.chars().peekable();
+        let mut v_chars = value.chars().peekable();
+
+        while let Some(&p) = p_chars.peek() {
+            match p {
+                '*' => {
+                    p_chars.next();
+                    // If * is last char in pattern, match rest of string
+                    if p_chars.peek().is_none() {
+                        return true;
+                    }
+                    // Try matching rest of pattern at each position
+                    while v_chars.peek().is_some() {
+                        if Self::glob_match_internal(
+                            p_chars.clone().collect::<String>().as_str(),
+                            v_chars.clone().collect::<String>().as_str(),
+                        ) {
+                            return true;
+                        }
+                        v_chars.next();
+                    }
+                    return false;
+                },
+                '?' => {
+                    p_chars.next();
+                    if v_chars.next().is_none() {
+                        return false;
+                    }
+                },
+                _ => {
+                    p_chars.next();
+                    if Some(p) != v_chars.next() {
+                        return false;
+                    }
+                },
+            }
+        }
+
+        v_chars.peek().is_none()
+    }
+
+    /// Parse dot-separated path with escape sequences
+    /// content.m\.relates_to → ["content", "m.relates_to"]
+    /// content.m\\foo → ["content", "m\foo"]
+    fn parse_dot_path(path: &str) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut chars = path.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // Escape sequence
+                if let Some(&next) = chars.peek() {
+                    if next == '.' || next == '\\' {
+                        // Escaped dot or backslash
+                        if let Some(escaped) = chars.next() {
+                            current.push(escaped);
+                        }
+                    } else {
+                        // Other escapes: keep both chars
+                        current.push(ch);
+                    }
+                } else {
+                    // Trailing backslash
+                    current.push(ch);
+                }
+            } else if ch == '.' {
+                // Path separator
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            } else {
+                current.push(ch);
+            }
+        }
+
+        if !current.is_empty() {
+            parts.push(current);
+        }
+
+        parts
+    }
+
+    /// Get value from JSON using dot-separated path parts
+    fn get_nested_value<'a>(
+        value: &'a serde_json::Value,
+        path_parts: &[String],
+    ) -> Option<&'a serde_json::Value> {
+        let mut current = value;
+
+        for part in path_parts {
+            current = current.get(part)?;
+        }
+
+        Some(current)
+    }
+
+    /// Check if pattern matches substring at word boundaries
+    /// Word boundary = start/end of string or non-alphanumeric/underscore char
+    fn match_at_word_boundary(body: &str, pattern: &str) -> bool {
+        let body_lower = body.to_lowercase();
+        let pattern_lower = pattern.to_lowercase();
+
+        // Find all occurrences of pattern
+        let mut start = 0;
+        while let Some(pos) = body_lower[start..].find(&pattern_lower) {
+            let actual_pos = start + pos;
+            let end_pos = actual_pos + pattern_lower.len();
+
+            // Check start boundary
+            let start_ok = actual_pos == 0 || {
+                if let Some(prev_char) = body_lower[..actual_pos].chars().last() {
+                    !prev_char.is_alphanumeric() && prev_char != '_'
+                } else {
+                    false
+                }
+            };
+
+            // Check end boundary
+            let end_ok = end_pos == body_lower.len() || {
+                if let Some(next_char) = body_lower[end_pos..].chars().next() {
+                    !next_char.is_alphanumeric() && next_char != '_'
+                } else {
+                    false
+                }
+            };
+
+            if start_ok && end_ok {
+                return true;
+            }
+
+            start = actual_pos + 1;
+        }
+
+        false
     }
 }

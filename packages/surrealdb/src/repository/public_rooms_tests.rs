@@ -8,8 +8,13 @@ mod public_rooms_tests {
     use std::sync::Arc;
 
     async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("surrealkv://test_data/public_rooms_test.db").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
+        let db = surrealdb::engine::any::connect("surrealkv://test_data/public_rooms_test.db")
+            .await
+            .expect("Failed to connect to test database");
+        db.use_ns("test")
+            .use_db("test")
+            .await
+            .expect("Failed to set test database namespace");
         db
     }
 
@@ -29,7 +34,10 @@ mod public_rooms_tests {
         let public_rooms_repo = PublicRoomsRepository::new(db);
         
         // Test getting public rooms for empty database
-        let response = public_rooms_repo.get_public_rooms(Some(10), None).await.unwrap();
+        let response = public_rooms_repo
+            .get_public_rooms(Some(10), None)
+            .await
+            .expect("Failed to get public rooms");
         assert_eq!(response.chunk.len(), 0);
         assert_eq!(response.total_room_count_estimate, Some(0));
     }
@@ -42,7 +50,10 @@ mod public_rooms_tests {
         let search_term = "test";
         
         // Test searching public rooms for empty database
-        let response = public_rooms_repo.search_public_rooms(search_term, Some(10)).await.unwrap();
+        let response = public_rooms_repo
+            .search_public_rooms(search_term, Some(10))
+            .await
+            .expect("Failed to search public rooms");
         assert_eq!(response.chunk.len(), 0);
     }
 
@@ -52,7 +63,10 @@ mod public_rooms_tests {
         let public_rooms_repo = PublicRoomsRepository::new(db);
         
         // Test getting public rooms count for empty database
-        let count = public_rooms_repo.get_public_rooms_count().await.unwrap();
+        let count = public_rooms_repo
+            .get_public_rooms_count()
+            .await
+            .expect("Failed to get public rooms count");
         assert_eq!(count, 0);
     }
 
@@ -64,7 +78,10 @@ mod public_rooms_tests {
         let room_id = "!test:example.com";
         
         // Test getting directory visibility for non-existent room
-        let visibility = public_rooms_repo.get_room_directory_visibility(room_id).await.unwrap();
+        let visibility = public_rooms_repo
+            .get_room_directory_visibility(room_id)
+            .await
+            .expect("Failed to get room directory visibility");
         assert!(visibility.is_none());
         
         // Test adding room to directory
@@ -84,7 +101,10 @@ mod public_rooms_tests {
         let server_name = "example.com";
         
         // Test getting federation public rooms for empty database
-        let response = public_rooms_repo.get_federation_public_rooms(server_name, Some(10)).await.unwrap();
+        let response = public_rooms_repo
+            .get_federation_public_rooms(server_name, Some(10))
+            .await
+            .expect("Failed to get federation public rooms");
         assert_eq!(response.chunk.len(), 0);
     }
 
@@ -104,7 +124,7 @@ mod public_rooms_tests {
         let result = discovery_service.get_public_rooms_list(filter).await;
         assert!(result.is_ok());
         
-        let response = result.unwrap();
+        let response = result.expect("Expected public rooms list");
         assert_eq!(response.chunk.len(), 0); // Empty database
     }
 
@@ -125,7 +145,7 @@ mod public_rooms_tests {
         let result = discovery_service.search_rooms(query, filter).await;
         assert!(result.is_ok());
         
-        let response = result.unwrap();
+        let response = result.expect("Expected room search results");
         assert_eq!(response.chunk.len(), 0); // Empty database
     }
 
@@ -139,7 +159,7 @@ mod public_rooms_tests {
         let result = discovery_service.get_room_directory_entry(room_id).await;
         assert!(result.is_ok());
         
-        let entry = result.unwrap();
+        let entry = result.expect("Expected room directory entry result");
         assert!(entry.is_none()); // Room doesn't exist
     }
 
@@ -172,7 +192,7 @@ mod public_rooms_tests {
         let result = discovery_service.get_federation_public_rooms(server_name, filter).await;
         assert!(result.is_ok());
         
-        let response = result.unwrap();
+        let response = result.expect("Expected federation public rooms");
         assert_eq!(response.chunk.len(), 0); // Empty database
     }
 
@@ -186,7 +206,7 @@ mod public_rooms_tests {
         let result = discovery_service.resolve_alias_and_get_public_info(alias).await;
         assert!(result.is_ok());
         
-        let entry = result.unwrap();
+        let entry = result.expect("Expected alias resolution result");
         assert!(entry.is_none()); // Alias doesn't exist
     }
 
@@ -200,7 +220,7 @@ mod public_rooms_tests {
         let result = discovery_service.get_room_statistics(room_id).await;
         assert!(result.is_ok());
         
-        let stats = result.unwrap();
+        let stats = result.expect("Expected room statistics");
         assert_eq!(stats.room_id, room_id);
         assert_eq!(stats.member_count, 0);
         assert!(matches!(stats.visibility, RoomDirectoryVisibility::Private));
@@ -233,7 +253,7 @@ mod public_rooms_tests {
         let result = discovery_service.get_public_rooms_list(filter_with_server).await;
         assert!(result.is_ok());
         
-        let response = result.unwrap();
+        let response = result.expect("Expected public rooms list with server filter");
         assert_eq!(response.chunk.len(), 0); // Empty database
     }
 
@@ -254,7 +274,7 @@ mod public_rooms_tests {
         let result = discovery_service.search_rooms(empty_query, filter).await;
         assert!(result.is_ok());
         
-        let response = result.unwrap();
+        let response = result.expect("Expected search results for empty query");
         assert_eq!(response.chunk.len(), 0); // Empty database
     }
 }

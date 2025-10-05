@@ -132,17 +132,95 @@ impl<C: Connection> KeyServerRepository<C> {
         signature: &str,
         content: &[u8],
     ) -> Result<bool, RepositoryError> {
-        // Get the verify key for this server and key_id
-        let signing_key = self.get_signing_key(server_name, key_id).await?;
+        use base64::{Engine as _, engine::general_purpose};
+        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
-        match signing_key {
-            Some(key) => {
-                // In a real implementation, this would use cryptographic verification
-                // For now, we'll do a basic check that the signature is non-empty
-                // and the content matches expected format
-                Ok(!signature.is_empty() && !content.is_empty() && !key.verify_key.is_empty())
-            },
-            None => Ok(false),
+        // Get the verify key for this server and key_id
+        let signing_key = match self.get_signing_key(server_name, key_id).await? {
+            Some(key) => key,
+            None => {
+                return Err(RepositoryError::NotFound {
+                    entity_type: "SigningKey".to_string(),
+                    id: format!("{}:{}", server_name, key_id),
+                });
+            }
+        };
+
+        // Validate key_id format (must be ed25519:KEYID)
+        if !key_id.starts_with("ed25519:") {
+            return Err(RepositoryError::Validation {
+                field: "key_id".to_string(),
+                message: format!("Unsupported key algorithm: {}", key_id),
+            });
+        }
+
+        // Decode signature from base64
+        let signature_bytes = general_purpose::STANDARD.decode(signature).map_err(|e| {
+            RepositoryError::Validation {
+                field: "signature".to_string(),
+                message: format!("Invalid base64 signature: {}", e),
+            }
+        })?;
+
+        // Decode verify key from base64
+        let verify_key_bytes = general_purpose::STANDARD.decode(&signing_key.verify_key).map_err(|e| {
+            RepositoryError::Validation {
+                field: "verify_key".to_string(),
+                message: format!("Invalid base64 verify key: {}", e),
+            }
+        })?;
+
+        // Validate sizes
+        if signature_bytes.len() != 64 {
+            return Err(RepositoryError::Validation {
+                field: "signature".to_string(),
+                message: format!("Invalid signature length: {} (expected 64)", signature_bytes.len()),
+            });
+        }
+
+        if verify_key_bytes.len() != 32 {
+            return Err(RepositoryError::Validation {
+                field: "verify_key".to_string(),
+                message: format!("Invalid key length: {} (expected 32)", verify_key_bytes.len()),
+            });
+        }
+
+        // Convert to fixed-size arrays
+        let key_array: [u8; 32] = match verify_key_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Err(RepositoryError::Validation {
+                    field: "verify_key".to_string(),
+                    message: "Failed to convert key bytes to array".to_string(),
+                });
+            }
+        };
+
+        let sig_array: [u8; 64] = match signature_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Err(RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: "Failed to convert signature bytes to array".to_string(),
+                });
+            }
+        };
+
+        // Create verifying key
+        let verifying_key = VerifyingKey::from_bytes(&key_array).map_err(|e| {
+            RepositoryError::Validation {
+                field: "verify_key".to_string(),
+                message: format!("Invalid Ed25519 key: {}", e),
+            }
+        })?;
+
+        // Create signature object
+        let signature_obj = Signature::from_bytes(&sig_array);
+
+        // Verify signature against content
+        match verifying_key.verify(content, &signature_obj) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
         }
     }
 

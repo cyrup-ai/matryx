@@ -6,8 +6,9 @@
 use crate::metrics::filter_metrics::FilterMetrics;
 use matryx_entity::types::{Event, MatrixFilter};
 use moka::future::Cache;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Compiled filter for efficient reuse
@@ -23,6 +24,7 @@ pub struct CompiledFilter {
 pub struct FilterCache {
     compiled_filters: Cache<String, CompiledFilter>,
     filter_results: Cache<String, Vec<Event>>,
+    room_to_keys: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl FilterCache {
@@ -33,6 +35,7 @@ impl FilterCache {
                 .max_capacity(5000) // Max 5000 cached results
                 .time_to_live(Duration::from_secs(300)) // 5 minutes TTL
                 .build(),
+            room_to_keys: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -48,6 +51,19 @@ impl FilterCache {
         FilterMetrics::record_cache_operation("filter_compile", false);
 
         let compiled = compile_filter(filter);
+        
+        // Track room associations for cache invalidation
+        if let Some(room_filter) = &filter.room
+            && let Ok(mut room_keys) = self.room_to_keys.lock()
+            && let Some(rooms) = &room_filter.rooms
+        {
+            for room_id in rooms {
+                room_keys.entry(room_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(cache_key.clone());
+            }
+        }
+        
         self.compiled_filters.insert(cache_key, compiled.clone()).await;
         compiled
     }
@@ -61,6 +77,14 @@ impl FilterCache {
         results: Vec<Event>,
     ) {
         let cache_key = format!("{}:{}", filter_hash, room_id);
+        
+        // Track room-to-key association for invalidation
+        if let Ok(mut room_keys) = self.room_to_keys.lock() {
+            room_keys.entry(room_id.to_string())
+                .or_insert_with(Vec::new)
+                .push(cache_key.clone());
+        }
+        
         self.filter_results.insert(cache_key, results).await;
     }
 
@@ -81,11 +105,22 @@ impl FilterCache {
     /// Invalidate cache for a specific room (call when room events change)
     #[allow(dead_code)]
     pub async fn invalidate_room(&self, room_id: &str) {
-        // Invalidate all entries for this room
-        // Note: moka doesn't have a direct way to invalidate by pattern,
-        // so we'd need to track keys separately for this functionality
-        // For now, this is a simplified implementation
-        tracing::debug!("Room invalidation requested for room: {}", room_id);
+        // Clone keys before async operations to avoid holding lock across await
+        let keys_to_invalidate = if let Ok(mut room_keys) = self.room_to_keys.lock() {
+            let keys = room_keys.get(room_id).cloned();
+            room_keys.remove(room_id);
+            keys
+        } else {
+            None
+        };
+        
+        // Invalidate cache entries without holding the mutex
+        if let Some(keys) = keys_to_invalidate {
+            for key in &keys {
+                self.filter_results.invalidate(key).await;
+            }
+            tracing::info!("Invalidated {} cached filter results for room: {}", keys.len(), room_id);
+        }
     }
 
     /// Get cache statistics

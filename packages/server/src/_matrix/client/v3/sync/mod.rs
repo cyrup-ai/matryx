@@ -6,6 +6,4 @@ pub mod types;
 pub mod utils;
 
 // Re-export the main public functions
-pub use handlers::{get};
-
-
+pub use handlers::get;

@@ -56,32 +56,32 @@ pub fn media_response(
 pub fn is_safe_inline_content_type(content_type: &str) -> bool {
     matches!(
         content_type,
-        "text/css" |
-            "text/plain" |
-            "text/csv" |
-            "application/json" |
-            "application/ld+json" |
-            "image/jpeg" |
-            "image/gif" |
-            "image/png" |
-            "image/apng" |
-            "image/webp" |
-            "image/avif" |
-            "video/mp4" |
-            "video/webm" |
-            "video/ogg" |
-            "video/quicktime" |
-            "audio/mp4" |
-            "audio/webm" |
-            "audio/aac" |
-            "audio/mpeg" |
-            "audio/ogg" |
-            "audio/wave" |
-            "audio/wav" |
-            "audio/x-wav" |
-            "audio/x-pn-wav" |
-            "audio/flac" |
-            "audio/x-flac"
+        "text/css"
+            | "text/plain"
+            | "text/csv"
+            | "application/json"
+            | "application/ld+json"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/png"
+            | "image/apng"
+            | "image/webp"
+            | "image/avif"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "video/quicktime"
+            | "audio/mp4"
+            | "audio/webm"
+            | "audio/aac"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wave"
+            | "audio/wav"
+            | "audio/x-wav"
+            | "audio/x-pn-wav"
+            | "audio/flac"
+            | "audio/x-flac"
     )
 }
 
@@ -99,9 +99,7 @@ pub enum MediaContent {
         filename: Option<String>,
     },
     #[allow(dead_code)]
-    Redirect {
-        location: String,
-    },
+    Redirect { location: String },
 }
 
 /// Build Matrix-compliant multipart/mixed response for federation media
@@ -123,27 +121,24 @@ pub fn build_multipart_media_response(
     // Part 2: Media content or redirect
     match response.content {
         MediaContent::Bytes { data, content_type, filename } => {
-            let mut part_header = format!(
-                "--{}\r\nContent-Type: {}\r\n",
-                boundary, content_type
-            );
+            let mut part_header = format!("--{}\r\nContent-Type: {}\r\n", boundary, content_type);
 
             if let Some(name) = filename {
-                part_header.push_str(&format!("Content-Disposition: attachment; filename=\"{}\"\r\n", name));
+                part_header.push_str(&format!(
+                    "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                    name
+                ));
             }
 
             part_header.push_str("\r\n");
             body_bytes.extend_from_slice(part_header.as_bytes());
             body_bytes.extend_from_slice(&data); // ✅ PRESERVE BINARY DATA
             body_bytes.extend_from_slice(b"\r\n");
-        }
+        },
         MediaContent::Redirect { location } => {
-            let redirect_part = format!(
-                "--{}\r\nLocation: {}\r\n\r\n\r\n",
-                boundary, location
-            );
+            let redirect_part = format!("--{}\r\nLocation: {}\r\n\r\n\r\n", boundary, location);
             body_bytes.extend_from_slice(redirect_part.as_bytes());
-        }
+        },
     }
 
     // Final boundary

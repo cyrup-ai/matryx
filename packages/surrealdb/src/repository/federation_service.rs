@@ -356,8 +356,28 @@ impl FederationService {
     pub async fn cleanup_expired_federation_data(&self) -> Result<(), RepositoryError> {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
         
-        // Cleanup would be implemented here
-        // For now, just return success
+        // Clean up old request logs
+        let log_query = "DELETE FROM federation_request_log WHERE created_at < $cutoff";
+        let mut log_result = self.federation_repo.get_db()
+            .query(log_query)
+            .bind(("cutoff", cutoff))
+            .await?;
+        let logs_deleted: Option<u64> = log_result.take(0).unwrap_or(Some(0));
+        
+        // Clean up expired transactions
+        let txn_query = "DELETE FROM federation_transactions WHERE expires_at < time::now()";
+        let mut txn_result = self.federation_repo.get_db()
+            .query(txn_query)
+            .await?;
+        let txns_deleted: Option<u64> = txn_result.take(0).unwrap_or(Some(0));
+        
+        // Log cleanup statistics
+        tracing::debug!(
+            "Cleaned up {} federation request logs and {} transactions",
+            logs_deleted.unwrap_or(0),
+            txns_deleted.unwrap_or(0)
+        );
+        
         Ok(())
     }
 }

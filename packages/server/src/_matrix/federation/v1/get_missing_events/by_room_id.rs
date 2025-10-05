@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
-use matryx_entity::{Room, MissingEventsRequest, MissingEventsResponse, PDU};
+use matryx_entity::{MissingEventsRequest, MissingEventsResponse, PDU, Room};
 use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
@@ -121,12 +121,12 @@ fn validate_event_id_list(
 fn validate_room_version_compatibility(room: &Room) -> Result<(), StatusCode> {
     // Matrix room versions 1-11 support get_missing_events
     let supported_versions = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"];
-    
+
     if !supported_versions.contains(&room.room_version.as_str()) {
         warn!("Unsupported room version {} for get_missing_events", room.room_version);
         return Err(StatusCode::BAD_REQUEST);
     }
-    
+
     debug!("Room version {} is compatible with get_missing_events", room.room_version);
     Ok(())
 }
@@ -135,16 +135,23 @@ fn validate_room_version_compatibility(room: &Room) -> Result<(), StatusCode> {
 fn validate_federation_access(room: &Room, requesting_server: &str) -> Result<(), StatusCode> {
     // Check if room federation is disabled
     if let Some(false) = room.federate {
-        warn!("Federation disabled for room {}, denying access to {}", room.room_id, requesting_server);
+        warn!(
+            "Federation disabled for room {}, denying access to {}",
+            room.room_id, requesting_server
+        );
         return Err(StatusCode::FORBIDDEN);
     }
-    
+
     // For invite-only rooms, additional checks could be implemented here
     if let Some(join_rule) = &room.join_rule
-        && join_rule == "invite" {
-        debug!("Room {} is invite-only, federation access granted to {}", room.room_id, requesting_server);
+        && join_rule == "invite"
+    {
+        debug!(
+            "Room {} is invite-only, federation access granted to {}",
+            room.room_id, requesting_server
+        );
     }
-    
+
     Ok(())
 }
 
@@ -255,7 +262,8 @@ pub async fn post(
 
     // Check if requesting server has permission to access room
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
-    let has_users = membership_repo.server_has_users_in_room(&room_id, &x_matrix_auth.origin)
+    let has_users = membership_repo
+        .server_has_users_in_room(&room_id, &x_matrix_auth.origin)
         .await
         .map_err(|e| {
             error!("Failed to check server membership: {}", e);
@@ -266,12 +274,10 @@ pub async fn post(
         true
     } else {
         // Check if room is world-readable
-        room_repo.is_room_world_readable(&room_id)
-            .await
-            .map_err(|e| {
-                error!("Failed to check room world-readable status: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
+        room_repo.is_room_world_readable(&room_id).await.map_err(|e| {
+            error!("Failed to check room world-readable status: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
     };
 
     if !has_permission {
@@ -324,8 +330,6 @@ pub async fn post(
 
     Ok(Json(response))
 }
-
-
 
 /// Retrieve missing events using breadth-first traversal
 async fn get_missing_events_traversal(
@@ -401,11 +405,9 @@ async fn get_missing_events_traversal(
     }
 
     // Sort by depth descending (most recent first) then by origin_server_ts
-    result_events.sort_by(|a, b| {
-        match b.depth.cmp(&a.depth) {
-            std::cmp::Ordering::Equal => b.origin_server_ts.cmp(&a.origin_server_ts),
-            other => other,
-        }
+    result_events.sort_by(|a, b| match b.depth.cmp(&a.depth) {
+        std::cmp::Ordering::Equal => b.origin_server_ts.cmp(&a.origin_server_ts),
+        other => other,
     });
 
     Ok(result_events)

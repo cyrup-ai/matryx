@@ -37,22 +37,18 @@ pub async fn whoami(
 
     let profile_service = ProfileManagementService::new(state.db.clone());
 
-    // Get whoami info using ProfileManagementService
-    match profile_service.get_whoami_info(&token_info.user_id).await {
-        Ok(whoami_response) => {
-            Ok(Json(WhoAmIResponse {
-                user_id: whoami_response.user_id,
-                device_id: Some(token_info.device_id),
-                is_guest: whoami_response.is_guest,
-            }))
-        },
-        Err(_) => {
-            Ok(Json(WhoAmIResponse {
-                user_id: token_info.user_id,
-                device_id: Some(token_info.device_id),
-                is_guest: Some(false),
-            }))
-        },
+    // Get whoami info using ProfileManagementService with device_id
+    match profile_service.get_whoami_info(&token_info.user_id, Some(&token_info.device_id)).await {
+        Ok(whoami_response) => Ok(Json(WhoAmIResponse {
+            user_id: whoami_response.user_id,
+            device_id: whoami_response.device_id.or(Some(token_info.device_id)),
+            is_guest: whoami_response.is_guest,
+        })),
+        Err(_) => Ok(Json(WhoAmIResponse {
+            user_id: token_info.user_id,
+            device_id: Some(token_info.device_id),
+            is_guest: Some(false),
+        })),
     }
 }
 

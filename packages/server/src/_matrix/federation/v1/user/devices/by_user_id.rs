@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
 
 use crate::AppState;
-use matryx_surrealdb::repository::{UserRepository, DeviceRepository, CrossSigningRepository};
+use matryx_surrealdb::repository::{CrossSigningRepository, DeviceRepository, UserRepository};
 
 /// Cross-signing key structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,10 +61,11 @@ pub async fn get(
 
     // Query all devices for the user
     let device_repo = DeviceRepository::new(state.db.clone());
-    let federation_devices = device_repo.get_user_devices_for_federation(&user_id).await.map_err(|e| {
-        error!("Failed to get user devices for federation: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let federation_devices =
+        device_repo.get_user_devices_for_federation(&user_id).await.map_err(|e| {
+            error!("Failed to get user devices for federation: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mut devices = Vec::new();
     for fed_device in federation_devices {
@@ -78,7 +79,7 @@ pub async fn get(
                 signatures: repo_device_keys.signatures,
                 unsigned: repo_device_keys.unsigned,
             };
-            
+
             let device_info = DeviceInfo {
                 device_display_name: fed_device.display_name,
                 device_id: fed_device.device_id,
@@ -90,13 +91,14 @@ pub async fn get(
 
     // Query cross-signing keys
     let cross_signing_repo = CrossSigningRepository::new(state.db.clone());
-    let (master_key, self_signing_key) = match get_federation_cross_signing_keys(&cross_signing_repo, &user_id).await {
-        Ok((master, self_signing)) => (master, self_signing),
-        Err(e) => {
-            error!("Failed to query cross-signing keys for user {}: {}", user_id, e);
-            (None, None)
-        },
-    };
+    let (master_key, self_signing_key) =
+        match get_federation_cross_signing_keys(&cross_signing_repo, &user_id).await {
+            Ok((master, self_signing)) => (master, self_signing),
+            Err(e) => {
+                error!("Failed to query cross-signing keys for user {}: {}", user_id, e);
+                (None, None)
+            },
+        };
 
     // Get current stream_id for this user's device updates
     let stream_id = get_device_stream_id(&state, &user_id).await.unwrap_or(0);
@@ -130,7 +132,8 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<String, StatusCode> {
     for param in auth_params.split(',') {
         let param = param.trim();
         if let Some((key, value)) = param.split_once('=')
-            && key.trim() == "origin" {
+            && key.trim() == "origin"
+        {
             return Ok(value.trim().to_string());
         }
     }
@@ -146,10 +149,14 @@ async fn get_federation_cross_signing_keys(
     (Option<CrossSigningKey>, Option<CrossSigningKey>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let master_key = cross_signing_repo.get_master_key(user_id).await
+    let master_key = cross_signing_repo
+        .get_master_key(user_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    
-    let self_signing_key = cross_signing_repo.get_self_signing_key(user_id).await
+
+    let self_signing_key = cross_signing_repo
+        .get_self_signing_key(user_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     // Convert repository types to federation types
@@ -170,12 +177,19 @@ async fn get_federation_cross_signing_keys(
     Ok((fed_master_key, fed_self_signing_key))
 }
 
-/// Get the current device stream ID for a user (simplified implementation)
+/// Get the current device stream ID for a user
 async fn get_device_stream_id(
-    _state: &AppState,
-    _user_id: &str,
+    state: &AppState,
+    user_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    // For now, return a simple stream ID
-    // In production, this would track actual device list update streams
-    Ok(1)
+    use matryx_surrealdb::repository::EDURepository;
+    let edu_repo = EDURepository::new(state.db.clone());
+
+    match edu_repo.get_latest_device_list_stream_id(user_id).await {
+        Ok(Some(stream_id)) => Ok(stream_id as i64),
+        Ok(None) => Ok(0),
+        Err(e) => Err(Box::new(std::io::Error::other(
+            format!("Failed to get stream_id: {}", e)
+        ))),
+    }
 }

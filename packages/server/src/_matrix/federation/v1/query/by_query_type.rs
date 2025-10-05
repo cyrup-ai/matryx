@@ -149,13 +149,10 @@ async fn handle_directory_query(
 
     // Query database for room alias
     let federation_repo = FederationRepository::new(state.db.clone());
-    let alias_result = federation_repo
-        .get_room_alias_info(room_alias)
-        .await
-        .map_err(|e| {
-            error!("Failed to query room alias {}: {}", room_alias, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let alias_result = federation_repo.get_room_alias_info(room_alias).await.map_err(|e| {
+        error!("Failed to query room alias {}: {}", room_alias, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     match alias_result {
         Some((room_id, servers)) => {

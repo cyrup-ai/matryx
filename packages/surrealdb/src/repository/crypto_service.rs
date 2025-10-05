@@ -355,6 +355,7 @@ impl CryptoService {
     pub async fn verify_key_signatures(
         &self,
         keys: &serde_json::Value,
+        device_id: &str,
     ) -> Result<SignatureVerification, RepositoryError> {
         let mut errors = Vec::new();
 
@@ -389,30 +390,44 @@ impl CryptoService {
                                     )
                                     .await
                             } else if let Ok(Some(device_key)) =
-                                self.crypto_repo.get_device_key(user_id, "unknown").await
+                                self.crypto_repo.get_device_key(user_id, device_id).await
                             {
                                 let crypto_signature = crate::repository::crypto::Signature {
                                     signature: sig_str.to_string(),
                                     key_id: key_id
-                                        .split(':')
-                                        .nth(1)
-                                        .unwrap_or("unknown")
-                                        .to_string(),
+                                            .split(':')
+                                            .nth(1)
+                                            .unwrap_or("unknown")
+                                            .to_string(),
                                     algorithm: key_id
                                         .split(':')
                                         .next()
                                         .unwrap_or("unknown")
                                         .to_string(),
                                 };
-                                // In a real implementation, we'd need to know the device_id
-                                self.crypto_repo
-                                    .validate_key_signature(
-                                        keys,
-                                        &crypto_signature,
-                                        device_key.keys.get(key_id).unwrap_or(&String::new()),
-                                    )
-                                    .await
+                                match device_key.keys.get(key_id) {
+                                    Some(signing_key) => {
+                                        self.crypto_repo
+                                            .validate_key_signature(
+                                                keys,
+                                                &crypto_signature,
+                                                signing_key,
+                                            )
+                                            .await
+                                    },
+                                    None => {
+                                        errors.push(format!(
+                                            "Signing key {} not found for device {}",
+                                            key_id, device_id
+                                        ));
+                                        Ok(false)
+                                    }
+                                }
                             } else {
+                                errors.push(format!(
+                                    "Device key not found for user {} device {}",
+                                    user_id, device_id
+                                ));
                                 Ok(false)
                             };
 

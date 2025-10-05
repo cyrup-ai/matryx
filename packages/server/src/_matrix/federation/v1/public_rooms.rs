@@ -200,18 +200,22 @@ pub async fn get(
 
     // Convert to federation response format
     let federation_response = PublicRoomsResponse {
-        chunk: public_rooms_response.chunk.into_iter().map(|entry| PublishedRoom {
-            room_id: entry.room_id,
-            name: entry.name,
-            topic: entry.topic,
-            avatar_url: entry.avatar_url,
-            canonical_alias: entry.canonical_alias,
-            num_joined_members: entry.num_joined_members,
-            room_type: entry.room_type,
-            join_rule: entry.join_rule,
-            guest_can_join: entry.guest_can_join,
-            world_readable: entry.world_readable,
-        }).collect(),
+        chunk: public_rooms_response
+            .chunk
+            .into_iter()
+            .map(|entry| PublishedRoom {
+                room_id: entry.room_id,
+                name: entry.name,
+                topic: entry.topic,
+                avatar_url: entry.avatar_url,
+                canonical_alias: entry.canonical_alias,
+                num_joined_members: entry.num_joined_members,
+                room_type: entry.room_type,
+                join_rule: entry.join_rule,
+                guest_can_join: entry.guest_can_join,
+                world_readable: entry.world_readable,
+            })
+            .collect(),
         next_batch: public_rooms_response.next_batch,
         prev_batch: public_rooms_response.prev_batch,
         total_room_count_estimate: public_rooms_response.total_room_count_estimate,
@@ -279,18 +283,22 @@ pub async fn post(
 
     // Convert to federation response format
     let federation_response = PublicRoomsResponse {
-        chunk: public_rooms_response.chunk.into_iter().map(|entry| PublishedRoom {
-            room_id: entry.room_id,
-            name: entry.name,
-            topic: entry.topic,
-            avatar_url: entry.avatar_url,
-            canonical_alias: entry.canonical_alias,
-            num_joined_members: entry.num_joined_members,
-            room_type: entry.room_type,
-            join_rule: entry.join_rule,
-            guest_can_join: entry.guest_can_join,
-            world_readable: entry.world_readable,
-        }).collect(),
+        chunk: public_rooms_response
+            .chunk
+            .into_iter()
+            .map(|entry| PublishedRoom {
+                room_id: entry.room_id,
+                name: entry.name,
+                topic: entry.topic,
+                avatar_url: entry.avatar_url,
+                canonical_alias: entry.canonical_alias,
+                num_joined_members: entry.num_joined_members,
+                room_type: entry.room_type,
+                join_rule: entry.join_rule,
+                guest_can_join: entry.guest_can_join,
+                world_readable: entry.world_readable,
+            })
+            .collect(),
         next_batch: public_rooms_response.next_batch,
         prev_batch: public_rooms_response.prev_batch,
         total_room_count_estimate: public_rooms_response.total_room_count_estimate,
@@ -298,7 +306,6 @@ pub async fn post(
 
     Ok(Json(serde_json::to_value(federation_response).unwrap_or(json!({}))))
 }
-
 
 /// Response structure for public rooms directory
 #[derive(Debug, Serialize)]
@@ -323,32 +330,40 @@ async fn get_public_rooms(
     _third_party_instance_id: Option<String>,
 ) -> Result<PublicRoomsResponse, Box<dyn std::error::Error + Send + Sync>> {
     let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
-    
+
     let repo_response = if let Some(search_filter) = filter {
         if let Some(search_term) = &search_filter.generic_search_term {
             if !search_term.trim().is_empty() {
                 // Use search functionality
-                public_rooms_repo.search_public_rooms(search_term, limit).await
+                public_rooms_repo
+                    .search_public_rooms(search_term, limit)
+                    .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
             } else {
                 // No search term, get regular public rooms
-                public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+                public_rooms_repo
+                    .get_public_rooms(limit, since.as_deref())
+                    .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
             }
         } else {
             // No search term, get regular public rooms
-            public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+            public_rooms_repo
+                .get_public_rooms(limit, since.as_deref())
+                .await
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         }
     } else {
         // No filter, get regular public rooms
-        public_rooms_repo.get_public_rooms(limit, since.as_deref()).await
+        public_rooms_repo
+            .get_public_rooms(limit, since.as_deref())
+            .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
     };
 
     // Convert repository response to server response format with visibility validation
     let mut published_rooms: Vec<PublishedRoom> = Vec::new();
-    
+
     for entry in repo_response.chunk {
         // Validate room visibility settings using helper function
         match get_room_visibility_settings(state, &entry.room_id).await {
@@ -381,7 +396,7 @@ async fn get_public_rooms(
                     guest_can_join: entry.guest_can_join,
                     world_readable: entry.world_readable,
                 });
-            }
+            },
         }
     }
 
@@ -392,7 +407,7 @@ async fn get_public_rooms(
             warn!("Failed to get total public rooms count: {}", e);
             // Fallback to repository estimate
             repo_response.total_room_count_estimate.map(|c| c as u32)
-        }
+        },
     };
 
     Ok(PublicRoomsResponse {
@@ -403,15 +418,15 @@ async fn get_public_rooms(
     })
 }
 
-
-
 /// Get room visibility settings from state events using repository
 pub async fn get_room_visibility_settings(
     state: &AppState,
     room_id: &str,
 ) -> Result<(String, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
     let room_repo = std::sync::Arc::new(RoomRepository::new(state.db.clone()));
-    let settings = room_repo.get_room_visibility_settings(room_id).await
+    let settings = room_repo
+        .get_room_visibility_settings(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(settings)
 }
@@ -422,9 +437,9 @@ pub async fn get_total_public_rooms_count(
     _filter: Option<PublicRoomsFilter>,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     let public_rooms_repo = PublicRoomsRepository::new(state.db.clone());
-    let count = public_rooms_repo.get_public_rooms_count().await
+    let count = public_rooms_repo
+        .get_public_rooms_count()
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(count as u32)
 }
-
-

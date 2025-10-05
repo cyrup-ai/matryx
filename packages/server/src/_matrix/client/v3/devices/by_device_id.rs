@@ -12,12 +12,13 @@ use tracing::{error, info, warn};
 use crate::{
     _matrix::client::v3::devices::{ClientDeviceInfo, TrustLevel},
     AppState,
-    auth::{MatrixAuth, extract_matrix_auth, uia::{UiaAuth, UiaFlow}},
+    auth::{
+        MatrixAuth, extract_matrix_auth,
+        uia::{UiaAuth, UiaFlow},
+    },
 };
 use matryx_surrealdb::repository::{
-    RepositoryError,
-    device::DeviceRepository,
-    session::SessionRepository,
+    RepositoryError, device::DeviceRepository, session::SessionRepository,
 };
 
 // DeviceInfo already imported above
@@ -86,11 +87,10 @@ pub async fn delete(
         info!("Processing UIA authentication for device deletion");
 
         // Parse auth data as UIA authentication
-        let uia_auth: UiaAuth = serde_json::from_value(auth_data)
-            .map_err(|e| {
-                error!("Failed to parse UIA auth data for device deletion: {:?}", e);
-                StatusCode::BAD_REQUEST
-            })?;
+        let uia_auth: UiaAuth = serde_json::from_value(auth_data).map_err(|e| {
+            error!("Failed to parse UIA auth data for device deletion: {:?}", e);
+            StatusCode::BAD_REQUEST
+        })?;
 
         // Use centralized UIA service from AppState
         let uia_service = &state.uia_service;
@@ -113,7 +113,7 @@ pub async fn delete(
                     "error": uia_error.error,
                     "errcode": uia_error.errcode
                 })));
-            }
+            },
         }
     } else {
         // No auth data provided - start UIA flow per Matrix spec
@@ -124,22 +124,21 @@ pub async fn delete(
         let uia_service = &state.uia_service;
 
         // Define required authentication flows for device deletion
-        let flows = vec![
-            UiaFlow {
-                stages: vec!["m.login.password".to_string()]
-            },
-        ];
+        let flows = vec![UiaFlow { stages: vec!["m.login.password".to_string()] }];
 
         // Start UIA session
-        let session = uia_service.start_session(
-            Some(&user_id),
-            Some(&device_id), // device_id relevant for device operations
-            flows.clone(),
-            std::collections::HashMap::new(),
-        ).await.map_err(|e| {
-            error!("Failed to start UIA session for device deletion: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let session = uia_service
+            .start_session(
+                Some(&user_id),
+                Some(&device_id), // device_id relevant for device operations
+                flows.clone(),
+                std::collections::HashMap::new(),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to start UIA session for device deletion: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // Return UIA challenge per Matrix spec
         return Ok(Json(json!({

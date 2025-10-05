@@ -203,7 +203,7 @@ impl<C: Connection> MetricsRepository<C> {
 
         // Calculate percentiles (simplified - for production use proper percentile calculation)
         let mut sorted_times: Vec<f64> = response_times.iter().map(|p| p.value).collect();
-        sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let p95_index = (sorted_times.len() as f64 * 0.95) as usize;
         let p99_index = (sorted_times.len() as f64 * 0.99) as usize;

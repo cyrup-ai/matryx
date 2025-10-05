@@ -1,3 +1,4 @@
+pub mod auth_metadata;
 pub mod login;
 pub mod media;
 pub mod room_summary;

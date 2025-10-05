@@ -1,15 +1,19 @@
-use axum::{Json, extract::{Path, State}, http::{HeaderMap, StatusCode}};
-use serde_json::{Value, json};
-use std::collections::HashMap;
-use tracing::{error, info};
+use crate::_matrix::client::v3::room_keys::version::{
+    BackupError, BackupVersionQuery, generate_backup_etag, get_backup_count,
+    store_room_key, validate_backup_version,
+};
 use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
-use crate::_matrix::client::v3::room_keys::version::{
-    validate_backup_version, store_room_key, generate_backup_etag, get_backup_count, 
-    extract_version_from_headers, BackupError
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
 };
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use tracing::{error, info};
 
 /// DELETE /_matrix/client/v3/room_keys/keys/{roomId}
 pub async fn delete(Path(_room_id): Path<String>) -> Result<Json<Value>, StatusCode> {
@@ -31,6 +35,7 @@ pub async fn put(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(room_id): Path<String>,
+    Query(params): Query<BackupVersionQuery>,
     Json(sessions_data): Json<HashMap<String, Value>>,
 ) -> Result<Json<Value>, StatusCode> {
     let auth = extract_matrix_auth(&headers, &state.session_service)
@@ -47,28 +52,38 @@ pub async fn put(
         _ => return Err(StatusCode::FORBIDDEN),
     };
 
-    let version = extract_version_from_headers(&headers)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let version = params.version.ok_or(StatusCode::BAD_REQUEST)?;
 
     // Validate backup version
     match validate_backup_version(&state.db, &user_id, &version).await {
         Ok(backup_version) => {
             let mut stored_count = 0;
-            
+
             // Store each session key in the room
             for (session_id, key_data) in sessions_data {
-                match store_room_key(&state.db, &user_id, &version, &room_id, &session_id, &key_data).await {
+                match store_room_key(
+                    &state.db,
+                    &user_id,
+                    &version,
+                    &room_id,
+                    &session_id,
+                    &key_data,
+                )
+                .await
+                {
                     Ok(_) => stored_count += 1,
                     Err(e) => {
                         error!("Failed to store room key {}/{}: {}", room_id, session_id, e);
                         return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    }
+                    },
                 }
             }
 
-            info!("Stored {} room keys for room {} (user={}, version={})", 
-                  stored_count, room_id, user_id, version);
-            
+            info!(
+                "Stored {} room keys for room {} (user={}, version={})",
+                stored_count, room_id, user_id, version
+            );
+
             Ok(Json(serde_json::json!({
                 "etag": format!("{}:{}", generate_backup_etag(&user_id, &version), backup_version.created_at),
                 "count": get_backup_count(&state.db, &user_id, &version)
@@ -83,7 +98,7 @@ pub async fn put(
         Err(e) => {
             error!("Backup validation failed: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
+        },
     }
 }
 

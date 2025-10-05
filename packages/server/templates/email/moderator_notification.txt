@@ -1,0 +1,15 @@
+User Report Notification - {{ server_name }}
+
+A user has been reported on {{ server_name }}.
+
+Reporter: {{ reporter_id }}
+Reported User: {{ reported_user_id }}
+Timestamp: {{ timestamp }}
+
+Reason:
+{{ reason }}
+
+Please review this report and take appropriate action.
+
+---
+{{ server_name }} - Matrix Homeserver - Automated Moderator Notification

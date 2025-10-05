@@ -247,13 +247,11 @@ impl LiveMembershipService {
                     }
                 }
             })
-            .filter_map(|result| {
-                async move {
-                    match result {
-                        Ok(Some(update)) => Some(Ok(update)),
-                        Ok(None) => None,
-                        Err(e) => Some(Err(e)),
-                    }
+            .filter_map(|result| async move {
+                match result {
+                    Ok(Some(update)) => Some(Ok(update)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
                 }
             });
 
@@ -559,7 +557,7 @@ impl LiveMembershipService {
 }
 
 /// Extract the reason field from a Matrix membership event according to the Matrix specification
-/// 
+///
 /// Per the Matrix Client-Server API spec, the reason field is an optional user-supplied
 /// text explaining why their membership has changed. This function extracts that field
 /// from the membership event content.

@@ -20,8 +20,6 @@ pub struct SendToDeviceRequest {
     messages: std::collections::HashMap<String, std::collections::HashMap<String, Value>>,
 }
 
-
-
 /// PUT /_matrix/client/v3/sendToDevice/{eventType}/{txnId}
 pub async fn put(
     State(state): State<AppState>,

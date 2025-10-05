@@ -1,8 +1,8 @@
 //! Module contains intentional library code not yet fully integrated
 #![allow(dead_code)]
 
-use crate::middleware::TransactionConfig;
 use crate::auth::captcha::CaptchaConfig;
+use crate::middleware::TransactionConfig;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::OnceLock;
@@ -65,7 +65,7 @@ pub struct TlsConfig {
 pub struct RateLimitConfig {
     /// Client API rate limits (requests per minute)
     pub client_requests_per_minute: u32,
-    /// Federation API rate limits (requests per minute) 
+    /// Federation API rate limits (requests per minute)
     pub federation_requests_per_minute: u32,
     /// Media endpoint specific limits (requests per minute)
     pub media_requests_per_minute: u32,
@@ -104,15 +104,29 @@ impl RateLimitConfig {
     pub fn from_env() -> Self {
         Self {
             client_requests_per_minute: env::var("RATE_LIMIT_CLIENT_PER_MINUTE")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 10000),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100)
+                .clamp(1, 10000),
             federation_requests_per_minute: env::var("RATE_LIMIT_FEDERATION_PER_MINUTE")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 10000),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200)
+                .clamp(1, 10000),
             media_requests_per_minute: env::var("RATE_LIMIT_MEDIA_PER_MINUTE")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(50).clamp(1, 10000),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50)
+                .clamp(1, 10000),
             burst_size: env::var("RATE_LIMIT_BURST")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(10).clamp(1, 1000),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10)
+                .clamp(1, 1000),
             enabled: env::var("RATE_LIMIT_ENABLED")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(true),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(true),
         }
     }
 }
@@ -237,15 +251,80 @@ impl ServerConfig {
 
             // Enhanced validation
             if config.environment == "production" {
+                // 1. Validate homeserver name is not localhost
                 if config.homeserver_name == "localhost" {
                     error!("HOMESERVER_NAME must not be localhost in production");
                     panic!("Invalid production configuration: localhost server name");
                 }
 
+                // 2. Validate homeserver name format
                 if !crate::utils::matrix_identifiers::is_valid_server_name(&config.homeserver_name)
                 {
                     error!("Invalid server name format: {}", config.homeserver_name);
                     panic!("Invalid production configuration: malformed server name");
+                }
+
+                // 3. Validate homeserver name is not an IP literal
+                if crate::utils::matrix_identifiers::is_ip_literal(&config.homeserver_name) {
+                    error!("homeserver_name cannot be an IP address in production: {}", config.homeserver_name);
+                    panic!("Invalid production configuration: homeserver_name must be a domain name (FQDN)");
+                }
+
+                // 4. Validate database URL is not in-memory
+                let db_url = env::var("DATABASE_URL").unwrap_or_default();
+                if db_url.contains("memory://") || db_url == "memory" {
+                    error!("DATABASE_URL cannot use in-memory database in production: {}", db_url);
+                    panic!("Invalid production configuration: memory database not allowed");
+                }
+                if db_url.is_empty() {
+                    error!("DATABASE_URL must be explicitly set in production");
+                    panic!("Invalid production configuration: missing database URL");
+                }
+
+                // 5. Validate media base URL uses HTTPS
+                if !config.media_base_url.starts_with("https://") {
+                    error!("media_base_url must use HTTPS in production, got: {}", config.media_base_url);
+                    panic!("Invalid production configuration: media_base_url must use https://");
+                }
+
+                // 6. Validate admin email format
+                if config.admin_email.is_empty() || !config.admin_email.contains('@') {
+                    error!("admin_email is invalid: {}", config.admin_email);
+                    panic!("Invalid production configuration: admin_email must be valid email address");
+                }
+
+                // 7. Validate TLS certificate validation is enabled
+                if !config.tls_config.validate_certificates {
+                    error!("TLS certificate validation is disabled in production");
+                    panic!("Invalid production configuration: certificate validation must be enabled");
+                }
+                if !config.tls_config.skip_validation_domains.is_empty() {
+                    warn!(
+                        "TLS validation is skipped for {} domains in production: {:?}",
+                        config.tls_config.skip_validation_domains.len(),
+                        config.tls_config.skip_validation_domains
+                    );
+                }
+
+                // 8. Validate rate limiting is enabled
+                if !config.rate_limiting.enabled {
+                    error!("Rate limiting is disabled in production");
+                    panic!("Invalid production configuration: rate limiting must be enabled");
+                }
+
+                // 9. Validate JWT secret is explicitly set
+                if env::var("JWT_SECRET").is_err() {
+                    error!("JWT_SECRET must be explicitly set in production (not auto-generated)");
+                    panic!("Invalid production configuration: JWT_SECRET environment variable required");
+                }
+
+                // 10. Warn about development port usage (non-fatal)
+                if config.federation_port == 8008 {
+                    warn!(
+                        "Federation port 8008 is typically for client API. Production usually uses 8448 for federation. \
+                        Current setting: {}",
+                        config.federation_port
+                    );
                 }
             }
 
@@ -269,7 +348,9 @@ impl ServerConfig {
     }
 
     pub fn get() -> Result<&'static ServerConfig, ConfigError> {
-        SERVER_CONFIG.get().ok_or_else(|| ConfigError::MissingRequired("ServerConfig not initialized".to_string()))
+        SERVER_CONFIG
+            .get()
+            .ok_or_else(|| ConfigError::MissingRequired("ServerConfig not initialized".to_string()))
     }
 }
 

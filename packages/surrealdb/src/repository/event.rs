@@ -1,9 +1,13 @@
 use crate::repository::error::RepositoryError;
+use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
+use ed25519_dalek::{SigningKey, Signature, VerifyingKey, Signer, Verifier};
 use futures::{Stream, StreamExt};
 use matryx_entity::types::{Event, EventContent, MembershipState};
+use matryx_entity::utils::canonical_json::canonical_json_for_signing;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -103,6 +107,48 @@ impl EventRepository {
         let room_id_owned = room_id.to_string();
         let events: Vec<Event> =
             self.db.query(&query).bind(("room_id", room_id_owned)).await?.take(0)?;
+        Ok(events)
+    }
+
+    /// Get room events since a specific received_ts (for incremental sync)
+    pub async fn get_room_events_since(
+        &self,
+        room_id: &str,
+        since_ts: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<Event>, RepositoryError> {
+        let query = match (since_ts, limit) {
+            (Some(ts), Some(l)) => {
+                format!(
+                    "SELECT * FROM event WHERE room_id = $room_id AND received_ts > {} ORDER BY received_ts ASC LIMIT {}",
+                    ts, l
+                )
+            },
+            (Some(ts), None) => {
+                format!(
+                    "SELECT * FROM event WHERE room_id = $room_id AND received_ts > {} ORDER BY received_ts ASC",
+                    ts
+                )
+            },
+            (None, Some(l)) => {
+                format!(
+                    "SELECT * FROM event WHERE room_id = $room_id ORDER BY received_ts ASC LIMIT {}",
+                    l
+                )
+            },
+            (None, None) => {
+                "SELECT * FROM event WHERE room_id = $room_id ORDER BY received_ts ASC".to_string()
+            },
+        };
+
+        let room_id_owned = room_id.to_string();
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("room_id", room_id_owned))
+            .await?;
+
+        let events: Vec<Event> = result.take(0)?;
         Ok(events)
     }
 
@@ -624,9 +670,169 @@ impl EventRepository {
 
         // For state events, check if sender has sufficient power level
         if event.state_key.is_some() {
-            // Would implement full power level validation here
-            // For now, basic validation
-            return Ok(true);
+            let power_repo = crate::repository::power_levels::PowerLevelsRepository::new(self.db.clone());
+            let power_levels = power_repo.get_power_levels(&event.room_id).await?;
+
+            let sender_level = power_levels
+                .users
+                .get(&event.sender)
+                .copied()
+                .unwrap_or(power_levels.users_default);
+
+            let required_level = power_levels
+                .events
+                .get(&event.event_type)
+                .copied()
+                .unwrap_or(power_levels.state_default);
+
+            if sender_level < required_level {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Validate event meets all Matrix requirements
+    pub async fn validate_event(
+        &self,
+        event: &Event,
+        room_id: &str,
+    ) -> Result<bool, RepositoryError> {
+        // 1. Validate required fields are present
+        if event.event_id.is_empty() {
+            return Err(RepositoryError::ValidationError {
+                field: "event_id".to_string(),
+                message: "Event ID cannot be empty".to_string(),
+            });
+        }
+
+        if event.room_id.is_empty() {
+            return Err(RepositoryError::ValidationError {
+                field: "room_id".to_string(),
+                message: "Room ID cannot be empty".to_string(),
+            });
+        }
+
+        if event.sender.is_empty() {
+            return Err(RepositoryError::ValidationError {
+                field: "sender".to_string(),
+                message: "Sender cannot be empty".to_string(),
+            });
+        }
+
+        if event.event_type.is_empty() {
+            return Err(RepositoryError::ValidationError {
+                field: "type".to_string(),
+                message: "Event type cannot be empty".to_string(),
+            });
+        }
+
+        // 2. Validate sender is valid Matrix User ID format (@user:domain)
+        if !event.sender.starts_with('@') || !event.sender.contains(':') {
+            return Err(RepositoryError::ValidationError {
+                field: "sender".to_string(),
+                message: format!("Invalid Matrix user ID format: {}", event.sender),
+            });
+        }
+
+        // 3. Validate state events have state_key
+        if event.event_type.starts_with("m.room.")
+            && event.event_type != "m.room.message"
+            && event.event_type != "m.room.redaction"
+            && event.state_key.is_none()
+        {
+            return Err(RepositoryError::ValidationError {
+                field: "state_key".to_string(),
+                message: format!("State event {} requires state_key", event.event_type),
+            });
+        }
+
+        // 4. Validate event content matches type requirements
+        match event.event_type.as_str() {
+            "m.room.member" => {
+                if event.state_key.is_none() {
+                    return Err(RepositoryError::ValidationError {
+                        field: "state_key".to_string(),
+                        message: "m.room.member requires state_key".to_string(),
+                    });
+                }
+                // Validate membership content has required 'membership' field
+                if let EventContent::Unknown(ref content) = event.content {
+                    if content.get("membership").is_none() {
+                        return Err(RepositoryError::ValidationError {
+                            field: "content.membership".to_string(),
+                            message: "m.room.member requires membership field".to_string(),
+                        });
+                    }
+                }
+            }
+            "m.room.power_levels" => {
+                if let EventContent::Unknown(ref content) = event.content {
+                    // Validate required power level fields
+                    if content.get("users_default").is_none() {
+                        return Err(RepositoryError::ValidationError {
+                            field: "content.users_default".to_string(),
+                            message: "Power levels require users_default".to_string(),
+                        });
+                    }
+                }
+            }
+            "m.room.create" => {
+                if event.state_key.as_deref() != Some("") {
+                    return Err(RepositoryError::ValidationError {
+                        field: "state_key".to_string(),
+                        message: "m.room.create requires empty state_key".to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        // 5. Validate event belongs to specified room
+        if event.room_id != room_id {
+            return Err(RepositoryError::ValidationError {
+                field: "room_id".to_string(),
+                message: format!(
+                    "Event room_id {} doesn't match {}",
+                    event.room_id, room_id
+                ),
+            });
+        }
+
+        // 6. For state events, validate power levels
+        if event.state_key.is_some() {
+            let power_repo = crate::repository::power_levels::PowerLevelsRepository::new(self.db.clone());
+            let power_levels = power_repo.get_power_levels(room_id).await?;
+
+            let sender_level = power_levels
+                .users
+                .get(&event.sender)
+                .copied()
+                .unwrap_or(power_levels.users_default);
+
+            let required_level = power_levels
+                .events
+                .get(&event.event_type)
+                .copied()
+                .unwrap_or(power_levels.state_default);
+
+            if sender_level < required_level {
+                return Err(RepositoryError::Forbidden {
+                    reason: format!(
+                        "User {} has power level {} but needs {} for {}",
+                        event.sender, sender_level, required_level, event.event_type
+                    ),
+                });
+            }
+        }
+
+        // 7. Validate signatures if present
+        if let Some(ref signatures) = event.signatures {
+            if signatures.is_empty() {
+                tracing::warn!("Event has empty signatures field");
+            }
+            // Signature validation would go here
         }
 
         Ok(true)
@@ -660,15 +866,46 @@ impl EventRepository {
             });
         }
 
-        // In a real implementation, this would:
-        // 1. Create canonical JSON of the event
-        // 2. Sign it with the Ed25519 private key
-        // 3. Add the signature to the event
+        // Extract private key
+        let private_key = keys[0]["private_key"]
+            .as_str()
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "private_key".to_string(),
+                message: "Private key not found in result".to_string(),
+            })?;
 
-        // For now, we'll add a placeholder signature
+        // Convert event to JSON value for canonicalization
+        let event_value = serde_json::to_value(&*event)
+            .map_err(RepositoryError::Serialization)?;
+
+        // Get canonical JSON (removes signatures and unsigned)
+        let canonical = canonical_json_for_signing(&event_value)
+            .map_err(|e| RepositoryError::SerializationError {
+                message: format!("Canonical JSON error: {}", e),
+            })?;
+
+        // Decode signing key from base64
+        let key_bytes = general_purpose::STANDARD.decode(private_key)
+            .map_err(|e| RepositoryError::Validation {
+                field: "signing_key".to_string(),
+                message: format!("Invalid base64 signing key: {}", e),
+            })?;
+
+        let key_array: [u8; 32] = key_bytes.try_into()
+            .map_err(|_| RepositoryError::Validation {
+                field: "signing_key".to_string(),
+                message: "Signing key must be 32 bytes".to_string(),
+            })?;
+
+        // Sign the canonical JSON
+        let signing_key_obj = SigningKey::from_bytes(&key_array);
+        let signature = signing_key_obj.sign(canonical.as_bytes());
+        let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+        // Add signature to event
         let mut signatures = event.signatures.clone().unwrap_or_default();
         let server_sigs = signatures.entry(server_name.to_string()).or_default();
-        server_sigs.insert(key_id.to_string(), "placeholder_signature".to_string());
+        server_sigs.insert(key_id.to_string(), signature_b64);
         event.signatures = Some(signatures);
 
         Ok(())
@@ -707,9 +944,80 @@ impl EventRepository {
                         server_verification.insert(key_id.clone(), false);
                         missing_signatures.push(format!("{}:{}", server_name, key_id));
                     } else {
-                        // In a real implementation, this would verify the Ed25519 signature
-                        // For now, we'll assume valid if signature exists
-                        server_verification.insert(key_id.clone(), !signature.is_empty());
+                        // Extract public key
+                        let public_key = match keys[0]["verify_key"].as_str() {
+                            Some(key) => key,
+                            None => {
+                                server_verification.insert(key_id.clone(), false);
+                                continue;
+                            }
+                        };
+
+                        // Decode signature and public key from base64
+                        let sig_bytes = match general_purpose::STANDARD.decode(signature) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                server_verification.insert(key_id.clone(), false);
+                                continue;
+                            }
+                        };
+
+                        let key_bytes = match general_purpose::STANDARD.decode(public_key) {
+                            Ok(b) => b,
+                            Err(_) => {
+                                server_verification.insert(key_id.clone(), false);
+                                continue;
+                            }
+                        };
+
+                        // Verify signature
+                        if sig_bytes.len() == 64 && key_bytes.len() == 32 {
+                            let key_array: [u8; 32] = match key_bytes.try_into() {
+                                Ok(arr) => arr,
+                                Err(_) => {
+                                    server_verification.insert(key_id.clone(), false);
+                                    continue;
+                                }
+                            };
+                            let sig_array: [u8; 64] = match sig_bytes.try_into() {
+                                Ok(arr) => arr,
+                                Err(_) => {
+                                    server_verification.insert(key_id.clone(), false);
+                                    continue;
+                                }
+                            };
+
+                            match VerifyingKey::from_bytes(&key_array) {
+                                Ok(verifying_key) => {
+                                    let signature_obj = Signature::from_bytes(&sig_array);
+
+                                    // Get canonical JSON
+                                    let event_value = match serde_json::to_value(event) {
+                                        Ok(v) => v,
+                                        Err(_) => {
+                                            server_verification.insert(key_id.clone(), false);
+                                            continue;
+                                        }
+                                    };
+
+                                    let canonical = match canonical_json_for_signing(&event_value) {
+                                        Ok(c) => c,
+                                        Err(_) => {
+                                            server_verification.insert(key_id.clone(), false);
+                                            continue;
+                                        }
+                                    };
+
+                                    let valid = verifying_key.verify(canonical.as_bytes(), &signature_obj).is_ok();
+                                    server_verification.insert(key_id.clone(), valid);
+                                }
+                                Err(_) => {
+                                    server_verification.insert(key_id.clone(), false);
+                                }
+                            }
+                        } else {
+                            server_verification.insert(key_id.clone(), false);
+                        }
                     }
                 }
 
@@ -730,19 +1038,30 @@ impl EventRepository {
 
     /// Get event reference hash
     pub async fn get_event_reference_hash(&self, event: &Event) -> Result<String, RepositoryError> {
-        // In a real implementation, this would:
-        // 1. Create canonical JSON of the event (excluding signatures and unsigned)
-        // 2. Calculate SHA256 hash
-        // 3. Encode as base64
+        // Convert event to JSON Value
+        let mut event_value = serde_json::to_value(event)
+            .map_err(RepositoryError::Serialization)?;
 
-        // For now, return a placeholder hash based on event ID
-        use base64::{Engine, engine::general_purpose};
-        use sha2::{Digest, Sha256};
+        // Remove fields per Matrix spec
+        if let Some(obj) = event_value.as_object_mut() {
+            obj.remove("hashes");
+            obj.remove("signatures");
+            obj.remove("unsigned");
+        }
 
+        // Get canonical JSON
+        let canonical = canonical_json_for_signing(&event_value)
+            .map_err(|e| RepositoryError::SerializationError {
+                message: format!("Canonical JSON error: {}", e),
+            })?;
+
+        // Calculate SHA-256 hash
         let mut hasher = Sha256::new();
-        hasher.update(event.event_id.as_bytes());
+        hasher.update(canonical.as_bytes());
         let hash = hasher.finalize();
-        let hash_b64 = general_purpose::STANDARD.encode(hash);
+
+        // Encode as UNPADDED base64 per Matrix spec
+        let hash_b64 = general_purpose::STANDARD_NO_PAD.encode(hash);
 
         Ok(hash_b64)
     }
@@ -933,12 +1252,21 @@ impl EventRepository {
         }
         let state: Vec<Event> = state_map.into_values().collect();
 
+        // Generate tokens from full event context
+        let mut all_events = events_before.clone();
+        if let Some(ref evt) = target_event {
+            all_events.push(evt.clone());
+        }
+        all_events.extend(events_after.clone());
+
+        let (start, end) = crate::pagination::generate_timeline_tokens(&all_events, room_id);
+
         Ok(EventContext {
             events_before,
             event: target_event,
             events_after,
-            start: None, // TODO: Implement pagination tokens
-            end: None,   // TODO: Implement pagination tokens
+            start,
+            end,
             state,
         })
     }
@@ -1790,6 +2118,7 @@ impl EventRepository {
         room_id: &str,
         event_type: &str,
         sender: &str,
+        state_key: &str,
     ) -> Result<Vec<String>, RepositoryError> {
         let mut auth_events = Vec::new();
 
@@ -1823,6 +2152,19 @@ impl EventRepository {
                 self.db.query(join_query).bind(("room_id", room_id.to_string())).await?;
             let join_events: Vec<String> = result.take(0)?;
             auth_events.extend(join_events);
+
+            // For m.room.member events, include target user's current membership if different from sender
+            if state_key != sender {
+                let target_query = "SELECT VALUE event_id FROM event WHERE room_id = $room_id AND event_type = 'm.room.member' AND state_key = $target ORDER BY origin_server_ts DESC LIMIT 1";
+                let mut result = self
+                    .db
+                    .query(target_query)
+                    .bind(("room_id", room_id.to_string()))
+                    .bind(("target", state_key.to_string()))
+                    .await?;
+                let target_events: Vec<String> = result.take(0)?;
+                auth_events.extend(target_events);
+            }
         }
 
         Ok(auth_events)
@@ -1903,7 +2245,8 @@ impl EventRepository {
         let prev_events = self.get_prev_events(room_id).await?;
 
         // Get auth events for authorization
-        let auth_events = self.get_auth_events(room_id, event_type, sender).await?;
+        let state_key_str = state_key.as_deref().unwrap_or("");
+        let auth_events = self.get_auth_events(room_id, event_type, sender, state_key_str).await?;
 
         // Calculate event depth
         let depth = self.calculate_event_depth(&prev_events).await?;

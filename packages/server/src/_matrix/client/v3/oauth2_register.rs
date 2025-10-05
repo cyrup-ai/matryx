@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::oauth2::OAuth2Service;
@@ -44,9 +44,9 @@ pub async fn post(
     // Create OAuth2 service
     let oauth2_repo = OAuth2Repository::new(state.db.clone());
     let oauth2_service = OAuth2Service::new(
-        oauth2_repo, 
-        state.session_service.clone(), 
-        state.homeserver_name.clone()
+        oauth2_repo,
+        state.session_service.clone(),
+        state.homeserver_name.clone(),
     );
 
     // Register the client
@@ -55,14 +55,13 @@ pub async fn post(
             &request.client_name,
             request.redirect_uris.clone(),
             &request.client_type,
+            None, // Use default allowed scopes
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Generate registration access token for client management
-    let registration_access_token = oauth2_service
-        .generate_csrf_token(&client.client_id)
-        .await;
+    let registration_access_token = oauth2_service.generate_csrf_token(&client.client_id).await;
 
     Ok(Json(ClientRegistrationResponse {
         client_id: client.client_id.clone(),
@@ -77,7 +76,9 @@ pub async fn post(
         policy_uri: request.policy_uri,
         tos_uri: request.tos_uri,
         registration_access_token,
-        registration_client_uri: format!("{}/_matrix/client/v3/oauth2/register/{}", 
-            state.homeserver_name, client.client_id),
+        registration_client_uri: format!(
+            "{}/_matrix/client/v3/oauth2/register/{}",
+            state.homeserver_name, client.client_id
+        ),
     }))
 }

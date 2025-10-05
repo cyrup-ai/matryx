@@ -3,13 +3,21 @@ mod room_operations_tests {
     use crate::repository::{
         MembershipRepository, RoomRepository, RoomOperationsService,
         room_operations::{MembershipAction, RoomAction, MembershipEvent},
+        room_authorization::RoomAuthorizationService,
+        room_alias::RoomAliasRepository,
     };
     use matryx_entity::types::MembershipState;
     use surrealdb::{Surreal, engine::any::Any};
+    use std::sync::Arc;
 
     async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("surrealkv://test_data/room_ops_test.db").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
+        let db = surrealdb::engine::any::connect("surrealkv://test_data/room_ops_test.db")
+            .await
+            .expect("Failed to connect to test database");
+        db.use_ns("test")
+            .use_db("test")
+            .await
+            .expect("Failed to set test database namespace");
         db
     }
 
@@ -72,13 +80,22 @@ mod room_operations_tests {
     #[tokio::test]
     async fn test_membership_repository_join_room() {
         let db = setup_test_db().await;
-        let membership_repo = MembershipRepository::new(db);
+        let membership_repo = MembershipRepository::new(db.clone());
+        let room_repo = RoomRepository::new(db.clone());
+        let room_alias_repo = RoomAliasRepository::new(db.clone());
+        
+        let auth_service = RoomAuthorizationService::new(
+            Arc::new(room_repo),
+            Arc::new(membership_repo.clone()),
+            Arc::new(room_alias_repo),
+            db,
+        );
         
         let room_id = "!test:example.com";
         let user_id = "@user:example.com";
         
         // Test joining a room
-        let result = membership_repo.join_room(room_id, user_id, Some("Test join".to_string()), None).await;
+        let result = membership_repo.join_room(room_id, user_id, Some("Test join".to_string()), None, &auth_service).await;
         assert!(result.is_ok());
     }
 
@@ -121,7 +138,7 @@ mod room_operations_tests {
         let result = membership_repo.can_perform_action(room_id, user_id, MembershipAction::Kick, Some(target_id)).await;
         assert!(result.is_ok());
         
-        let can_kick = result.unwrap();
+        let can_kick = result.expect("Expected can perform action result");
         // In empty database, user won't have sufficient power level
         assert!(!can_kick);
     }
@@ -138,7 +155,7 @@ mod room_operations_tests {
         let result = membership_repo.get_membership_history_events(room_id, user_id).await;
         assert!(result.is_ok());
         
-        let history = result.unwrap();
+        let history = result.expect("Expected membership history events");
         assert_eq!(history.len(), 0); // No events in empty database
     }
 
@@ -154,7 +171,7 @@ mod room_operations_tests {
         let result = room_repo.validate_room_access(room_id, user_id, RoomAction::Read).await;
         assert!(result.is_ok());
         
-        let can_read = result.unwrap();
+        let can_read = result.expect("Expected room access validation result");
         // In empty database, room doesn't exist so access is denied
         assert!(!can_read);
     }
@@ -170,7 +187,7 @@ mod room_operations_tests {
         let result = room_repo.get_room_join_rules(room_id).await;
         assert!(result.is_ok());
         
-        let join_rules = result.unwrap();
+        let join_rules = result.expect("Expected room join rules");
         // Default should be invite
         assert!(matches!(join_rules, crate::repository::room::JoinRules::Invite));
     }
@@ -186,7 +203,7 @@ mod room_operations_tests {
         let result = room_repo.is_room_invite_only(room_id).await;
         assert!(result.is_ok());
         
-        let is_invite_only = result.unwrap();
+        let is_invite_only = result.expect("Expected room invite only check result");
         // Default join rules are invite, so should be true
         assert!(is_invite_only);
     }
@@ -203,7 +220,7 @@ mod room_operations_tests {
         let result = room_repo.can_user_invite(room_id, user_id).await;
         assert!(result.is_ok());
         
-        let can_invite = result.unwrap();
+        let can_invite = result.expect("Expected can user invite result");
         // User not joined, so cannot invite
         assert!(!can_invite);
     }
@@ -219,7 +236,7 @@ mod room_operations_tests {
         let result = room_repo.get_room_guest_access(room_id).await;
         assert!(result.is_ok());
         
-        let guest_access = result.unwrap();
+        let guest_access = result.expect("Expected room guest access");
         // Default should be forbidden
         assert!(matches!(guest_access, crate::repository::room::GuestAccess::Forbidden));
     }
@@ -239,6 +256,7 @@ mod room_operations_tests {
             membership_repo,
             relations_repo,
             threads_repo,
+            db.clone(),
         );
         
         let room_id = "!test:example.com";
@@ -265,6 +283,7 @@ mod room_operations_tests {
             membership_repo,
             relations_repo,
             threads_repo,
+            db.clone(),
         );
         
         let room_id = "!test:example.com";
@@ -275,7 +294,7 @@ mod room_operations_tests {
         let result = room_ops_service.validate_membership_operation(room_id, actor_id, target_id, crate::repository::room_operations::MembershipOperation::Kick).await;
         assert!(result.is_ok());
         
-        let is_valid = result.unwrap();
+        let is_valid = result.expect("Expected membership operation validation result");
         // Should be false in empty database
         assert!(!is_valid);
     }

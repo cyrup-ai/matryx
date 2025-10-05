@@ -100,10 +100,15 @@ impl<C: Connection> RelationsRepository<C> {
         let mut query_result = result.await?;
         let events: Vec<Event> = query_result.take(0)?;
 
+        // Generate pagination tokens
+        let limit = 50_usize; // Default limit for relations
+        let next_batch = crate::pagination::generate_next_batch(&events, room_id, limit);
+        let prev_batch = crate::pagination::generate_prev_batch(&events, room_id, limit);
+
         Ok(RelationsResponse {
             chunk: events,
-            next_batch: None, // TODO: Implement pagination
-            prev_batch: None, // TODO: Implement pagination
+            next_batch,
+            prev_batch,
         })
     }
 
@@ -317,14 +322,30 @@ impl<C: Connection> RelationsRepository<C> {
             }
         }
 
-        // Get replies count
-        let replies_query = "
+        // Get threads count (events with m.thread relation type)
+        let threads_query = "
             SELECT count() as count
             FROM event_relations
             INNER JOIN event ON event_relations.child_event_id = event.event_id
             WHERE event_relations.room_id = $room_id
             AND event_relations.parent_event_id = $event_id
             AND event_relations.rel_type = 'm.thread'
+            GROUP ALL
+        ";
+        let mut threads_result = self
+            .db
+            .query(threads_query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_id", event_id.to_string()))
+            .await?;
+        let threads_count: Option<i64> = threads_result.take(0)?;
+
+        // Get replies count (events with m.in_reply_to in content)
+        let replies_query = "
+            SELECT count() as count
+            FROM event
+            WHERE event.room_id = $room_id
+            AND event.content.\"m.relates_to\".\"m.in_reply_to\".event_id = $event_id
             GROUP ALL
         ";
         let mut replies_result = self
@@ -376,7 +397,7 @@ impl<C: Connection> RelationsRepository<C> {
             replies: replies_count.unwrap_or(0) as u32,
             edits: edits_count.unwrap_or(0) as u32,
             annotations: annotations_count.unwrap_or(0) as u32,
-            threads: replies_count.unwrap_or(0) as u32, // For now, threads == replies
+            threads: threads_count.unwrap_or(0) as u32,
         })
     }
 

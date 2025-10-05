@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::federation::event_signer::EventSigner;
+use matryx_entity::types::{Transaction, TransactionResponse};
 
 /// Errors that can occur during federation client operations
 #[derive(Debug, thiserror::Error)]
@@ -98,16 +99,17 @@ impl FederationClient {
         let request_builder = self
             .http_client
             .get(&url)
-            .query(&[
-                ("event_type", "m.room.member"),
-                ("state_key", user_id),
-            ])
+            .query(&[("event_type", "m.room.member"), ("state_key", user_id)])
             .timeout(self.request_timeout);
 
         // Sign the federation request with X-Matrix authentication
         // Include our homeserver name in the signing process for proper federation authorization
-        let uri = format!("/_matrix/federation/v1/make_join/{}/{}?event_type=m.room.member&state_key={}", 
-                         urlencoding::encode(room_id), urlencoding::encode(user_id), urlencoding::encode(user_id));
+        let uri = format!(
+            "/_matrix/federation/v1/make_join/{}/{}?event_type=m.room.member&state_key={}",
+            urlencoding::encode(room_id),
+            urlencoding::encode(user_id),
+            urlencoding::encode(user_id)
+        );
         let signed_request = self
             .event_signer
             .sign_federation_request(request_builder, "GET", &uri, server_name, None)
@@ -115,9 +117,7 @@ impl FederationClient {
             .map_err(|_e| FederationClientError::InvalidResponse)?;
 
         // Execute the HTTP request
-        let response = signed_request
-            .send()
-            .await?;
+        let response = signed_request.send().await?;
 
         // Handle HTTP status codes
         if !response.status().is_success() {
@@ -129,13 +129,17 @@ impl FederationClient {
 
             return Err(FederationClientError::ServerError {
                 status_code: response.status().as_u16(),
-                message: response.status().canonical_reason().unwrap_or("Unknown error").to_string(),
+                message: response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or("Unknown error")
+                    .to_string(),
             });
         }
 
         // Parse response body
         let response_text = response.text().await?;
-        
+
         // For simplicity, this implementation returns a mock response
         // In a full implementation, this would parse the actual Matrix federation response
         // and extract the membership state from the returned event
@@ -166,4 +170,160 @@ impl FederationClient {
         self.request_timeout = timeout;
         self
     }
+
+    /// Send a federation transaction to a remote homeserver
+    ///
+    /// Implements Matrix spec: PUT /_matrix/federation/v1/send/{txnId}
+    /// See: /Volumes/samsung_t9/maxtryx/spec/server/05-transactions.md
+    pub async fn send_transaction(
+        &self,
+        destination: &str,
+        txn_id: &str,
+        transaction: &Transaction,
+    ) -> Result<TransactionResponse, FederationClientError> {
+        debug!(
+            destination = %destination,
+            txn_id = %txn_id,
+            pdu_count = transaction.pdus.len(),
+            edu_count = transaction.edus.len(),
+            "Sending federation transaction"
+        );
+
+        // Construct federation API URL
+        let url = format!(
+            "https://{}/_matrix/federation/v1/send/{}",
+            destination,
+            urlencoding::encode(txn_id)
+        );
+
+        // Serialize transaction to JSON
+        let transaction_json =
+            serde_json::to_value(transaction).map_err(FederationClientError::JsonError)?;
+
+        // Create HTTP PUT request
+        let request_builder =
+            self.http_client.put(&url).json(&transaction).timeout(self.request_timeout);
+
+        // Sign request with X-Matrix authentication
+        let uri = format!("/_matrix/federation/v1/send/{}", urlencoding::encode(txn_id));
+        let signed_request = self
+            .event_signer
+            .sign_federation_request(
+                request_builder,
+                "PUT",
+                &uri,
+                destination,
+                Some(transaction_json),
+            )
+            .await
+            .map_err(|_| FederationClientError::InvalidResponse)?;
+
+        // Execute HTTP request
+        let response = signed_request.send().await?;
+
+        // Handle HTTP errors
+        if !response.status().is_success() {
+            warn!(
+                destination = %destination,
+                txn_id = %txn_id,
+                status = %response.status(),
+                "Transaction send failed"
+            );
+            return Err(FederationClientError::ServerError {
+                status_code: response.status().as_u16(),
+                message: response.status().canonical_reason().unwrap_or("Unknown").to_string(),
+            });
+        }
+
+        // Parse response
+        let transaction_response: TransactionResponse = response.json().await?;
+
+        info!(
+            destination = %destination,
+            txn_id = %txn_id,
+            "Transaction sent successfully"
+        );
+
+        Ok(transaction_response)
+    }
+
+    /// Query user devices from a remote homeserver
+    ///
+    /// Implements Matrix spec: GET /_matrix/federation/v1/user/devices/{userId}
+    pub async fn query_user_devices(
+        &self,
+        server_name: &str,
+        user_id: &str,
+    ) -> Result<DevicesResponse, FederationClientError> {
+        debug!(
+            "Querying devices for user {} on server {}",
+            user_id, server_name
+        );
+
+        // Prevent federation requests to ourselves
+        if server_name == self.homeserver_name {
+            return Err(FederationClientError::InvalidResponse);
+        }
+
+        // Construct federation API URL
+        let url = format!(
+            "https://{}/_matrix/federation/v1/user/devices/{}",
+            server_name,
+            urlencoding::encode(user_id)
+        );
+
+        // Create HTTP GET request
+        let request_builder = self.http_client.get(&url).timeout(self.request_timeout);
+
+        // Sign request with X-Matrix authentication
+        let uri = format!(
+            "/_matrix/federation/v1/user/devices/{}",
+            urlencoding::encode(user_id)
+        );
+        let signed_request = self
+            .event_signer
+            .sign_federation_request(request_builder, "GET", &uri, server_name, None)
+            .await
+            .map_err(|_| FederationClientError::InvalidResponse)?;
+
+        // Execute HTTP request
+        let response = signed_request.send().await?;
+
+        // Handle HTTP errors
+        if !response.status().is_success() {
+            warn!(
+                "Federation devices query failed: {} - {}",
+                response.status(),
+                response.status().canonical_reason().unwrap_or("Unknown error")
+            );
+            return Err(FederationClientError::ServerError {
+                status_code: response.status().as_u16(),
+                message: response.status().canonical_reason().unwrap_or("Unknown").to_string(),
+            });
+        }
+
+        // Parse response
+        let devices_response: DevicesResponse = response.json().await?;
+
+        info!(
+            "Successfully queried {} devices for user {} from server {}",
+            devices_response.devices.len(),
+            user_id,
+            server_name
+        );
+
+        Ok(devices_response)
+    }
+}
+
+/// Response structure for user devices queries
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DevicesResponse {
+    pub user_id: String,
+    pub stream_id: i64,
+    pub devices: Vec<matryx_entity::types::Device>,
+    #[serde(default)]
+    pub signatures: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsigned: Option<serde_json::Value>,
 }

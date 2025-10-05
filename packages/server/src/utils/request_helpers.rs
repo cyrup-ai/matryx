@@ -19,11 +19,7 @@ use axum::extract::Request;
 /// // Returns: "/_matrix/federation/v1/media/download/example?timeout_ms=5000"
 /// ```
 pub fn extract_request_uri(request: &Request) -> &str {
-    request
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
+    request.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
 }
 
 #[cfg(test)]
@@ -45,7 +41,10 @@ mod tests {
             .unwrap();
 
         let extracted_uri = extract_request_uri(&request);
-        assert_eq!(extracted_uri, "/_matrix/federation/v1/media/download/test?timeout_ms=5000&animated=true");
+        assert_eq!(
+            extracted_uri,
+            "/_matrix/federation/v1/media/download/test?timeout_ms=5000&animated=true"
+        );
     }
 
     #[test]

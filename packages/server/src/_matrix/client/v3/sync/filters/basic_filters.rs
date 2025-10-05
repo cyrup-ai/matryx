@@ -12,9 +12,9 @@ pub async fn resolve_filter(
     _user_id: &str,
 ) -> Result<Option<MatrixFilter>, StatusCode> {
     use crate::metrics::filter_metrics::FilterTimer;
-    
+
     let _timer = FilterTimer::new("resolve_filter");
-    
+
     let filter = if filter_param.starts_with('{') {
         // Inline filter definition
         serde_json::from_str(filter_param)
@@ -28,13 +28,13 @@ pub async fn resolve_filter(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
-    
+
     // Compile and cache the filter if present
     if let Some(ref f) = filter {
         let _compiled = state.filter_cache.get_or_compile_filter(f).await;
         // Compiled filter cached for future use
     }
-    
+
     Ok(filter)
 }
 

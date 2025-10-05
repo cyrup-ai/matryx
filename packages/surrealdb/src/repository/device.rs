@@ -743,7 +743,7 @@ impl DeviceRepository {
     ) -> Result<Vec<DeviceQueryResult>, RepositoryError> {
         let query = "
             SELECT d.device_id, d.display_name, d.last_seen_ip, d.last_seen_ts, d.user_agent
-            FROM devices d
+            FROM device d
             WHERE d.user_id = $user_id
         ";
         let mut result = self.db.query(query).bind(("user_id", user_id.to_string())).await?;

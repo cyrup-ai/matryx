@@ -441,23 +441,24 @@ impl LazyLoadingAlerts {
 
         // Check for memory leaks
         if let Some(growth_rate) = self.calculate_memory_growth_rate().await
-            && growth_rate > thresholds.max_growth_rate_mb_per_hour {
-                self.trigger_alert(
-                    AlertType::MemoryLeakDetected,
-                    AlertSeverity::Critical,
-                    format!(
-                        "Potential memory leak detected: {:.1}MB/hour growth (threshold: {:.1}MB/hour)",
-                        growth_rate,
-                        thresholds.max_growth_rate_mb_per_hour
-                    ),
-                    snapshot.clone(),
-                    vec![
-                        "Investigate memory leak sources".to_string(),
-                        "Check cache cleanup logic".to_string(),
-                        "Consider restarting service".to_string(),
-                    ],
-                ).await?;
-            }
+            && growth_rate > thresholds.max_growth_rate_mb_per_hour
+        {
+            self.trigger_alert(
+                AlertType::MemoryLeakDetected,
+                AlertSeverity::Critical,
+                format!(
+                    "Potential memory leak detected: {:.1}MB/hour growth (threshold: {:.1}MB/hour)",
+                    growth_rate, thresholds.max_growth_rate_mb_per_hour
+                ),
+                snapshot.clone(),
+                vec![
+                    "Investigate memory leak sources".to_string(),
+                    "Check cache cleanup logic".to_string(),
+                    "Consider restarting service".to_string(),
+                ],
+            )
+            .await?;
+        }
 
         Ok(())
     }
@@ -518,13 +519,14 @@ impl LazyLoadingAlerts {
             .recent_alerts
             .iter()
             .filter(|alert| {
-                alert.alert_type == *alert_type &&
-                    alert.timestamp.elapsed() < Duration::from_secs(3600)
+                alert.alert_type == *alert_type
+                    && alert.timestamp.elapsed() < Duration::from_secs(3600)
             })
             .collect();
 
         // Use severity and message analysis for smart rate limiting
-        if current_hour_alerts.len() >= self.alert_config.rate_limiting.max_alerts_per_hour as usize {
+        if current_hour_alerts.len() >= self.alert_config.rate_limiting.max_alerts_per_hour as usize
+        {
             // Check if recent alerts are all warnings - allow critical alerts through
             let recent_critical_alerts = current_hour_alerts
                 .iter()
@@ -532,7 +534,16 @@ impl LazyLoadingAlerts {
                 .count();
 
             // Always allow critical alerts, but respect rate limiting for warnings
-            if recent_critical_alerts == 0 && matches!(alert_type, AlertType::ResponseTimeDegradation | AlertType::HighErrorRate | AlertType::CachePerformanceDegradation | AlertType::MemoryUsageHigh | AlertType::MemoryLeakDetected) {
+            if recent_critical_alerts == 0
+                && matches!(
+                    alert_type,
+                    AlertType::ResponseTimeDegradation
+                        | AlertType::HighErrorRate
+                        | AlertType::CachePerformanceDegradation
+                        | AlertType::MemoryUsageHigh
+                        | AlertType::MemoryLeakDetected
+                )
+            {
                 tracing::warn!(
                     alert_type = ?alert_type,
                     current_hour_count = current_hour_alerts.len(),
@@ -583,7 +594,7 @@ impl LazyLoadingAlerts {
                     request_count = alert_record.metrics.request_count,
                     "WARNING: Matrix homeserver performance issue detected"
                 );
-            }
+            },
         }
 
         // Use metrics for correlation and analysis
@@ -608,7 +619,7 @@ impl LazyLoadingAlerts {
     async fn analyze_performance_correlation(&self, alert_record: &AlertRecord) {
         // Use the metrics field for performance correlation analysis
         let metrics = &alert_record.metrics;
-        
+
         // Correlate different performance indicators
         if metrics.avg_response_time_ms > 100 && metrics.cache_hit_ratio < 0.8 {
             tracing::info!(
@@ -639,7 +650,7 @@ impl LazyLoadingAlerts {
                     request_count = metrics.request_count,
                     "Performance warning detected - monitoring Matrix homeserver for escalation"
                 );
-            }
+            },
         }
     }
 
@@ -655,9 +666,36 @@ impl LazyLoadingAlerts {
     }
 
     async fn calculate_error_rate(&self) -> f64 {
-        // This would integrate with actual error tracking
-        // For now, return a placeholder
-        0.001 // 0.1% error rate
+        use chrono::{Duration, Utc};
+        use matryx_surrealdb::repository::TimeRange;
+
+        let now = Utc::now();
+        let one_hour_ago = now - Duration::hours(1);
+        let time_range = TimeRange {
+            start: one_hour_ago,
+            end: now
+        };
+
+        let performance_summary = self.metrics
+            .get_performance_repo()
+            .get_performance_summary(&time_range)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to get error rate: {}", e);
+                matryx_surrealdb::repository::PerformanceSummary {
+                    avg_response_time: 0.0,
+                    requests_per_second: 0.0,
+                    error_rate: 0.0,
+                    p95_response_time: 0.0,
+                    p99_response_time: 0.0,
+                    memory_usage_mb: 0.0,
+                    cache_hit_ratio: 0.0,
+                    estimated_memory_usage_kb: 0.0,
+                    db_queries_avoided: 0.0,
+                }
+            });
+
+        performance_summary.error_rate
     }
 
     async fn calculate_memory_growth_rate(&self) -> Option<f64> {
@@ -707,7 +745,7 @@ impl AlertNotificationSender for ConsoleNotificationSender {
         println!("   Message: {}", alert.message);
         println!("   Severity: {:?}", alert.severity);
         println!("   Timestamp: {:?}", alert.timestamp);
-        
+
         // Include performance metrics in notification for context
         println!("   Performance Metrics:");
         println!("     - Response Time: {}ms", alert.metrics.avg_response_time_ms);
@@ -715,22 +753,24 @@ impl AlertNotificationSender for ConsoleNotificationSender {
         println!("     - Cache Hit Ratio: {:.2}%", alert.metrics.cache_hit_ratio * 100.0);
         println!("     - Memory Usage: {:.1}MB", alert.metrics.memory_usage_mb);
         println!("     - Request Count: {}", alert.metrics.request_count);
-        
+
         println!("   Suggested Actions:");
         for action in &alert.suggested_actions {
             println!("   - {}", action);
         }
-        
+
         // Add severity-specific formatting
         match alert.severity {
             AlertSeverity::Critical => {
-                println!("   ⚠️  CRITICAL: Immediate action required for Matrix homeserver stability");
+                println!(
+                    "   ⚠️  CRITICAL: Immediate action required for Matrix homeserver stability"
+                );
             },
             AlertSeverity::Warning => {
                 println!("   ⚡ WARNING: Monitor Matrix homeserver performance closely");
-            }
+            },
         }
-        
+
         println!();
 
         Ok(())

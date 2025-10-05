@@ -70,7 +70,21 @@ pub async fn post(
     session_repo.create_session(&session).await
         .map_err(|_| MatrixError::Unknown.into_response())?;
     
-    // TODO: Send actual email with validation token
+    // Send verification email if email service is available
+    if let Some(email_service) = &state.email_service {
+        if let Err(e) = email_service.send_verification_email(
+            &request.email,
+            &session.verification_token,
+            &session.session_id,
+        ).await {
+            error!("Failed to send verification email to {}: {}", request.email, e);
+            // Continue anyway - session is created, user can retry
+        } else {
+            info!("Verification email sent to {}", request.email);
+        }
+    } else {
+        warn!("Email service not available - verification email not sent");
+    }
     
     let response = EmailRequestTokenResponse {
         sid: session.session_id,

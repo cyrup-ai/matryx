@@ -94,9 +94,7 @@ impl MatrixAuth {
                 token.expires_at.is_some_and(|exp| exp <= chrono::Utc::now().timestamp())
             },
             MatrixAuth::Server(server) => {
-                server
-                    .expires_at
-                    .is_some_and(|exp| exp <= chrono::Utc::now().timestamp())
+                server.expires_at.is_some_and(|exp| exp <= chrono::Utc::now().timestamp())
             },
             MatrixAuth::Anonymous => false,
         }
@@ -128,7 +126,7 @@ impl MatrixAuth {
 }
 
 /// Matrix JWT claims for SurrealDB integration
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatrixJwtClaims {
     // Standard JWT claims
     pub iss: Option<String>,

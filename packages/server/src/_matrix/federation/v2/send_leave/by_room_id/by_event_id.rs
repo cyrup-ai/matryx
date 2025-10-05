@@ -9,15 +9,12 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::federation::client::FederationClient;
-use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::federation::membership_federation::validate_federation_leave_allowed;
+use crate::federation::pdu_validator::{PduValidator, PduValidatorParams, ValidationResult};
 use crate::state::AppState;
 use matryx_entity::types::{Event, Membership, MembershipState};
 use matryx_surrealdb::repository::{
-    EventRepository,
-    FederationRepository,
-    KeyServerRepository,
-    MembershipRepository,
+    EventRepository, FederationRepository, KeyServerRepository, MembershipRepository,
     RoomRepository,
 };
 

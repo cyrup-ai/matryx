@@ -105,8 +105,11 @@ pub async fn post_register(
     // Extract client information for audit logging
     let client_ip = extract_client_ip(&headers);
     let user_agent = extract_user_agent(&headers);
-    
-    info!("Processing user registration request from IP: {}, User-Agent: {}", client_ip, user_agent);
+
+    info!(
+        "Processing user registration request from IP: {}, User-Agent: {}",
+        client_ip, user_agent
+    );
 
     // Handle User Interactive Authentication (UIA) if required
     if let Some(auth_data) = &request.auth {
@@ -121,10 +124,14 @@ pub async fn post_register(
         // Check if CAPTCHA is required for registration from this IP/client
         let captcha_service = crate::auth::CaptchaService::new(
             matryx_surrealdb::repository::CaptchaRepository::new(state.db.clone()),
-            crate::auth::captcha::CaptchaConfig::from_env()
+            crate::auth::captcha::CaptchaConfig::from_env(),
         );
 
-        if captcha_service.is_captcha_required(&client_ip, "registration").await.unwrap_or(false) {
+        if captcha_service
+            .is_captcha_required(&client_ip, "registration")
+            .await
+            .unwrap_or(false)
+        {
             // Check if CAPTCHA challenge is provided in auth data
             if let Some(captcha_response) = auth_data.get("response") {
                 if let Some(challenge_id) = auth_data.get("session") {
@@ -141,14 +148,17 @@ pub async fn post_register(
                             if response.success {
                                 info!("CAPTCHA validation successful for registration");
                             } else {
-                                warn!("CAPTCHA validation failed for registration from IP: {}", client_ip);
+                                warn!(
+                                    "CAPTCHA validation failed for registration from IP: {}",
+                                    client_ip
+                                );
                                 return Err(StatusCode::UNAUTHORIZED);
                             }
                         },
                         Err(e) => {
                             error!("CAPTCHA validation error: {:?}", e);
                             return Err(StatusCode::BAD_REQUEST);
-                        }
+                        },
                     }
                 } else {
                     error!("Missing CAPTCHA session in auth data");
@@ -156,7 +166,10 @@ pub async fn post_register(
                 }
             } else {
                 // CAPTCHA required but not provided - return challenge
-                match captcha_service.create_challenge(Some(client_ip.clone()), Some(user_agent.clone()), None).await {
+                match captcha_service
+                    .create_challenge(Some(client_ip.clone()), Some(user_agent.clone()), None)
+                    .await
+                {
                     Ok(_challenge) => {
                         info!("Created CAPTCHA challenge for registration");
                         // Return UIA flow indicating CAPTCHA is required
@@ -165,7 +178,7 @@ pub async fn post_register(
                     Err(e) => {
                         error!("Failed to create CAPTCHA challenge: {:?}", e);
                         return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    }
+                    },
                 }
             }
         }
@@ -297,10 +310,11 @@ fn validate_registration_request(
 
     // Validate password strength if provided
     if let Some(password) = &request.password
-        && !is_strong_password(password) {
-            warn!("Weak password provided for user: {}", username);
-            return Err(RegistrationError::WeakPassword);
-        }
+        && !is_strong_password(password)
+    {
+        warn!("Weak password provided for user: {}", username);
+        return Err(RegistrationError::WeakPassword);
+    }
 
     Ok(username)
 }
@@ -308,12 +322,12 @@ fn validate_registration_request(
 /// Validate username format according to Matrix specification
 fn is_valid_username(username: &str) -> bool {
     // Basic validation - Matrix usernames should be alphanumeric with some special chars
-    !username.is_empty() &&
-        username.len() <= 255 &&
-        username
+    !username.is_empty()
+        && username.len() <= 255
+        && username
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') &&
-        !username.starts_with('_')
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !username.starts_with('_')
 }
 
 /// Check password strength

@@ -1,7 +1,6 @@
 use crate::repository::error::RepositoryError;
 use crate::repository::membership::{MembershipContext, MembershipRepository};
 use crate::repository::room::{RoomRepository, JoinRules};
-use matryx_entity::types::PowerLevels;
 use crate::repository::room_alias::RoomAliasRepository;
 use matryx_entity::types::{Event, MembershipState};
 use serde::{Deserialize, Serialize};
@@ -54,7 +53,7 @@ impl AuthorizationResult {
 }
 
 pub struct RoomAuthorizationService {
-    room_repo: Arc<RoomRepository<Any>>,
+    room_repo: Arc<RoomRepository>,
     membership_repo: Arc<MembershipRepository>,
     room_alias_repo: Arc<RoomAliasRepository>,
     db: Surreal<Any>,
@@ -62,7 +61,7 @@ pub struct RoomAuthorizationService {
 
 impl RoomAuthorizationService {
     pub fn new(
-        room_repo: Arc<RoomRepository<Any>>,
+        room_repo: Arc<RoomRepository>,
         membership_repo: Arc<MembershipRepository>,
         room_alias_repo: Arc<RoomAliasRepository>,
         db: Surreal<Any>,
@@ -73,6 +72,11 @@ impl RoomAuthorizationService {
             room_alias_repo,
             db,
         }
+    }
+
+    /// Get room alias repository for resolving aliases in authorization context
+    pub fn room_alias_repo(&self) -> &Arc<RoomAliasRepository> {
+        &self.room_alias_repo
     }
 
     /// Check if user has access to perform an action in a room
@@ -90,7 +94,8 @@ impl RoomAuthorizationService {
 
         // Check if user is a member of the room
         let membership = self.membership_repo.get_membership(room_id, user_id).await?;
-        if membership.is_none() || membership.as_ref().unwrap().membership != MembershipState::Join {
+        let is_joined = membership.as_ref().map(|m| m.membership == MembershipState::Join).unwrap_or(false);
+        if !is_joined {
             // For some actions, non-members might be allowed
             match action {
                 "read_public" | "peek" => {
@@ -212,6 +217,9 @@ impl RoomAuthorizationService {
             JoinRules::Knock => {
                 Ok(AuthorizationResult::denied("Room requires knocking before joining"))
             },
+            JoinRules::Private => {
+                Ok(AuthorizationResult::denied("Room is private and cannot be joined"))
+            },
             JoinRules::Restricted => {
                 // Check if user meets restricted room requirements
                 self.validate_restricted_join(room_id, user_id, via_server).await
@@ -231,7 +239,8 @@ impl RoomAuthorizationService {
 
         // Check if sender is in the room
         let sender_membership = self.membership_repo.get_membership(room_id, sender).await?;
-        if sender_membership.is_none() || sender_membership.as_ref().unwrap().membership != MembershipState::Join {
+        let sender_is_joined = sender_membership.as_ref().map(|m| m.membership == MembershipState::Join).unwrap_or(false);
+        if !sender_is_joined {
             // Exception: create event doesn't require membership
             if event_type != "m.room.create" {
                 return Ok(AuthorizationResult::denied("Sender is not a member of the room"));
@@ -251,7 +260,7 @@ impl RoomAuthorizationService {
             },
             "m.room.member" => {
                 // Membership events need special handling
-                if let Some(state_key) = &event.state_key {
+                if let Some(_state_key) = &event.state_key {
                     let membership_context = self.extract_membership_context(event)?;
                     self.coordinate_membership_auth(room_id, &membership_context).await
                 } else {
@@ -411,20 +420,12 @@ impl RoomAuthorizationService {
 
         // Check each allow condition
         for condition in allow_conditions {
-            if let Some(condition_type) = condition.get("type").and_then(|v| v.as_str()) {
-                match condition_type {
-                    "m.room_membership" => {
-                        // User must be member of specified room
-                        if let Some(room_id_condition) = condition.get("room_id").and_then(|v| v.as_str()) {
-                            if self.membership_repo.is_user_in_room(room_id_condition, user_id).await? {
-                                return Ok(AuthorizationResult::authorized());
-                            }
-                        }
-                    },
-                    // Add other condition types as needed
-                    _ => {
-                        // Unknown condition type, skip
-                    }
+            if let Some("m.room_membership") = condition.get("type").and_then(|v| v.as_str()) {
+                // User must be member of specified room
+                if let Some(room_id_condition) = condition.get("room_id").and_then(|v| v.as_str())
+                    && self.membership_repo.is_user_in_room(room_id_condition, user_id).await?
+                {
+                    return Ok(AuthorizationResult::authorized());
                 }
             }
         }
@@ -448,12 +449,11 @@ impl RoomAuthorizationService {
                 .await?;
             let events: Vec<serde_json::Value> = result.take(0)?;
 
-            if let Some(event) = events.first() {
-                if let Some(event_type) = event.get("event_type").and_then(|v| v.as_str()) {
-                    if event_type == "m.room.create" {
-                        return Ok(true);
-                    }
-                }
+            if let Some(event) = events.first()
+                && let Some(event_type) = event.get("event_type").and_then(|v| v.as_str())
+                && event_type == "m.room.create"
+            {
+                return Ok(true);
             }
         }
 

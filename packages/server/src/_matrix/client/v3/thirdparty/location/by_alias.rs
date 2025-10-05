@@ -1,18 +1,18 @@
-use axum::{Json, extract::{Path, State}, http::StatusCode};
+use axum::{
+    Json,
+    http::StatusCode,
+};
 use serde_json::Value;
 use tracing::{error, info};
 
 use crate::state::AppState;
 use matryx_surrealdb::repository::third_party_service::ThirdPartyService;
 
-/// GET /_matrix/client/v3/thirdparty/location/{alias}
-/// 
-/// Retrieve Matrix room aliases from third-party networks.
-/// This endpoint allows clients to query for Matrix room aliases that correspond
-/// to locations or channels in third-party networks (like IRC channels, Discord servers, etc.)
-pub async fn get(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
+/// Core logic for looking up third-party locations by alias
+/// Used by GET /_matrix/client/v3/thirdparty/location?alias={alias}
+pub async fn get_by_alias(
+    state: AppState,
+    alias: String,
 ) -> Result<Json<Value>, StatusCode> {
     info!("Third-party location lookup for alias: {}", alias);
 
@@ -25,7 +25,7 @@ pub async fn get(
         Err(e) => {
             error!("Failed to query third-party protocols: {:?}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+        },
     };
 
     let mut locations = Vec::new();
@@ -45,11 +45,11 @@ pub async fn get(
                         "fields": location.fields
                     }));
                 }
-            }
+            },
             Err(e) => {
                 // Log error but continue searching other protocols
                 error!("Failed to lookup locations in protocol {}: {:?}", protocol_id, e);
-            }
+            },
         }
     }
 

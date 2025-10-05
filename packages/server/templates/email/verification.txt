@@ -1,0 +1,14 @@
+Email Verification - {{ server_name }}
+
+You're receiving this email because you requested email verification for {{ server_name }}.
+
+Please visit the following link to verify your email address:
+
+{{ verification_url }}
+
+If you didn't request this verification, you can safely ignore this email.
+
+This link will expire in 24 hours.
+
+---
+{{ server_name }} - Matrix Homeserver

@@ -27,7 +27,7 @@ impl FederationTest {
         // Validate the user IDs are properly formatted for federation
         assert!(user1_id.starts_with('@'), "User 1 ID should be properly formatted: {}", user1_id);
         assert!(user2_id.starts_with('@'), "User 2 ID should be properly formatted: {}", user2_id);
-        
+
         let invite_body = json!({
             "user_id": user2_id
         });
@@ -40,9 +40,18 @@ impl FederationTest {
         // Validate that user2_token works for authentication on server2
         let whoami_response = self
             .server2
-            .test_authenticated_endpoint("GET", "/_matrix/client/v3/account/whoami", &user2_token, None)
+            .test_authenticated_endpoint(
+                "GET",
+                "/_matrix/client/v3/account/whoami",
+                &user2_token,
+                None,
+            )
             .await;
-        assert_eq!(whoami_response.status_code(), 200, "User 2 should be able to authenticate on server 2");
+        assert_eq!(
+            whoami_response.status_code(),
+            200,
+            "User 2 should be able to authenticate on server 2"
+        );
 
         // In a real federation test, this would involve actual server-to-server communication
         // For now, we test that the invite endpoint responds correctly
@@ -136,7 +145,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_federation_setup() {
-        let federation_test = FederationTest::new().await.unwrap();
+        let federation_test = FederationTest::new().await
+            .expect("Test setup: failed to create federation test harness");
 
         // Test that both servers are accessible
         let response1 = federation_test
@@ -154,35 +164,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_discovery_endpoints() {
-        let federation_test = FederationTest::new().await.unwrap();
+        let federation_test = FederationTest::new().await
+            .expect("Test setup: failed to create federation test harness");
         let result = federation_test.test_server_discovery().await;
         assert!(result.is_ok(), "Server discovery test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_federation_authentication_endpoints() {
-        let federation_test = FederationTest::new().await.unwrap();
+        let federation_test = FederationTest::new().await
+            .expect("Test setup: failed to create federation test harness");
         let result = federation_test.test_federation_authentication().await;
         assert!(result.is_ok(), "Federation authentication test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_cross_server_operations() {
-        let federation_test = FederationTest::new().await.unwrap();
+        let federation_test = FederationTest::new().await
+            .expect("Test setup: failed to create federation test harness");
         let result = federation_test.test_cross_server_messaging().await;
         assert!(result.is_ok(), "Cross-server messaging test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_federation_event_handling() {
-        let event_test = FederationEventTest::new().await.unwrap();
+        let event_test = FederationEventTest::new().await
+            .expect("Test setup: failed to create federation event test harness");
         let result = event_test.test_federation_event_handling().await;
         assert!(result.is_ok(), "Federation event handling test failed: {:?}", result);
     }
 
     #[tokio::test]
     async fn test_server_key_endpoints() {
-        let event_test = FederationEventTest::new().await.unwrap();
+        let event_test = FederationEventTest::new().await
+            .expect("Test setup: failed to create federation event test harness");
         let result = event_test.test_server_keys().await;
         assert!(result.is_ok(), "Server key test failed: {:?}", result);
     }

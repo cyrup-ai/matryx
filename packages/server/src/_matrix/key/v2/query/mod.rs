@@ -150,7 +150,8 @@ async fn fetch_and_sign_server_keys(
     // Add our notary signature to the response
     let mut signed_response = server_key_response;
     if let Some(signatures) = signed_response.get_mut("signatures")
-        && let Some(signatures_obj) = signatures.as_object_mut() {
+        && let Some(signatures_obj) = signatures.as_object_mut()
+    {
         signatures_obj.insert(homeserver_name.to_string(), notary_signature);
     }
 

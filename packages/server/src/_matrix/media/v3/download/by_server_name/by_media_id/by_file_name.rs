@@ -5,12 +5,10 @@ use axum::{
     response::Response,
 };
 
-
+use crate::auth::authenticated_user::AuthenticatedUser;
 use crate::AppState;
 use matryx_surrealdb::repository::{
-    media::MediaRepository,
-    media_service::MediaService,
-    membership::MembershipRepository,
+    media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
 };
 use std::sync::Arc;
@@ -19,6 +17,7 @@ use std::sync::Arc;
 pub async fn get(
     State(state): State<AppState>,
     Path((server_name, media_id, _file_name)): Path<(String, String, String)>,
+    user: AuthenticatedUser,
 ) -> Result<Response<Body>, StatusCode> {
     // Create MediaService instance
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
@@ -27,9 +26,9 @@ pub async fn get(
 
     let media_service = MediaService::new(media_repo, room_repo, membership_repo);
 
-    // Download media using MediaService (anonymous access for now)
+    // Download media using MediaService with authenticated user
     let download_result = media_service
-        .download_media(&media_id, &server_name, "anonymous")
+        .download_media(&media_id, &server_name, &user.user_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
 

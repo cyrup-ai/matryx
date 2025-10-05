@@ -18,7 +18,3 @@ pub struct ThumbnailQuery {
 fn default_method() -> String {
     "scale".to_string()
 }
-
-
-
-

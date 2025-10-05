@@ -82,8 +82,10 @@ pub async fn get(
     // Check if token has expired according to Matrix OpenID specification
     let current_timestamp = chrono::Utc::now().timestamp();
     if token.1 < current_timestamp {
-        warn!("OpenID token expired at {} (current: {}): {}", 
-              token.1, current_timestamp, params.access_token);
+        warn!(
+            "OpenID token expired at {} (current: {}): {}",
+            token.1, current_timestamp, params.access_token
+        );
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(OpenIdError {

@@ -39,7 +39,7 @@ impl SyTestRunner {
         // Use temp_dir for test output and working directory
         let test_output_dir = self.temp_dir.path().join("sytest_output");
         std::fs::create_dir_all(&test_output_dir)?;
-        
+
         let output = Command::new("perl")
             .arg(format!("{}/run-tests.pl", self.sytest_path))
             .arg("--homeserver-url")
@@ -92,19 +92,17 @@ impl SyTestRunner {
                     },
                 })
             },
-            Err(e) => {
-                Ok(SyTestResults {
-                    total_tests: 0,
-                    passed: 0,
-                    failed: 1,
-                    skipped: 0,
-                    failures: vec![TestFailure {
-                        test_name: "SyTest execution".to_string(),
-                        error: format!("Failed to run SyTest: {}", e),
-                    }],
-                    status: "ERROR".to_string(),
-                })
-            },
+            Err(e) => Ok(SyTestResults {
+                total_tests: 0,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                failures: vec![TestFailure {
+                    test_name: "SyTest execution".to_string(),
+                    error: format!("Failed to run SyTest: {}", e),
+                }],
+                status: "ERROR".to_string(),
+            }),
         }
     }
 }
@@ -124,10 +122,15 @@ impl SyTestResults {
     pub fn get_summary(&self) -> String {
         format!(
             "Tests: {} total, {} passed, {} failed, {} skipped. Status: {}. {} failure details.",
-            self.total_tests, self.passed, self.failed, self.skipped, self.status, self.failures.len()
+            self.total_tests,
+            self.passed,
+            self.failed,
+            self.skipped,
+            self.status,
+            self.failures.len()
         )
     }
-    
+
     /// Check if all tests passed
     pub fn all_passed(&self) -> bool {
         self.failed == 0 && self.failures.is_empty()
@@ -145,7 +148,7 @@ impl TestFailure {
     pub fn new(test_name: String, error: String) -> Self {
         Self { test_name, error }
     }
-    
+
     /// Get formatted failure message
     pub fn get_formatted_message(&self) -> String {
         format!("Test '{}' failed: {}", self.test_name, self.error)
@@ -167,27 +170,27 @@ mod tests {
             failures: vec![failure],
             status: "completed".to_string(),
         };
-        
+
         // Use all SyTestResults fields and methods
         let summary = results.get_summary();
         assert!(summary.contains("100 total"));
         assert!(summary.contains("95 passed"));
         assert!(summary.contains("5 failed"));
         assert!(summary.contains("1 failure details"));
-        
+
         assert!(!results.all_passed());
         assert_eq!(results.total_tests, 100);
         assert_eq!(results.failures.len(), 1);
     }
-    
+
     #[test]
     fn test_test_failure_usage() {
         let failure = TestFailure::new("test_sync".to_string(), "Timeout".to_string());
-        
+
         // Use TestFailure fields and methods
         assert_eq!(failure.test_name, "test_sync");
         assert_eq!(failure.error, "Timeout");
-        
+
         let message = failure.get_formatted_message();
         assert!(message.contains("test_sync"));
         assert!(message.contains("Timeout"));
@@ -435,65 +438,71 @@ impl ComplianceReport {
     }
 }
 
-    #[tokio::test]
-    async fn test_endpoint_compliance_foundation() {
-        let compliance_test = EndpointComplianceTest::new().await.unwrap();
-        let report = compliance_test.test_foundation_api().await.unwrap();
+#[tokio::test]
+async fn test_endpoint_compliance_foundation() {
+    let compliance_test = EndpointComplianceTest::new().await
+        .expect("Test setup: failed to create compliance test harness for foundation API tests");
+    let report = compliance_test.test_foundation_api().await
+        .expect("Test execution: foundation API compliance tests should execute successfully");
 
-        // Should have at least basic endpoints working
-        assert!(report.total > 0, "Should test at least some foundation endpoints");
-        println!(
-            "Foundation API compliance: {:.1}% ({}/{})",
-            report.pass_rate(),
-            report.passed,
-            report.total
-        );
-    }
+    // Should have at least basic endpoints working
+    assert!(report.total > 0, "Should test at least some foundation endpoints");
+    println!(
+        "Foundation API compliance: {:.1}% ({}/{})",
+        report.pass_rate(),
+        report.passed,
+        report.total
+    );
+}
 
-    #[tokio::test]
-    async fn test_full_endpoint_compliance() {
-        let mut compliance_test = EndpointComplianceTest::new().await.unwrap();
-        let report = compliance_test.test_all_endpoints().await.unwrap();
+#[tokio::test]
+async fn test_full_endpoint_compliance() {
+    let mut compliance_test = EndpointComplianceTest::new().await
+        .expect("Test setup: failed to create compliance test harness for full endpoint tests");
+    let report = compliance_test.test_all_endpoints().await
+        .expect("Test execution: endpoint compliance tests should execute successfully");
 
-        println!(
-            "Overall API compliance: {:.1}% ({}/{})",
-            report.pass_rate(),
-            report.passed,
-            report.total
-        );
+    println!(
+        "Overall API compliance: {:.1}% ({}/{})",
+        report.pass_rate(),
+        report.passed,
+        report.total
+    );
 
-        // Print failed tests for debugging
-        for (test_name, passed) in &report.tests {
-            if !passed {
-                println!("FAILED: {}", test_name);
-            }
+    // Print failed tests for debugging
+    for (test_name, passed) in &report.tests {
+        if !passed {
+            println!("FAILED: {}", test_name);
         }
-
-        // Should have reasonable compliance rate
-        assert!(
-            report.pass_rate() > 50.0,
-            "Compliance rate should be > 50%, got {:.1}%",
-            report.pass_rate()
-        );
     }
 
-    #[tokio::test]
-    async fn test_sytest_runner() {
-        let test_server = MatrixTestServer::new().await;
-        let sytest_runner = SyTestRunner::new(&test_server.base_url).unwrap();
+    // Should have reasonable compliance rate
+    assert!(
+        report.pass_rate() > 50.0,
+        "Compliance rate should be > 50%, got {:.1}%",
+        report.pass_rate()
+    );
+}
 
-        let results = sytest_runner.run_compliance_tests().await.unwrap();
+#[tokio::test]
+async fn test_sytest_runner() {
+    let test_server = MatrixTestServer::new().await;
+    let sytest_runner = SyTestRunner::new(&test_server.base_url)
+        .expect("Test setup: failed to create SyTest runner for compliance testing");
 
-        println!(
-            "SyTest results: {} (passed: {}, failed: {}, skipped: {})",
-            results.status, results.passed, results.failed, results.skipped
-        );
+    let results = sytest_runner.run_compliance_tests().await
+        .expect("Test execution: SyTest compliance suite should execute successfully");
 
-        // SyTest may not be available in all environments, so we just verify it doesn't crash
-        assert!(
-            results.status == "SyTest not available - skipped" ||
-                results.status == "PASSED" ||
-                results.status == "FAILED" ||
-                results.status == "ERROR"
-        );
-    }
+    println!(
+        "SyTest results: {} (passed: {}, failed: {}, skipped: {})",
+        results.status, results.passed, results.failed, results.skipped
+    );
+
+    // SyTest may not be available in all environments, so we just verify it doesn't crash
+    assert!(
+        results.status == "SyTest not available - skipped"
+            || results.status == "PASSED"
+            || results.status == "FAILED"
+            || results.status == "ERROR"
+    );
+}

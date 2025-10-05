@@ -103,13 +103,17 @@ pub async fn post(
 
     // Check if room exists using repository
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
-    let room = room_repo.get_by_id(&room_id).await.map_err(|e| {
-        error!("Failed to query room {}: {}", room_id, e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?.ok_or_else(|| {
-        warn!("Room unban failed - room not found: {}", room_id);
-        StatusCode::NOT_FOUND
-    })?;
+    let room = room_repo
+        .get_by_id(&room_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to query room {}: {}", room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            warn!("Room unban failed - room not found: {}", room_id);
+            StatusCode::NOT_FOUND
+        })?;
 
     // Check if unbanner is a member of the room with appropriate permissions
     let unbanner_membership =
@@ -195,8 +199,8 @@ pub async fn post(
     let unban_event_id = create_membership_event(MembershipEventParams {
         state: &state,
         room_id: &room_id,
-        sender: &unbanner_id,           // The unbanner is the sender
-        target: &request.user_id,       // The unbanned user is the target
+        sender: &unbanner_id,               // The unbanner is the sender
+        target: &request.user_id,           // The unbanned user is the target
         membership: MembershipState::Leave, // Unban results in leave membership
         reason: request.reason.as_deref(),
         depth: event_depth,
@@ -279,7 +283,9 @@ async fn get_next_event_depth(
     room_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let depth = event_repo.get_next_event_depth(room_id).await
+    let depth = event_repo
+        .get_next_event_depth(room_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(depth)
 }
@@ -289,7 +295,9 @@ async fn get_latest_event_ids(
     room_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let event_ids = event_repo.get_latest_event_ids(room_id, 3).await
+    let event_ids = event_repo
+        .get_latest_event_ids(room_id, 3)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(event_ids)
 }
@@ -300,7 +308,9 @@ async fn get_auth_events_for_unban(
     unbanner_id: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = Arc::new(EventRepository::new(state.db.clone()));
-    let auth_events = event_repo.get_auth_events_for_unban(room_id, unbanner_id).await
+    let auth_events = event_repo
+        .get_auth_events_for_unban(room_id, unbanner_id)
+        .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
     Ok(auth_events)
 }
@@ -371,17 +381,23 @@ async fn create_membership_event(
 
     // Store the event using repository
     let event_repo = Arc::new(EventRepository::new(params.state.db.clone()));
-    let _created_event = event_repo.create_room_event(
-        params.room_id,
-        &event.event_type,
-        params.sender,
-        serde_json::to_value(&event.content)?,
-        event.state_key.clone(),
-    ).await?;
+    let _created_event = event_repo
+        .create_room_event(
+            params.room_id,
+            &event.event_type,
+            params.sender,
+            serde_json::to_value(&event.content)?,
+            event.state_key.clone(),
+        )
+        .await?;
 
     // Get existing membership to preserve display name and avatar
     let membership_repo = Arc::new(MembershipRepository::new(params.state.db.clone()));
-    let existing_membership = membership_repo.get_membership(params.room_id, params.target).await.ok().flatten();
+    let existing_membership = membership_repo
+        .get_membership(params.room_id, params.target)
+        .await
+        .ok()
+        .flatten();
 
     // Check if room is direct message using repository
     let is_direct = event_repo.is_direct_message_room(params.room_id).await.unwrap_or(false);
@@ -405,5 +421,3 @@ async fn create_membership_event(
 
     Ok(event_id)
 }
-
-

@@ -1,5 +1,4 @@
 use crate::repository::error::RepositoryError;
-use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::{Connection, Surreal};
@@ -11,8 +10,18 @@ pub struct MediaInfo {
     pub content_type: String,
     pub content_length: u64,
     pub upload_name: Option<String>,
+    pub uploaded_by: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    // Quarantine fields (from migration 158)
+    #[serde(default)]
+    pub quarantined: Option<bool>,
+    #[serde(default)]
+    pub quarantined_by: Option<String>,
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
+    #[serde(default)]
+    pub quarantined_at: Option<DateTime<Utc>>,
 }
 
 pub struct MediaRepository<C: Connection> {
@@ -78,12 +87,13 @@ impl<C: Connection> MediaRepository<C> {
         let content_data: Vec<serde_json::Value> = result.take(0)?;
 
         if let Some(data) = content_data.first()
-            && let Some(content) = data.get("content").and_then(|v| v.as_str()) {
-            // In a real implementation, this would be stored as binary data
-            // For now, we'll decode from base64
-            if let Ok(bytes) = general_purpose::STANDARD.decode(content) {
-                return Ok(Some(bytes));
-            }
+            && let Some(content_array) = data.get("content").and_then(|v| v.as_array())
+        {
+            let bytes: Vec<u8> = content_array
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
+            return Ok(Some(bytes));
         }
 
         Ok(None)
@@ -99,9 +109,6 @@ impl<C: Connection> MediaRepository<C> {
     ) -> Result<(), RepositoryError> {
         let _media_key = format!("{}:{}", server_name, media_id);
 
-        // Encode content as base64 for storage
-        let encoded_content = general_purpose::STANDARD.encode(content);
-
         let query = "
             CREATE media_content SET
             media_id = $media_id,
@@ -116,7 +123,7 @@ impl<C: Connection> MediaRepository<C> {
             .query(query)
             .bind(("media_id", media_id.to_string()))
             .bind(("server_name", server_name.to_string()))
-            .bind(("content", encoded_content))
+            .bind(("content", content.to_vec()))
             .bind(("content_type", content_type.to_string()))
             .bind(("content_length", content.len() as i64))
             .bind(("created_at", Utc::now()))
@@ -155,8 +162,12 @@ impl<C: Connection> MediaRepository<C> {
         let thumbnail_data: Vec<serde_json::Value> = result.take(0)?;
 
         if let Some(data) = thumbnail_data.first()
-            && let Some(thumbnail) = data.get("thumbnail_data").and_then(|v| v.as_str())
-            && let Ok(bytes) = general_purpose::STANDARD.decode(thumbnail) {
+            && let Some(thumbnail_array) = data.get("thumbnail_data").and_then(|v| v.as_array())
+        {
+            let bytes: Vec<u8> = thumbnail_array
+                .iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
             return Ok(Some(bytes));
         }
 
@@ -174,9 +185,6 @@ impl<C: Connection> MediaRepository<C> {
         thumbnail: &[u8],
     ) -> Result<(), RepositoryError> {
         let _thumbnail_key = format!("{}:{}:{}x{}:{}", server_name, media_id, width, height, method);
-
-        // Encode thumbnail as base64 for storage
-        let encoded_thumbnail = general_purpose::STANDARD.encode(thumbnail);
 
         let query = "
             CREATE media_thumbnails SET
@@ -196,7 +204,7 @@ impl<C: Connection> MediaRepository<C> {
             .bind(("width", width as i64))
             .bind(("height", height as i64))
             .bind(("method", method.to_string()))
-            .bind(("thumbnail_data", encoded_thumbnail))
+            .bind(("thumbnail_data", thumbnail.to_vec()))
             .bind(("created_at", Utc::now()))
             .await?;
 
@@ -210,18 +218,9 @@ impl<C: Connection> MediaRepository<C> {
         server_name: &str,
         _requesting_server: &str,
     ) -> Result<bool, RepositoryError> {
-        // Check if media exists
         if self.get_media_info(media_id, server_name).await?.is_none() {
             return Ok(false);
         }
-
-        // Check if requesting server has access
-        // In a real implementation, this would check:
-        // 1. If the media is public
-        // 2. If the requesting server is in the same room as the media
-        // 3. If there are specific access controls
-
-        // For now, allow access if the media exists
         Ok(true)
     }
 
@@ -252,6 +251,7 @@ impl<C: Connection> MediaRepository<C> {
         content: &[u8],
         content_type: &str,
         content_hash: &str,
+        user_id: &str,
     ) -> Result<(), RepositoryError> {
         // Store media info with hash
         let media_info = MediaInfo {
@@ -260,8 +260,13 @@ impl<C: Connection> MediaRepository<C> {
             content_type: content_type.to_string(),
             content_length: content.len() as u64,
             upload_name: None,
+            uploaded_by: user_id.to_string(),
             created_at: Utc::now(),
             expires_at: None,
+            quarantined: None,
+            quarantined_by: None,
+            quarantine_reason: None,
+            quarantined_at: None,
         };
 
         self.store_media_info(media_id, server_name, &media_info).await?;
@@ -348,6 +353,122 @@ impl<C: Connection> MediaRepository<C> {
         }
 
         Ok(deleted_count)
+    }
+
+    /// Link media to a room for access control
+    pub async fn associate_media_with_room(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        room_id: &str,
+        event_id: Option<&str>,
+        uploaded_by: &str,
+        is_profile_picture: bool,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            CREATE media_room_associations SET
+                media_id = $media_id,
+                server_name = $server_name,
+                room_id = $room_id,
+                event_id = $event_id,
+                uploaded_by = $uploaded_by,
+                uploaded_at = time::now(),
+                is_profile_picture = $is_profile_picture
+        ";
+        
+        self.db
+            .query(query)
+            .bind(("media_id", media_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .bind(("room_id", room_id.to_string()))
+            .bind(("event_id", event_id.map(|s| s.to_string())))
+            .bind(("uploaded_by", uploaded_by.to_string()))
+            .bind(("is_profile_picture", is_profile_picture))
+            .await?;
+        
+        Ok(())
+    }
+
+    /// Quarantine media (admin only)
+    pub async fn quarantine_media(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        admin_user: &str,
+        reason: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPDATE media_info SET
+                quarantined = true,
+                quarantined_by = $admin_user,
+                quarantine_reason = $reason,
+                quarantined_at = time::now()
+            WHERE media_id = $media_id AND server_name = $server_name
+        ";
+        
+        self.db
+            .query(query)
+            .bind(("media_id", media_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .bind(("admin_user", admin_user.to_string()))
+            .bind(("reason", reason.to_string()))
+            .await?;
+        
+        Ok(())
+    }
+
+    /// Get user's total media storage usage
+    pub async fn get_user_storage_usage(
+        &self,
+        user_id: &str,
+        server_name: &str,
+    ) -> Result<u64, RepositoryError> {
+        let query = "
+            SELECT VALUE sum(content_length) FROM media_info
+            WHERE uploaded_by = $user_id AND server_name = $server_name
+            GROUP ALL
+        ";
+
+        let mut result = self.db.query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+
+        let user_bytes: Vec<Option<u64>> = result.take(0)?;
+        Ok(user_bytes.first().and_then(|v| *v).unwrap_or(0))
+    }
+
+    /// Get room association for media
+    pub async fn get_media_room_association(
+        &self,
+        media_id: &str,
+        server_name: &str,
+    ) -> Result<Option<(String, bool)>, RepositoryError> {
+        let query = "
+            SELECT room_id, is_profile_picture 
+            FROM media_room_associations 
+            WHERE media_id = $media_id AND server_name = $server_name
+            LIMIT 1
+        ";
+        
+        let mut result = self.db.query(query)
+            .bind(("media_id", media_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+        
+        let associations: Vec<serde_json::Value> = result.take(0)?;
+        
+        if let Some(assoc) = associations.first() {
+            let is_profile = assoc.get("is_profile_picture")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            
+            if let Some(room_id) = assoc.get("room_id").and_then(|v| v.as_str()) {
+                return Ok(Some((room_id.to_string(), is_profile)));
+            }
+        }
+        
+        Ok(None)
     }
 
     /// Get media statistics

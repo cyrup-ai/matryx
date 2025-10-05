@@ -4,26 +4,16 @@
 use crate::{
     config::server_config::PushCacheConfig,
     push::{
-        gateway::{
-            NotificationCounts,
-            NotificationData,
-
-            PushError,
-            PushGateway,
-            PushNotification,
-        },
+        gateway::{NotificationCounts, NotificationData, PushError, PushGateway, PushNotification},
         rules::PushRuleEngine,
     },
 };
 use matryx_entity::{PDU, Pusher};
+use matryx_surrealdb::repository::PushRepository;
 use matryx_surrealdb::repository::PusherRepository;
 use matryx_surrealdb::repository::notification::NotificationRepository;
 use matryx_surrealdb::repository::push_service::{
-    PushAction,
-    PushCleanupResult,
-    PushReceipt,
-    PushService,
-    RoomContext,
+    PushAction, PushCleanupResult, PushReceipt, PushService, RoomContext,
 };
 use matryx_surrealdb::repository::pusher::RoomMember as PusherRoomMember;
 use moka::future::Cache;
@@ -31,8 +21,8 @@ use moka::future::Cache;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -212,7 +202,10 @@ impl PushEngine {
             room_id: event.room_id.clone(),
             content: event.content.clone(),
             state_key: event.state_key.clone(),
-            unsigned: event.unsigned.as_ref().map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null)),
+            unsigned: event
+                .unsigned
+                .as_ref()
+                .map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null)),
             auth_events: Some(event.auth_events.clone()),
             depth: Some(event.depth),
             hashes: Some(event.hashes.clone()),
@@ -364,8 +357,42 @@ impl PushEngine {
         match gateway.send_notification_with_retry(notification, 3).await {
             Ok(response) => {
                 if !response.rejected.is_empty() {
-                    warn!("Some pushkeys were rejected: {:?}", response.rejected);
-                    // In production, we'd remove rejected pushkeys from database
+                    // Handle rejected pushkeys by removing them from the database
+                    // This prevents repeated failed notification attempts to invalid/expired tokens
+                    warn!(
+                        "Push gateway rejected {} pushkey(s) for user {}: {:?}",
+                        response.rejected.len(),
+                        pusher.user_id,
+                        response.rejected
+                    );
+
+                    // Create push repository to manage pusher deletions
+                    let push_repo = PushRepository::new(self.db.as_ref().clone());
+
+                    // Check if this pusher's pushkey was rejected
+                    // The pushkey in the notification corresponds to pusher.pusher_id
+                    if response.rejected.contains(&pusher.pusher_id) {
+                        // Attempt to remove the rejected pusher from database
+                        // Note: Per Matrix Push Gateway API spec, rejections typically indicate
+                        // permanent failures (invalid token, app uninstalled, expired token)
+                        // rather than transient network issues
+                        match push_repo.delete_pusher(&pusher.user_id, &pusher.pusher_id).await {
+                            Ok(()) => {
+                                info!(
+                                    "Removed rejected pusher for user {} with pushkey {}",
+                                    pusher.user_id, pusher.pusher_id
+                                );
+                            },
+                            Err(e) => {
+                                // Log error but don't fail the entire push operation
+                                // Other pushers may have succeeded
+                                error!(
+                                    "Failed to remove rejected pusher {} for user {}: {}",
+                                    pusher.pusher_id, pusher.user_id, e
+                                );
+                            },
+                        }
+                    }
                 }
                 info!("Push notification sent successfully to {}", pusher.pusher_id);
                 Ok(())
@@ -383,18 +410,38 @@ impl PushEngine {
     ) -> Result<NotificationCounts, PushError> {
         // Create notification repository to query unread counts
         let notification_repo = NotificationRepository::new(self.db.as_ref().clone());
-        
+
         // Get total unread notification count for user
         let unread_count = notification_repo
             .get_notification_count(user_id, None)
             .await
             .map_err(PushError::RepositoryError)?;
+
+        // Count missed calls - query notifications with Call type that are unread
+        let missed_calls_query = r#"
+            SELECT count() 
+            FROM notifications 
+            WHERE user_id = $user_id 
+              AND notification_type = 'Call' 
+              AND read = false
+        "#;
         
-        // For now, missed_calls would require additional logic to count call-related notifications
-        // This could be implemented by filtering notifications by type in the future
-        Ok(NotificationCounts { 
-            unread: Some(unread_count), 
-            missed_calls: None 
+        let mut response = self.db
+            .query(missed_calls_query)
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(PushError::DatabaseError)?;
+        
+        let counts: Vec<(u64,)> = response.take(0).map_err(PushError::DatabaseError)?;
+        let missed_calls = counts.first().map(|(c,)| *c).unwrap_or(0);
+
+        Ok(NotificationCounts {
+            unread: Some(unread_count),
+            missed_calls: if missed_calls > 0 {
+                Some(missed_calls)
+            } else {
+                None
+            },
         })
     }
 

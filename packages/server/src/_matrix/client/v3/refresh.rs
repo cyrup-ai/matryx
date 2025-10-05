@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 
 use crate::auth::refresh_token::{RefreshTokenRequest, RefreshTokenResponse, RefreshTokenService};
 use crate::state::AppState;
