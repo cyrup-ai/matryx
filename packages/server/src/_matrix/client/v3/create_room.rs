@@ -113,15 +113,22 @@ async fn create_third_party_invite_event(
     sender: &str,
     display_name: &str,
     signed: &SignedThirdPartyInvite,
+    id_server: &str,
 ) -> Result<Event, RepositoryError> {
     let event_id = format!("${}", Uuid::new_v4());
     let now = Utc::now();
 
     let content = serde_json::json!({
         "display_name": display_name,
-        "key_validity_url": format!("https://{}/_matrix/identity/api/v1/pubkey/isvalid", "identity.server"),
-        "public_key": "public_key_placeholder",
-        "public_keys": [],
+        "key_validity_url": format!("https://{}/_matrix/identity/api/v1/pubkey/isvalid", id_server),
+        "public_key": signed.signatures.values().next()
+            .and_then(|sigs| sigs.keys().next())
+            .map(|k| k.as_str())
+            .unwrap_or(""),
+        "public_keys": signed.signatures.iter()
+            .flat_map(|(_, sigs)| sigs.keys())
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>(),
     });
 
     let event = Event {
@@ -291,6 +298,7 @@ pub async fn post(
                                     &user_id,
                                     display_name,
                                     &signed_invite,
+                                    id_server,
                                 )
                                 .await
                                 {

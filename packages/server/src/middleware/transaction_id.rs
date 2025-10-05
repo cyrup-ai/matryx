@@ -46,7 +46,8 @@ impl TransactionService {
         let registration_repo =
             matryx_surrealdb::repository::RegistrationRepository::new(db.clone());
         let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(db.clone());
-        let device_repo = matryx_surrealdb::repository::DeviceRepository::new(db);
+        let device_repo = matryx_surrealdb::repository::DeviceRepository::new(db.clone());
+        let auth_repo = matryx_surrealdb::repository::AuthRepository::new(db);
 
         let infrastructure_service = InfrastructureService::new(
             websocket_repo,
@@ -55,6 +56,7 @@ impl TransactionService {
             registration_repo,
             directory_repo,
             device_repo,
+            auth_repo,
         );
 
         Self { infrastructure_service }

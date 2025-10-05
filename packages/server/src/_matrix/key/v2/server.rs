@@ -79,6 +79,7 @@ async fn create_infrastructure_service(
         matryx_surrealdb::repository::RegistrationRepository::new(state.db.clone());
     let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(state.db.clone());
     let device_repo = matryx_surrealdb::repository::DeviceRepository::new(state.db.clone());
+    let auth_repo = matryx_surrealdb::repository::AuthRepository::new(state.db.clone());
 
     InfrastructureService::new(
         websocket_repo,
@@ -87,6 +88,7 @@ async fn create_infrastructure_service(
         registration_repo,
         directory_repo,
         device_repo,
+        auth_repo,
     )
 }
 

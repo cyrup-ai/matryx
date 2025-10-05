@@ -1,57 +1,31 @@
 use std::fmt;
+use thiserror::Error;
 
 /// Errors that can occur during canonical JSON processing
 ///
 /// This provides specific error types for better debugging and error handling
 /// compared to generic `Box<dyn Error>` types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Error, Debug)]
 pub enum CanonicalJsonError {
     /// Invalid JSON structure provided to canonicalization
+    #[error("Invalid JSON structure: {0}")]
     InvalidJson(String),
+    
     /// Serialization failed during JSON canonicalization process
-    SerializationError(String),
+    #[error("JSON serialization failed")]
+    SerializationError(#[from] serde_json::Error),
+    
     /// Memory exhaustion during large object processing
+    #[error("Memory exhausted during canonicalization of large JSON structure")]
     MemoryExhausted,
+    
     /// Recursive structure detected (circular references)
+    #[error("Recursive JSON structure detected - cannot canonicalize circular references")]
     RecursiveStructure,
 }
 
-impl fmt::Display for CanonicalJsonError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CanonicalJsonError::InvalidJson(msg) => {
-                write!(f, "Invalid JSON structure: {}", msg)
-            },
-            CanonicalJsonError::SerializationError(msg) => {
-                write!(f, "JSON serialization failed: {}", msg)
-            },
-            CanonicalJsonError::MemoryExhausted => {
-                write!(f, "Memory exhausted during canonicalization of large JSON structure")
-            },
-            CanonicalJsonError::RecursiveStructure => {
-                write!(
-                    f,
-                    "Recursive JSON structure detected - cannot canonicalize circular references"
-                )
-            },
-        }
-    }
-}
 
-impl std::error::Error for CanonicalJsonError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // For now, these errors don't wrap other errors
-        // Could be extended in the future if needed
-        None
-    }
-}
 
-/// Helper function to convert serde_json::Error to CanonicalJsonError
-impl From<serde_json::Error> for CanonicalJsonError {
-    fn from(err: serde_json::Error) -> Self {
-        CanonicalJsonError::SerializationError(err.to_string())
-    }
-}
 
 #[cfg(test)]
 mod tests {

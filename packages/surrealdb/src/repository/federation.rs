@@ -4,9 +4,12 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use matryx_entity::types::Event;
 use matryx_entity::utils::canonical_json::canonical_json_for_signing;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 use surrealdb::{Surreal, engine::any::Any};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomHierarchy {
@@ -957,12 +960,189 @@ impl FederationRepository {
             return Ok(false);
         }
 
-        // In a real implementation, this would:
-        // 1. Fetch the public key from the key validity URL
-        // 2. Verify the signature on the invite
-        // 3. Check the invite hasn't expired
+        // Fetch public key from identity server
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| RepositoryError::Validation {
+                field: "http_client".to_string(),
+                message: format!("Failed to create HTTP client: {}", e),
+            })?;
 
-        Ok(true)
+        let key_response = client
+            .get(&invite.key_validity_url)
+            .send()
+            .await
+            .map_err(|e| RepositoryError::Validation {
+                field: "key_fetch".to_string(),
+                message: format!("Failed to fetch identity server key from {}: {}", invite.key_validity_url, e),
+            })?;
+
+        if !key_response.status().is_success() {
+            warn!(
+                "Failed to fetch identity server key from {}: HTTP {}",
+                invite.key_validity_url,
+                key_response.status()
+            );
+            return Ok(false);
+        }
+
+        let key_data: serde_json::Value = key_response.json().await
+            .map_err(|e| RepositoryError::Validation {
+                field: "key_data".to_string(),
+                message: format!("Invalid key response format: {}", e),
+            })?;
+
+        // Extract identity server's public key from response
+        let public_key_b64 = key_data
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "public_key".to_string(),
+                message: "Identity server response missing public_key field".to_string(),
+            })?;
+
+        // Extract signature from invite.public_keys
+        // Look for a public_key entry with signatures
+        let mut signature_b64: Option<&str> = None;
+        
+        for pk_entry in &invite.public_keys {
+            if let Some(signatures) = pk_entry.get("signatures") {
+                if let Some(sigs_obj) = signatures.as_object() {
+                    // Find ed25519 signature in any server's signatures
+                    for (_, key_sigs) in sigs_obj.iter() {
+                        if let Some(key_sigs_obj) = key_sigs.as_object() {
+                            for (key_id, sig_value) in key_sigs_obj.iter() {
+                                if key_id.starts_with("ed25519:") {
+                                    if let Some(sig_str) = sig_value.as_str() {
+                                        signature_b64 = Some(sig_str);
+                                        break;
+                                    }
+                                }
+                            }
+                            if signature_b64.is_some() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if signature_b64.is_some() {
+                    break;
+                }
+            }
+        }
+
+        let signature_b64 = match signature_b64 {
+            Some(sig) => sig,
+            None => {
+                warn!(
+                    "No ed25519 signature found in third-party invite from {}",
+                    invite.display_name
+                );
+                return Ok(false);
+            }
+        };
+
+        // Create canonical JSON for verification using Matrix canonical JSON rules
+        // This ensures lexicographically sorted keys as required by Matrix spec
+        let invite_json = serde_json::to_value(invite)
+            .map_err(|e| RepositoryError::Validation {
+                field: "invite_serialize".to_string(),
+                message: format!("Failed to serialize invite: {}", e),
+            })?;
+
+        // Use canonical_json_for_signing which automatically:
+        // 1. Removes signatures and unsigned fields
+        // 2. Sorts object keys lexicographically
+        // 3. Applies Matrix canonical JSON format
+        let canonical_string = canonical_json_for_signing(&invite_json)
+            .map_err(|e| RepositoryError::Validation {
+                field: "canonical_json".to_string(),
+                message: format!("Failed to create canonical JSON: {}", e),
+            })?;
+
+        let canonical_bytes = canonical_string.as_bytes();
+
+        // Decode public key and signature from base64
+        let verify_key_bytes = general_purpose::STANDARD.decode(public_key_b64)
+            .map_err(|_| RepositoryError::Validation {
+                field: "public_key".to_string(),
+                message: "Invalid base64 encoding in identity server public key".to_string(),
+            })?;
+
+        let signature_bytes = general_purpose::STANDARD.decode(signature_b64)
+            .map_err(|_| RepositoryError::Validation {
+                field: "signature".to_string(),
+                message: "Invalid base64 encoding in invite signature".to_string(),
+            })?;
+
+        // Validate key and signature sizes
+        if verify_key_bytes.len() != 32 {
+            warn!(
+                "Invalid public key size from identity server {}: {} bytes (expected 32)",
+                invite.key_validity_url,
+                verify_key_bytes.len()
+            );
+            return Ok(false);
+        }
+
+        if signature_bytes.len() != 64 {
+            warn!(
+                "Invalid signature size in third-party invite: {} bytes (expected 64)",
+                signature_bytes.len()
+            );
+            return Ok(false);
+        }
+
+        // Convert to fixed-size arrays
+        let key_array: [u8; 32] = match verify_key_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Err(RepositoryError::Validation {
+                    field: "public_key".to_string(),
+                    message: "Failed to convert public key bytes to array".to_string(),
+                });
+            }
+        };
+
+        let sig_array: [u8; 64] = match signature_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Err(RepositoryError::Validation {
+                    field: "signature".to_string(),
+                    message: "Failed to convert signature bytes to array".to_string(),
+                });
+            }
+        };
+
+        // Create Ed25519 verifying key and signature objects
+        let verifying_key = VerifyingKey::from_bytes(&key_array)
+            .map_err(|_| RepositoryError::Validation {
+                field: "public_key".to_string(),
+                message: "Invalid Ed25519 public key from identity server".to_string(),
+            })?;
+
+        let signature_obj = Signature::from_bytes(&sig_array);
+
+        // Verify the signature
+        match verifying_key.verify(&canonical_bytes, &signature_obj) {
+            Ok(()) => {
+                info!(
+                    "Third-party invite signature verified successfully for {} from {}",
+                    invite.display_name,
+                    invite.key_validity_url
+                );
+                Ok(true)
+            }
+            Err(_) => {
+                warn!(
+                    "Third-party invite signature verification failed for {} from {}",
+                    invite.display_name,
+                    invite.key_validity_url
+                );
+                Ok(false)
+            }
+        }
     }
 
     /// Exchange third-party invite for membership event

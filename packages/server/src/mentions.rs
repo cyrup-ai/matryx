@@ -66,6 +66,23 @@ pub struct MentionsMetadata {
     pub room: Option<bool>,
 }
 
+/// Room alias mention metadata (custom extension)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomAliasMentions {
+    /// Detected room alias mentions with optional resolution
+    pub aliases: Vec<RoomAliasMention>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomAliasMention {
+    /// The room alias as it appears in the message
+    pub alias: String,
+    
+    /// The resolved room ID (if resolution succeeded)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
+}
+
 /// Static regex patterns for safe compilation
 static USER_MENTION_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"@([a-zA-Z0-9._=-]+):([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})").unwrap_or_else(|e| {
@@ -100,15 +117,16 @@ impl MentionsProcessor {
         room_id: &str,
         sender: &str,
         state: &AppState,
-    ) -> Result<Option<MentionsMetadata>, Box<dyn std::error::Error>> {
+    ) -> Result<(Option<MentionsMetadata>, Option<RoomAliasMentions>), Box<dyn std::error::Error>> {
         // Extract text content from event
         let text_content = self.extract_text_content(event_content);
         if text_content.is_empty() {
-            return Ok(None);
+            return Ok((None, None));
         }
 
         let mut mentioned_users = HashSet::new();
         let mut has_room_mention = false;
+        let mut room_alias_mentions = Vec::new();
 
         // Check for existing m.mentions in content (client-provided)
         if let Some(existing_mentions) = event_content.get("m.mentions") {
@@ -128,16 +146,12 @@ impl MentionsProcessor {
             mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
             has_room_mention = self.detect_room_mentions(&text_content);
 
-            // Also detect room alias mentions for context and logging
-            let room_alias_mentions = self.detect_room_alias_mentions(&text_content);
+            // Detect room alias mentions for cross-room context
+            room_alias_mentions = self.detect_and_resolve_room_alias_mentions(&text_content, state).await;
             if !room_alias_mentions.is_empty() {
-                info!(
-                    "Detected room alias mentions in room {}: {:?}",
-                    room_id, room_alias_mentions
-                );
-                // Room alias mentions could be used for cross-room notifications or context
-                // For now, we log them but don't add to mentions metadata as Matrix spec
-                // defines m.mentions for user and @room mentions only
+                info!("Detected and resolved room alias mentions in room {}: {:?}", room_id, room_alias_mentions);
+                // Note: Room aliases are stored in custom metadata field, not m.mentions
+                // This is intentional - m.mentions is spec-defined for user/@room only
             }
         }
 
@@ -157,11 +171,22 @@ impl MentionsProcessor {
                 },
                 room: if has_room_mention { Some(true) } else { None },
             };
-
+            
+            let room_aliases = if room_alias_mentions.is_empty() {
+                None
+            } else {
+                Some(RoomAliasMentions { aliases: room_alias_mentions })
+            };
+            
             info!("Detected mentions in room {}: {:?}", room_id, mentions);
-            Ok(Some(mentions))
+            Ok((Some(mentions), room_aliases))
         } else {
-            Ok(None)
+            let room_aliases = if room_alias_mentions.is_empty() {
+                None
+            } else {
+                Some(RoomAliasMentions { aliases: room_alias_mentions })
+            };
+            Ok((None, room_aliases))
         }
     }
 
@@ -296,6 +321,45 @@ impl MentionsProcessor {
         }
 
         aliases
+    }
+
+    /// Detect and optionally resolve room alias mentions
+    async fn detect_and_resolve_room_alias_mentions(
+        &self,
+        text: &str,
+        state: &AppState,
+    ) -> Vec<RoomAliasMention> {
+        use crate::room::alias_resolution::RoomAliasResolver;
+        use std::sync::Arc;
+        
+        let mut alias_mentions = Vec::new();
+        
+        // Create alias resolver
+        let alias_resolver = RoomAliasResolver::new(
+            Arc::new(state.db.clone()),
+            state.homeserver_name.clone(),
+        );
+        
+        for capture in ROOM_ALIAS_REGEX.captures_iter(text) {
+            if let Some(full_match) = capture.get(0) {
+                let alias = full_match.as_str().to_string();
+                info!("Detected room alias mention: {}", alias);
+                
+                // Attempt to resolve alias to room ID
+                let room_id = alias_resolver
+                    .resolve_alias(&alias, state)
+                    .await
+                    .ok()
+                    .flatten();
+                
+                alias_mentions.push(RoomAliasMention {
+                    alias,
+                    room_id,
+                });
+            }
+        }
+        
+        alias_mentions
     }
 
     /// Validate that mentioned users are members of the room

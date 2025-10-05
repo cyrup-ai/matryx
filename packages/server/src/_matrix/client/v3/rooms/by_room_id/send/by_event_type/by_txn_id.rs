@@ -133,21 +133,20 @@ pub async fn put(
 
     // Process mentions in message content
     let mentions_processor = MentionsProcessor::new();
-    let mentions_metadata = mentions_processor
+    let (mentions_metadata, room_alias_mentions) = mentions_processor
         .process_mentions(&request.content, &room_id, &auth.user_id, &state)
         .await
         .map_err(|e| {
             tracing::error!("Failed to process mentions: {}", e);
-            // Don't fail the request if mention processing fails
-            // Just log the error and continue
         })
         .ok()
-        .flatten();
+        .unwrap_or((None, None));
 
     // Add mentions metadata to event content if present
     let mut event_content = request.content.clone();
+
+    // Add spec-compliant m.mentions
     if let Some(mentions) = mentions_metadata {
-        // Add m.mentions to content
         let mut mentions_json = serde_json::Map::new();
         if let Some(user_ids) = mentions.user_ids {
             mentions_json.insert("user_ids".to_string(), serde_json::json!(user_ids));
@@ -156,8 +155,14 @@ pub async fn put(
             mentions_json.insert("room".to_string(), serde_json::json!(room));
         }
         event_content["m.mentions"] = serde_json::Value::Object(mentions_json);
+        tracing::info!("Processed user/room mentions for event in room {}", room_id);
+    }
 
-        tracing::info!("Processed mentions for event in room {}", room_id);
+    // Add custom room alias mentions metadata
+    if let Some(room_aliases) = room_alias_mentions {
+        event_content["com.maxtryx.room_aliases"] = serde_json::to_value(&room_aliases)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tracing::info!("Processed room alias mentions for event in room {}", room_id);
     }
 
     // Create complete event with DAG relationships using repository

@@ -1,4 +1,5 @@
 use crate::repository::{
+    auth::AuthRepository,
     device::{ClientDeviceInfo, DeviceRepository},
     directory::{DirectoryRepository, PublicRoomsResponse},
     error::RepositoryError,
@@ -129,7 +130,7 @@ pub struct InfrastructureService<C: Connection> {
     registration_repo: RegistrationRepository<C>,
     directory_repo: DirectoryRepository<C>,
     device_repo: DeviceRepository,
-    // Note: AuthRepository would go here when it exists
+    auth_repo: AuthRepository<C>,
 }
 
 impl<C: Connection> InfrastructureService<C> {
@@ -140,6 +141,7 @@ impl<C: Connection> InfrastructureService<C> {
         registration_repo: RegistrationRepository<C>,
         directory_repo: DirectoryRepository<C>,
         device_repo: DeviceRepository,
+        auth_repo: AuthRepository<C>,
     ) -> Self {
         Self {
             websocket_repo,
@@ -148,6 +150,7 @@ impl<C: Connection> InfrastructureService<C> {
             registration_repo,
             directory_repo,
             device_repo,
+            auth_repo,
         }
     }
 
@@ -375,13 +378,41 @@ impl<C: Connection> InfrastructureService<C> {
             .register_user(&user_id, &password_hash, device_id, initial_device_display_name)
             .await?;
 
-        // Generate refresh token if requested and supported
+        // Generate and store refresh token if requested
         if enable_refresh_tokens {
-            let refresh_token = format!("rt_{}", uuid::Uuid::new_v4());
-            // Store refresh token in database (implement refresh token storage)
-            // For now, just set it in the result
+            use crate::repository::auth::ExtendedRefreshToken;
+            use chrono::Duration;
+            
+            let refresh_token = format!("syr_{}", uuid::Uuid::new_v4());
+            let now = Utc::now();
+            let expires_at = now + Duration::days(30);
+            
+            // Create extended refresh token record
+            let refresh_record = ExtendedRefreshToken {
+                token: refresh_token.clone(),
+                user_id: user_id.clone(),
+                device_id: device_id.to_string(),
+                access_token: result.access_token.clone(),
+                created_at: now,
+                expires_at,
+                used: false,
+                revoked: false,
+                rotation_count: 0,
+                parent_token: None,
+            };
+            
+            // Store in database
+            self.auth_repo
+                .store_extended_refresh_token(&refresh_record)
+                .await
+                .map_err(|e| {
+                    RepositoryError::Database(
+                        surrealdb::Error::msg(format!("Failed to store refresh token: {}", e))
+                    )
+                })?;
+            
             result.refresh_token = Some(refresh_token);
-            result.expires_in_ms = Some(86400000); // 24 hours in milliseconds
+            result.expires_in_ms = Some(Duration::hours(1).num_milliseconds());
         }
 
         Ok(result)

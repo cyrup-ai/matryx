@@ -162,6 +162,8 @@ impl KeyManagementService {
             matryx_surrealdb::repository::DirectoryRepository::new(self.app_state.db.clone());
         let device_repo =
             matryx_surrealdb::repository::DeviceRepository::new(self.app_state.db.clone());
+        let auth_repo =
+            matryx_surrealdb::repository::AuthRepository::new(self.app_state.db.clone());
 
         InfrastructureService::new(
             websocket_repo,
@@ -170,6 +172,7 @@ impl KeyManagementService {
             registration_repo,
             directory_repo,
             device_repo,
+            auth_repo,
         )
     }
 }
