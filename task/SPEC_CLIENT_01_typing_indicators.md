@@ -1,47 +1,100 @@
-# SPEC_CLIENT_01: Complete Typing Indicators Implementation
+# SPEC_CLIENT_01: Typing Indicators Implementation - CRITICAL ISSUES
 
-## Status
-**PARTIALLY IMPLEMENTED** - Endpoint exists but critical sync integration is missing
+## QA Rating: 2/10 - FUNDAMENTALLY BROKEN
 
-## Current Implementation Analysis
+### Critical Assessment
+The typing indicators feature is NOT "partially implemented" - it is **FUNDAMENTALLY BROKEN** at the database schema level. The implementation will fail immediately in production due to table name and schema mismatches.
 
-### What Exists ✓
+---
 
-1. **PUT Endpoint Handler** - [packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs](../../packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs)
-   - Route registered in main.rs line 526: `.route("/v3/rooms/{room_id}/typing/{user_id}", put(...))`
-   - Validates user authorization (forbids setting typing for other users)
-   - Sends typing EDUs to federated servers via outbound queue
-   - **CRITICAL GAP**: Does NOT store typing state locally for same-server users
+## CRITICAL ISSUE #1: Database Table Name Mismatch
 
-2. **Federation EDU Processing** - [packages/surrealdb/src/repository/federation.rs](../../packages/surrealdb/src/repository/federation.rs#L1330-L1377)
-   - `process_typing_edu()` method exists (line 1330)
-   - Stores typing events in `typing_events` table with expiration
-   - Called by federation handler in [packages/server/src/_matrix/federation/v1/send/by_txn_id.rs](../../packages/server/src/_matrix/federation/v1/send/by_txn_id.rs#L608)
-   - Properly validates user membership before storing
+**Severity**: BLOCKER - Feature completely non-functional
 
-3. **Database Schema**
-   - `typing_events` table exists with fields:
-     - `room_id`: Room identifier
-     - `user_id`: User who is typing
-     - `server_name`: Origin server
-     - `started_at`: When typing started
-     - `expires_at`: When typing status expires (30s timeout)
+### Current State
+- **Database schema defines**: `typing_notification` table
+  - Location: `/Volumes/samsung_t9/maxtryx/packages/surrealdb/migrations/tables/076_typing_notification.surql`
+  - Fields: `room_id`, `typing`, `user_id`, `timestamp`
 
-### What's Missing ✗
+- **Code attempts to use**: `typing_events` table (DOES NOT EXIST)
+  - Location: `/Volumes/samsung_t9/maxtryx/packages/surrealdb/src/repository/federation.rs` line 1343-1356
+  - Expected fields: `room_id`, `user_id`, `server_name`, `started_at`, `expires_at`
 
-1. **Local Storage in PUT Handler**
-   - PUT endpoint doesn't call `process_typing_edu` for local users
-   - Only federates to remote servers, no local state tracking
-   - Local clients in the same room never see typing indicators
+### Impact
+- ✗ Federation inbound FAILS: `process_typing_edu()` writes to non-existent table
+- ✗ All typing data storage operations fail with database errors
+- ✗ Feature appears broken to all users
 
-2. **Sync Integration**
-   - [packages/surrealdb/src/repository/sync.rs](../../packages/surrealdb/src/repository/sync.rs#L1102-L1132)
-   - `get_room_ephemeral_events_internal()` queries `ephemeral_events` table
-   - **Does NOT query** `typing_events` table
-   - Typing data exists in DB but never reaches clients via /sync
+### Required Fix
+**DECISION NEEDED**: Choose ONE approach:
 
-3. **Typing Event Format Construction**
-   - Sync must construct Matrix-spec m.typing event:
+#### Option A: Use existing `typing_notification` table (RECOMMENDED)
+1. Update `federation.rs` process_typing_edu to write to `typing_notification` table
+2. Modify schema to add `expires_at` field for timeout tracking
+3. Update queries to match new field names
+
+#### Option B: Create new `typing_events` table
+1. Create migration file `157_typing_events.surql` with correct schema
+2. Keep federation.rs code as-is
+3. More complex but separates concerns
+
+**MUST RESOLVE THIS FIRST** before any other work can proceed.
+
+---
+
+## CRITICAL ISSUE #2: PUT Endpoint Missing Local Storage
+
+**File**: `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs`
+
+### Current Behavior
+```rust
+pub async fn put(...) -> Result<Json<Value>, StatusCode> {
+    // Verify user authorization ✓
+    // Get remote servers ✓
+    // Send EDU to remote servers ✓
+    // ✗ MISSING: Store typing state locally
+    Ok(Json(json!({})))
+}
+```
+
+### What's Missing
+- No call to store typing state in database
+- Local users in same room never see typing indicators
+- Only federates to remote servers
+
+### Required Implementation
+Add before federation code:
+```rust
+use matryx_surrealdb::repository::FederationRepository;
+
+// Store typing state locally
+let federation_repo = FederationRepository::new(state.db.clone());
+let server_name = state.homeserver_name.as_str();
+
+if let Err(e) = federation_repo
+    .process_typing_edu(&room_id, &user_id, server_name, typing)
+    .await 
+{
+    error!("Failed to store local typing state: {}", e);
+    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+}
+```
+
+---
+
+## CRITICAL ISSUE #3: Sync Integration Completely Missing
+
+**File**: `/Volumes/samsung_t9/maxtryx/packages/surrealdb/src/repository/sync.rs` line 1102-1132
+
+### Current Behavior
+- Queries `event` table for ephemeral events with type filter
+- Does NOT query typing data table (neither `typing_notification` nor `typing_events`)
+- Returns empty typing indicators to all clients
+
+### Required Implementation
+Replace `get_room_ephemeral_events()` method to:
+1. Query active typing users from typing table
+2. Construct Matrix-spec `m.typing` event format:
    ```json
    {
      "type": "m.typing",
@@ -50,206 +103,61 @@
      }
    }
    ```
-   - Current code doesn't aggregate active typing users into this format
+3. Combine with other ephemeral events (receipts, etc.)
 
-4. **Background Cleanup Task**
-   - No automatic cleanup of expired typing events
-   - Relies on query-time filtering (expires_at check)
-   - Could accumulate stale data over time
-
-## Matrix Spec Requirement
-
-**Spec Section**: Typing Notifications  
-**Endpoint**: `PUT /_matrix/client/v3/rooms/{roomId}/typing/{userId}`  
-**Authentication**: Required
-
-### Request Format
-```json
-{
-  "typing": true,
-  "timeout": 30000
-}
+### Example Query Pattern
+```sql
+SELECT user_id FROM typing_notification
+WHERE room_id = $room_id 
+AND timestamp > (time::now() - 30s)  -- Active typers only
+ORDER BY timestamp DESC
 ```
 
-### Response Format
-```json
-{}
+---
+
+## CRITICAL ISSUE #4: Schema Design Inadequate
+
+**File**: `/Volumes/samsung_t9/maxtryx/packages/surrealdb/migrations/tables/076_typing_notification.surql`
+
+### Current Schema Problems
+```sql
+DEFINE FIELD timestamp ON TABLE typing_notification TYPE datetime DEFAULT time::now();
 ```
 
-### Sync Response Format (ephemeral events)
-```json
-{
-  "rooms": {
-    "join": {
-      "!room:example.com": {
-        "ephemeral": {
-          "events": [
-            {
-              "type": "m.typing",
-              "content": {
-                "user_ids": ["@alice:example.com"]
-              }
-            }
-          ]
-        }
-      }
-    }
-  }
-}
+**Issues**:
+- No `expires_at` field for automatic timeout handling
+- No `server_name` field to track federation origin
+- No `started_at` field to differentiate start time from last update
+- Relies on query-time filtering (`timestamp > now() - 30s`) which is fragile
+
+### Required Schema Updates
+```sql
+DEFINE FIELD room_id ON TABLE typing_notification TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE typing_notification TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD typing ON TABLE typing_notification TYPE bool DEFAULT false;
+DEFINE FIELD server_name ON TABLE typing_notification TYPE string;
+DEFINE FIELD started_at ON TABLE typing_notification TYPE datetime DEFAULT time::now();
+DEFINE FIELD expires_at ON TABLE typing_notification TYPE datetime;
+DEFINE FIELD updated_at ON TABLE typing_notification TYPE datetime DEFAULT time::now();
+
+-- Index for efficient cleanup queries
+DEFINE INDEX idx_typing_expires ON TABLE typing_notification FIELDS expires_at;
+DEFINE INDEX idx_typing_room ON TABLE typing_notification FIELDS room_id, expires_at;
 ```
 
-## Required Implementation Changes
+---
 
-### 1. Update PUT Endpoint Handler
+## MISSING FEATURE: Background Cleanup Task
 
-**File**: [packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs](../../packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs)
+**Severity**: Medium - Causes table bloat over time
 
-**Change**: Add local storage before federation
+### Current State
+- No automatic cleanup of expired typing events
+- Table will accumulate stale data indefinitely
+- Query performance will degrade over time
 
-```rust
-use matryx_surrealdb::repository::FederationRepository;
-
-pub async fn put(
-    Path((room_id, user_id)): Path<(String, String)>,
-    Extension(state): Extension<AppState>,
-    Extension(auth_user): Extension<AuthenticatedUser>,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    // ... existing authorization check ...
-
-    let typing = payload.get("typing").and_then(|v| v.as_bool()).unwrap_or(false);
-    
-    // NEW: Store typing state locally BEFORE federation
-    let federation_repo = FederationRepository::new(state.db.clone());
-    let server_name = state.homeserver_name.as_str();
-    
-    if let Err(e) = federation_repo
-        .process_typing_edu(&room_id, &user_id, server_name, typing)
-        .await 
-    {
-        error!("Failed to store local typing state: {}", e);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    
-    // ... existing federation code ...
-    
-    Ok(Json(json!({})))
-}
-```
-
-**Pattern Reference**: See how [packages/server/src/_matrix/federation/v1/send/by_txn_id.rs](../../packages/server/src/_matrix/federation/v1/send/by_txn_id.rs#L608-L615) calls `process_typing_edu` for incoming federation events.
-
-### 2. Update Sync Ephemeral Events Query
-
-**File**: [packages/surrealdb/src/repository/sync.rs](../../packages/surrealdb/src/repository/sync.rs#L1102-L1132)
-
-**Method**: `get_room_ephemeral_events_internal`
-
-**Change**: Query typing_events and construct m.typing event format
-
-```rust
-async fn get_room_ephemeral_events_internal(
-    &self,
-    room_id: &str,
-    since: Option<&SyncPosition>,
-) -> Result<Vec<Value>, RepositoryError> {
-    let mut ephemeral_events = Vec::new();
-    
-    // Query active typing users (not expired)
-    let typing_query = r#"
-        SELECT user_id FROM typing_events
-        WHERE room_id = $room_id 
-        AND expires_at > time::now()
-        ORDER BY started_at DESC
-    "#;
-    
-    let mut typing_response = self.db
-        .query(typing_query)
-        .bind(("room_id", room_id.to_string()))
-        .await
-        .map_err(|e| RepositoryError::DatabaseError {
-            message: e.to_string(),
-            operation: "get_typing_users".to_string(),
-        })?;
-    
-    #[derive(serde::Deserialize)]
-    struct TypingUser {
-        user_id: String,
-    }
-    
-    let typing_users: Vec<TypingUser> = typing_response
-        .take(0)
-        .map_err(|e| RepositoryError::DatabaseError {
-            message: e.to_string(),
-            operation: "parse_typing_users".to_string(),
-        })?;
-    
-    // Construct m.typing event if there are active typers
-    if !typing_users.is_empty() {
-        let user_ids: Vec<String> = typing_users
-            .into_iter()
-            .map(|u| u.user_id)
-            .collect();
-        
-        ephemeral_events.push(json!({
-            "type": "m.typing",
-            "content": {
-                "user_ids": user_ids
-            }
-        }));
-    }
-    
-    // Query other ephemeral events (receipts, etc.) from existing table
-    let other_query = if since.is_some() {
-        r#"
-            SELECT * FROM ephemeral_events 
-            WHERE room_id = $room_id AND timestamp > $since_timestamp
-            ORDER BY timestamp DESC 
-            LIMIT 10
-        "#
-    } else {
-        r#"
-            SELECT * FROM ephemeral_events 
-            WHERE room_id = $room_id 
-            ORDER BY timestamp DESC 
-            LIMIT 10
-        "#
-    };
-    
-    let mut query_builder = self.db
-        .query(other_query)
-        .bind(("room_id", room_id.to_string()));
-    
-    if let Some(sync_pos) = since {
-        query_builder = query_builder.bind(("since_timestamp", sync_pos.timestamp));
-    }
-    
-    let mut response = query_builder.await
-        .map_err(|e| RepositoryError::DatabaseError {
-            message: e.to_string(),
-            operation: "get_other_ephemeral_events".to_string(),
-        })?;
-    
-    let other_events: Vec<Value> = response
-        .take(0)
-        .map_err(|e| RepositoryError::DatabaseError {
-            message: e.to_string(),
-            operation: "parse_other_ephemeral_events".to_string(),
-        })?;
-    
-    ephemeral_events.extend(other_events);
-    
-    Ok(ephemeral_events)
-}
-```
-
-**Pattern Reference**: See how [packages/surrealdb/src/repository/federation.rs](../../packages/surrealdb/src/repository/federation.rs#L1330-L1377) queries and manages typing_events.
-
-### 3. Optional: Background Cleanup Task
-
-**File**: Create new file `packages/server/src/tasks/typing_cleanup.rs`
-
-**Purpose**: Periodically delete expired typing events to prevent table bloat
+### Required Implementation
+Create `/Volumes/samsung_t9/maxtryx/packages/server/src/tasks/typing_cleanup.rs`:
 
 ```rust
 use std::time::Duration;
@@ -258,220 +166,141 @@ use tracing::{debug, error};
 use crate::AppState;
 
 pub async fn start_typing_cleanup_task(state: AppState) {
-    let mut interval = interval(Duration::from_secs(60)); // Run every 60 seconds
+    let mut interval = interval(Duration::from_secs(60));
     
     loop {
         interval.tick().await;
         
-        let query = "DELETE typing_events WHERE expires_at < time::now()";
+        let query = "DELETE typing_notification WHERE expires_at < time::now()";
         
         match state.db.query(query).await {
-            Ok(mut result) => {
-                if let Ok(count) = result.take::<Option<i64>>(0) {
-                    debug!("Cleaned up {} expired typing events", count.unwrap_or(0));
-                }
-            }
-            Err(e) => {
-                error!("Failed to cleanup typing events: {}", e);
-            }
+            Ok(_) => debug!("Cleaned up expired typing events"),
+            Err(e) => error!("Failed to cleanup typing events: {}", e),
         }
     }
 }
 ```
 
-**Integration**: Spawn task in `packages/server/src/main.rs`:
-
+Spawn in `main.rs`:
 ```rust
-// In main() function after database connection
 tokio::spawn(tasks::typing_cleanup::start_typing_cleanup_task(app_state.clone()));
 ```
 
-**Pattern Reference**: See how the outbound federation queue is spawned as a background task in main.rs.
+---
 
-## Data Flow Diagram
+## UNUSED CODE: Entity Type Not Integrated
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ LOCAL USER TYPES                                            │
-└─────────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-     PUT /v3/rooms/{room}/typing/{user}
-                    │
-         ┌──────────┴──────────┐
-         │                     │
-         ▼                     ▼
-   Store locally         Send EDU to
-   (typing_events)      remote servers
-         │                     │
-         │                     │
-         ▼                     ▼
-    ┌────────────┐      ┌──────────┐
-    │ Local DB   │      │ Remote   │
-    │ Storage    │      │ Servers  │
-    └────────────┘      └──────────┘
-         │                     │
-         │                     │
-         │              (Remote stores
-         │               in their DB)
-         │                     │
-         └──────────┬──────────┘
-                    │
-                    ▼
-         Client calls /sync
-                    │
-                    ▼
-    Query typing_events WHERE
-    expires_at > now()
-                    │
-                    ▼
-    Construct m.typing event
-    with user_ids array
-                    │
-                    ▼
-    Return in ephemeral events
-                    │
-                    ▼
-         Client displays typing
+**File**: `/Volumes/samsung_t9/maxtryx/packages/entity/src/types/typing_notification.rs`
+
+### Current State
+- `TypingNotification` struct exists
+- Fields: `room_id`, `typing`, `user_id`
+- **Completely unused** in any repository or handler code
+
+### Required Integration
+Update code to use entity type instead of raw queries:
+```rust
+use matryx_entity::types::TypingNotification;
+
+// In repository methods
+let notification = TypingNotification::new(
+    room_id.to_string(),
+    typing,
+    user_id.to_string(),
+);
 ```
 
-## Definition of Done
+---
 
-### Functional Requirements
+## Implementation Priority Order
 
-1. **Local Typing Indicators Work**
-   - User A types in room → PUT endpoint succeeds
-   - User B in same room calls /sync → sees User A in m.typing event
-   - User A stops typing → User B's next /sync shows empty user_ids array
+### Phase 1: Fix Critical Database Issues (REQUIRED FOR ANY FUNCTIONALITY)
+1. **DECIDE**: Table name strategy (typing_notification vs typing_events)
+2. **UPDATE**: Schema to add required fields (expires_at, server_name, started_at)
+3. **MIGRATE**: Database with new schema
+4. **UPDATE**: All code references to match chosen table name
 
-2. **Federated Typing Works**
-   - User on remote server types → local server receives EDU
-   - Local users see remote user in m.typing via /sync
-   - Timeout respected (remote user removed after 30s)
+### Phase 2: Complete Core Integration
+5. **FIX**: PUT endpoint to store locally (federation.rs call)
+6. **FIX**: Sync repository to query typing data
+7. **IMPLEMENT**: M.typing event format construction
 
-3. **Authorization Enforced**
-   - User cannot set typing status for other users (403 Forbidden)
-   - Only authenticated users can call endpoint (401 Unauthorized)
+### Phase 3: Polish & Optimization
+8. **CREATE**: Background cleanup task
+9. **INTEGRATE**: Entity type usage
+10. **TEST**: End-to-end functionality
 
-4. **Timeout Behavior**
-   - Typing status expires after timeout duration (default 30s)
-   - Expired users not included in /sync m.typing events
-   - Setting typing=false immediately removes user from typing list
+---
 
-5. **Multiple Users**
-   - Multiple users can be typing simultaneously
-   - m.typing event contains all currently typing users
-   - Order doesn't matter but should be consistent
+## Testing Verification (AFTER FIXES)
 
-### Code Changes Summary
+### Test 1: Local Typing
+```bash
+# Alice starts typing
+curl -X PUT 'http://localhost:8008/_matrix/client/v3/rooms/!room:example.com/typing/@alice:example.com' \
+  -H 'Authorization: Bearer <alice_token>' \
+  -d '{"typing": true, "timeout": 30000}'
 
-**Must Change**:
-- `packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs` - Add local storage call
-- `packages/surrealdb/src/repository/sync.rs` - Query typing_events and construct m.typing format
+# Bob syncs and should see Alice typing
+curl -X GET 'http://localhost:8008/_matrix/client/v3/sync' \
+  -H 'Authorization: Bearer <bob_token>'
 
-**Should Change**:
-- `packages/server/src/main.rs` - Add typing cleanup background task
-- Create `packages/server/src/tasks/typing_cleanup.rs` - Cleanup task implementation
+# Expected: m.typing event with user_ids: ["@alice:example.com"]
+```
 
-**Already Correct** (no changes needed):
-- Route registration in main.rs
-- Federation EDU processing in federation.rs
-- Database schema for typing_events
+### Test 2: Federation Inbound
+- Verify remote typing EDUs are processed without database errors
+- Check logs for successful storage
+- Verify data appears in sync for local users
 
-### Verification Steps
+### Test 3: Timeout Behavior
+- Set typing=true, wait 30s
+- Verify user removed from typing list
+- Set typing=false explicitly
+- Verify immediate removal
 
-1. **Start typing indicator**:
-   ```bash
-   curl -X PUT 'http://localhost:8008/_matrix/client/v3/rooms/!room:example.com/typing/@alice:example.com' \
-     -H 'Authorization: Bearer <alice_token>' \
-     -H 'Content-Type: application/json' \
-     -d '{"typing": true, "timeout": 30000}'
-   ```
-   Expected: Returns `{}`
+---
 
-2. **Check /sync shows typing**:
-   ```bash
-   curl -X GET 'http://localhost:8008/_matrix/client/v3/sync' \
-     -H 'Authorization: Bearer <bob_token>'
-   ```
-   Expected: Response includes:
-   ```json
-   {
-     "rooms": {
-       "join": {
-         "!room:example.com": {
-           "ephemeral": {
-             "events": [{
-               "type": "m.typing",
-               "content": {"user_ids": ["@alice:example.com"]}
-             }]
-           }
-         }
-       }
-     }
-   }
-   ```
+## Files Requiring Changes
 
-3. **Stop typing**:
-   ```bash
-   curl -X PUT 'http://localhost:8008/_matrix/client/v3/rooms/!room:example.com/typing/@alice:example.com' \
-     -H 'Authorization: Bearer <alice_token>' \
-     -H 'Content-Type: application/json' \
-     -d '{"typing": false}'
-   ```
-   Expected: Next /sync shows `user_ids: []`
+### CRITICAL (Must Fix)
+1. `/Volumes/samsung_t9/maxtryx/packages/surrealdb/migrations/tables/076_typing_notification.surql` - Schema update
+2. `/Volumes/samsung_t9/maxtryx/packages/surrealdb/src/repository/federation.rs` - Table name & field updates
+3. `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs` - Add local storage
+4. `/Volumes/samsung_t9/maxtryx/packages/surrealdb/src/repository/sync.rs` - Add typing query & m.typing construction
 
-4. **Authorization check**:
-   ```bash
-   curl -X PUT 'http://localhost:8008/_matrix/client/v3/rooms/!room:example.com/typing/@bob:example.com' \
-     -H 'Authorization: Bearer <alice_token>' \
-     -H 'Content-Type: application/json' \
-     -d '{"typing": true}'
-   ```
-   Expected: 403 Forbidden
+### IMPORTANT (Should Fix)
+5. `/Volumes/samsung_t9/maxtryx/packages/server/src/main.rs` - Spawn cleanup task
+6. `/Volumes/samsung_t9/maxtryx/packages/server/src/tasks/typing_cleanup.rs` - Create new file
 
-## Related Files Reference
+---
 
-### Existing Implementation
-- [packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs](../../packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/by_user_id.rs) - PUT endpoint handler
-- [packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/mod.rs](../../packages/server/src/_matrix/client/v3/rooms/by_room_id/typing/mod.rs) - Module declaration
-- [packages/surrealdb/src/repository/federation.rs](../../packages/surrealdb/src/repository/federation.rs#L1330-L1377) - `process_typing_edu` method
-- [packages/server/src/_matrix/federation/v1/send/by_txn_id.rs](../../packages/server/src/_matrix/federation/v1/send/by_txn_id.rs#L608) - Federation EDU handler
+## Why Rating is 2/10
 
-### Needs Modification
-- [packages/surrealdb/src/repository/sync.rs](../../packages/surrealdb/src/repository/sync.rs#L1102) - Ephemeral events query
-- [packages/server/src/_matrix/client/v3/sync/data.rs](../../packages/server/src/_matrix/client/v3/sync/data.rs#L149) - Calls sync repository
-- [packages/server/src/_matrix/client/v3/sync/handlers.rs](../../packages/server/src/_matrix/client/v3/sync/handlers.rs#L344) - Main sync handler
+### What Works (2 points)
+- ✓ PUT endpoint exists and handles requests correctly
+- ✓ Authorization validation works
+- ✓ Federation outbound (sending to remote servers) functions
 
-### Pattern Examples
-- See [packages/surrealdb/src/repository/federation.rs](../../packages/surrealdb/src/repository/federation.rs#L1382) for receipt EDU processing (similar pattern)
-- See [packages/server/src/main.rs](../../packages/server/src/main.rs) for background task spawning examples
-- See [packages/server/src/_matrix/client/v3/sync/handlers.rs](../../packages/server/src/_matrix/client/v3/sync/handlers.rs) for sync response construction
+### What's Broken (8 points deducted)
+- ✗ **CRITICAL**: Table name mismatch breaks all database operations
+- ✗ **CRITICAL**: Schema incompatibility prevents proper data storage
+- ✗ **CRITICAL**: Federation inbound fails (database errors)
+- ✗ **CRITICAL**: Local storage completely missing
+- ✗ **CRITICAL**: Sync integration non-existent
+- ✗ No background cleanup (table bloat over time)
+- ✗ Entity type defined but unused
+- ✗ No proper timeout expiration handling
 
-## Implementation Notes
+### Production Impact
+If deployed as-is:
+- Local typing indicators: BROKEN (nothing stored)
+- Remote typing indicators: BROKEN (database errors on receive)
+- Client sync: BROKEN (no typing data returned)
+- Federation: PARTIALLY WORKING (can send but can't receive)
 
-### Why Typing Events Use Separate Table
+**Conclusion**: Feature is unusable in current state. Database schema must be fixed before ANY other work can proceed.
 
-The `typing_events` table is separate from `ephemeral_events` because:
-1. Typing has unique expiration semantics (automatic 30s timeout)
-2. Needs efficient querying by room and expiration time
-3. Matrix spec requires aggregation (all users typing → single event)
-4. Different from other ephemeral events like receipts
+---
 
-### Expiration Strategy
-
-Two-phase approach:
-1. **Query-time filtering**: `WHERE expires_at > time::now()` ensures only active typers returned
-2. **Background cleanup**: Optional periodic DELETE to prevent table growth
-
-Query-time filtering is sufficient for correctness. Background cleanup is optimization.
-
-### Federation Considerations
-
-The existing code already handles federation correctly:
-- Outgoing: PUT endpoint sends EDUs to remote servers
-- Incoming: Federation handler processes EDUs from remote servers
-- Local implementation just fills the local gap
-
-## Priority
-**HIGH** - Critical for user experience in active conversations. Endpoint exists but incomplete implementation means feature appears broken to users.
+/Volumes/samsung_t9/maxtryx/task/SPEC_CLIENT_01_typing_indicators.md

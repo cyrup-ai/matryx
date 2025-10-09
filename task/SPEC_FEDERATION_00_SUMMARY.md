@@ -1,155 +1,206 @@
-# Federation API Spec Compliance - Gap Analysis Summary
+# Federation API Spec Compliance - Remaining Issues
 
-## Overview
-This document summarizes the gaps found between the Matrix Server-Server API specification and the current MaxTryX implementation.
+## QA Review Summary (2025-10-09)
 
-## Total Gaps Identified: 12
+**Rating: 9/10** - Near complete implementation with only 3 stub endpoints remaining
 
-### Critical Priority (4)
-1. **SPEC_FEDERATION_01** - v2 send_join Implementation (STUB)
-2. **SPEC_FEDERATION_03** - send_knock Endpoint (MISSING)
-3. **SPEC_FEDERATION_04** - make_knock Endpoint (MISSING)
-4. **SPEC_FEDERATION_12** - PDU Validation Pipeline Compliance (VERIFICATION NEEDED)
+### Review Findings
 
-### High Priority (4)
-5. **SPEC_FEDERATION_05** - invite v2 Endpoint (MISSING)
-6. **SPEC_FEDERATION_07** - Query Directory Endpoint (MISSING)
-7. **SPEC_FEDERATION_11** - Server Key Query Implementation (VERIFICATION NEEDED)
-8. **SPEC_FEDERATION_01** - v2 send_join (duplicate - STUB)
+Out of 12 originally identified gaps, **9 are FULLY IMPLEMENTED** with production-quality code:
+- ✅ send_knock endpoint (fully implemented)
+- ✅ make_knock endpoint (fully implemented)
+- ✅ invite v2 endpoint (fully implemented)
+- ✅ send_leave v2 endpoint (fully implemented)
+- ✅ public_rooms endpoint (fully implemented)
+- ✅ PDU validation pipeline (complete 6-step implementation)
+- ✅ EDU processing (all types: typing, receipt, presence, device_list, signing_key, direct_to_device)
+- ✅ Server key query (complete with caching and verification)
+- ✅ get_missing_events BFS algorithm (proper breadth-first traversal)
 
-### Medium Priority (4)
-9. **SPEC_FEDERATION_02** - v2 send_leave Implementation (STUB)
-10. **SPEC_FEDERATION_06** - Public Rooms Endpoint (MISSING)
-11. **SPEC_FEDERATION_08** - 3PID onbind Endpoint (MISSING)
-12. **SPEC_FEDERATION_09** - get_missing_events BFS Algorithm (VERIFICATION NEEDED)
-13. **SPEC_FEDERATION_10** - Transaction EDU Processing (VERIFICATION NEEDED)
+### Outstanding Issues: 3 Stub Implementations
 
-## Gap Categories
+## 1. CRITICAL: v2 send_join Stub Implementation
 
-### Complete Implementations ✅
-- PUT /send/{txnId} - Transaction processing
-- GET /event_auth/{roomId}/{eventId} - Auth chain retrieval
-- GET /event/{eventId} - Single event retrieval
-- GET /state/{roomId} - Room state snapshot
-- GET /state_ids/{roomId} - Room state IDs
-- GET /backfill/{roomId} - Historical events
-- GET /make_join/{roomId}/{userId} - Join template
-- PUT /send_join/v1/{roomId}/{eventId} - Join event (v1)
-- GET /make_leave/{roomId}/{userId} - Leave template
-- PUT /send_leave/v1/{roomId}/{eventId} - Leave event (v1)
-- GET /openid/userinfo - OpenID validation
-- POST /user/keys/query - Device keys
-- POST /user/keys/claim - One-time keys
+**File:** `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/federation/v2/send_join/by_room_id/by_event_id.rs`
 
-### Stub Implementations (Need Completion) ⚠️
-- PUT /send_join/v2/{roomId}/{eventId} - Returns hardcoded JSON
-- PUT /send_leave/v2/{roomId}/{eventId} - Returns hardcoded JSON
+**Current State:** Returns hardcoded JSON response without validation
 
-### Missing Implementations ❌
-- GET /make_knock/{roomId}/{userId}
-- PUT /send_knock/{roomId}/{eventId}
-- PUT /invite/v2/{roomId}/{eventId}
-- GET /publicRooms
-- GET /query/directory
-- PUT /3pid/onbind
+```rust
+pub async fn put(
+    Path((_room_id, _event_id)): Path<(String, String)>,
+    Json(_payload): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    Ok(Json(json!({
+        "state": [],
+        "auth_chain": [],
+        "event": {
+            "type": "m.room.member",
+            "state_key": "@joiner:example.com",
+            "content": {
+                "membership": "join"
+            }
+        }
+    })))
+}
+```
 
-### Need Verification ✔️
-- PDU validation pipeline (6-step process)
-- EDU processing (all types)
-- Server key queries
-- get_missing_events BFS algorithm
+**Required Implementation:**
 
-## Implementation Status by Spec Section
+The v2 send_join endpoint MUST:
+1. Parse X-Matrix authentication header
+2. Validate server signature
+3. Extract and validate join event from payload
+4. Run full PDU validation pipeline (use existing PduValidator)
+5. Validate user belongs to requesting server
+6. Check room membership state
+7. Store validated join event in database
+8. Update membership record to "join" state
+9. Add server signature to the event
+10. Return v2 response format with:
+    - `state`: Current room state events
+    - `auth_chain`: Authorization chain for the join
+    - `event`: The signed join event (NOT inside `room_state`)
+    - `members_omitted`: Boolean flag (optional)
+    - `servers_in_room`: List of participating servers (optional)
 
-### Core Federation ✅ (Mostly Complete)
-- ✅ Authentication (X-Matrix)
-- ✅ Transactions
-- ✅ PDUs (needs validation verification)
-- ✅ EDUs (needs verification)
+**Key Differences from v1:**
+- v1 returns: `[200, {...}]` (tuple format)
+- v2 returns: `{...}` (direct object format)
+- v2 includes additional metadata fields
 
-### Room Operations
-- ✅ Room Joins (v1 complete, v2 stub)
-- ✅ Room Leaves (v1 complete, v2 stub)
-- ⚠️ Room Invites (v1 exists, v2 missing)
-- ❌ Room Knocking (completely missing)
-
-### Event Retrieval ✅
-- ✅ Backfilling
-- ✅ Event retrieval
-- ✅ Auth chain
-- ✅ State snapshots
-- ✔️ Missing events (needs BFS verification)
-
-### Discovery & Queries
-- ✔️ Server keys (exists, needs verification)
-- ❌ Directory queries (missing)
-- ❌ Public rooms (missing)
-
-### Identity & 3PID
-- ✔️ OpenID (exists)
-- ❌ 3PID onbind (missing)
-- ✅ Exchange third party invite (exists)
-
-## Room Version Support
-Current implementation should verify support for:
-- Room version 1-10
-- Knocking requires version 7+
-- Restricted rooms require version 8+
-- Proper auth rules per version
-
-## Next Steps
-
-### Immediate (Critical)
-1. Complete v2 send_join stub → full implementation
-2. Implement make_knock endpoint
-3. Implement send_knock endpoint
-4. Verify PDU validation follows 6-step spec
-
-### Short Term (High Priority)
-5. Implement invite v2 endpoint
-6. Implement query/directory endpoint
-7. Verify server key query compliance
-
-### Medium Term
-8. Complete v2 send_leave stub
-9. Implement public rooms endpoint
-10. Implement 3pid/onbind endpoint
-11. Verify get_missing_events BFS
-12. Verify EDU processing compliance
-
-## Testing Requirements
-
-Each implementation should verify:
-- ✅ Signature validation
-- ✅ Authorization rules
-- ✅ Room version compatibility
-- ✅ Error handling
-- ✅ Server ACL compliance
-- ✅ Rate limiting
-- ✅ Event propagation
-
-## Spec References
-- Matrix Server-Server API: `/Volumes/samsung_t9/maxtryx/spec/server/`
-- Room Versions: https://spec.matrix.org/unstable/rooms/
-- Auth Rules: spec/server/06-pdus.md
-- Federation Flow: spec/server/09-room-joins.md
-
-## Files Created
-- SPEC_FEDERATION_01_send_join_v2_stub.md
-- SPEC_FEDERATION_02_send_leave_v2_stub.md
-- SPEC_FEDERATION_03_send_knock_missing.md
-- SPEC_FEDERATION_04_make_knock_missing.md
-- SPEC_FEDERATION_05_invite_v2_missing.md
-- SPEC_FEDERATION_06_public_rooms_missing.md
-- SPEC_FEDERATION_07_query_directory_missing.md
-- SPEC_FEDERATION_08_3pid_onbind_missing.md
-- SPEC_FEDERATION_09_get_missing_events_stub.md
-- SPEC_FEDERATION_10_transaction_edu_processing.md
-- SPEC_FEDERATION_11_server_keys_query.md
-- SPEC_FEDERATION_12_pdu_validation_compliance.md
+**Reference Implementation Pattern:**
+See `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/federation/v2/send_leave/by_room_id/by_event_id.rs` for complete pattern including:
+- Proper authentication
+- PDU validation using PduValidator
+- Database operations
+- Signature addition
+- Correct v2 response format
 
 ---
 
-**Analysis Date:** 2025-10-08
-**Analyzer:** Claude (Sonnet 4.5)
-**Status:** Complete
+## 2. HIGH: Query Directory Stub
+
+**File:** `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/federation/v1/query/directory.rs`
+
+**Current State:** Returns empty JSON `{}`
+
+```rust
+pub async fn get() -> Result<Json<Value>, StatusCode> {
+    Ok(Json(json!({})))
+}
+```
+
+**Required Implementation:**
+
+GET `/_matrix/federation/v1/query/directory?room_alias={roomAlias}`
+
+Must implement room alias resolution:
+1. Parse X-Matrix authentication
+2. Validate server signature
+3. Extract `room_alias` query parameter
+4. Validate alias format (`#alias:server.com`)
+5. Check if alias is local to this server
+6. Query room_aliases table for the alias
+7. Return room ID and participating servers
+
+**Response Format:**
+```json
+{
+  "room_id": "!roomid:server.com",
+  "servers": ["server.com", "other-server.com"]
+}
+```
+
+**Error Cases:**
+- `M_NOT_FOUND`: Alias not found
+- `M_INVALID_PARAM`: Invalid alias format
+
+**Database Query:**
+```sql
+SELECT room_id, servers FROM room_aliases WHERE alias = $alias
+```
+
+---
+
+## 3. MEDIUM: 3PID onbind Stub
+
+**File:** `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`
+
+**Current State:** Returns empty JSON `{}`
+
+```rust
+pub async fn put(Json(_payload): Json<Value>) -> Result<Json<Value>, StatusCode> {
+    Ok(Json(json!({})))
+}
+```
+
+**Required Implementation:**
+
+PUT `/_matrix/federation/v1/3pid/onbind`
+
+Notifies server when a third-party identifier is bound to a user on an identity server.
+
+**Request Payload:**
+```json
+{
+  "invites": [{
+    "medium": "email",
+    "address": "user@example.com",
+    "mxid": "@user:server.com",
+    "room_id": "!room:server.com",
+    "sender": "@inviter:server.com",
+    "signed": {
+      "mxid": "@user:server.com",
+      "token": "random_token",
+      "signatures": {...}
+    }
+  }]
+}
+```
+
+**Implementation Steps:**
+1. Parse X-Matrix authentication
+2. Validate server signature
+3. Extract invites array from payload
+4. For each invite:
+   - Validate mxid belongs to this server
+   - Verify signed object signatures
+   - Check room_id exists
+   - Create pending third-party invite in database
+   - Send invite event to room
+5. Return empty object `{}`
+
+**Database Operations:**
+- Store third_party_invites with pending status
+- Create m.room.third_party_invite event
+- Link invite to user when they register with matching 3PID
+
+**Validation:**
+- MUST verify signatures on signed object
+- MUST check mxid belongs to local server
+- MUST validate room exists
+- SHOULD rate-limit invites per IP/server
+
+---
+
+## Testing Requirements
+
+For each implementation:
+1. Unit tests for validation logic
+2. Integration tests with mock federation server
+3. Signature verification tests
+4. Error handling for all edge cases
+5. Database transaction rollback on errors
+
+## Matrix Specification References
+
+- **v2 send_join**: https://spec.matrix.org/v1.11/server-server-api/#put_matrixfederationv2send_joinroomideventid
+- **Query Directory**: https://spec.matrix.org/v1.11/server-server-api/#get_matrixfederationv1querydirectory
+- **3PID onbind**: https://spec.matrix.org/v1.11/server-server-api/#put_matrixfederationv13pidonbind
+
+---
+
+**Review Date:** 2025-10-09  
+**Reviewer:** Claude (Sonnet 4.5)  
+**Previous Issues Resolved:** 9/12 (75% completion)  
+**Remaining Work:** 3 stub implementations (25%)
