@@ -16,8 +16,6 @@ DEFINE FIELD token ON TABLE registration_token TYPE string
 
 DEFINE FIELD uses_allowed ON TABLE registration_token TYPE option<int>;
 
-DEFINE FIELD uses_remaining ON TABLE registration_token TYPE option<int>;
-
 DEFINE FIELD pending ON TABLE registration_token TYPE bool DEFAULT false;
 
 DEFINE FIELD completed ON TABLE registration_token TYPE bool DEFAULT false;

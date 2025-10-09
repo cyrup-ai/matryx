@@ -126,7 +126,7 @@ impl<C: Connection> BridgeRepository<C> {
             total_rooms: room_count.unwrap_or(0) as u64,
             messages_bridged_24h: perf_metrics.messages_24h,
             uptime_percentage: perf_metrics.uptime_percentage,
-            last_error: None, // Would need error tracking
+            last_error: None, // No error message storage in schema (only error counts tracked)
         })
     }
 

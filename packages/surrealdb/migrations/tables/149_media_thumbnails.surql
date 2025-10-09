@@ -5,7 +5,7 @@
 -- Repositories: media.rs
 -- =====================================================
 
--- Media thumbnail storage (base64 encoded)
+-- Media thumbnail storage (JSON array serialization)
 DEFINE TABLE media_thumbnails SCHEMAFULL
     PERMISSIONS
         FOR select WHERE true
@@ -27,7 +27,7 @@ DEFINE FIELD method ON TABLE media_thumbnails TYPE string
 
 DEFINE FIELD thumbnail_data ON TABLE media_thumbnails TYPE string 
     ASSERT string::is::not::empty($value);
-    -- Stores base64-encoded thumbnail binary data
+    -- Stores thumbnail binary data as JSON array (Vec<u8> serialization via SurrealDB)
 
 DEFINE FIELD created_at ON TABLE media_thumbnails TYPE datetime DEFAULT time::now();
 

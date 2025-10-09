@@ -5,7 +5,7 @@
 -- Repositories: media.rs
 -- =====================================================
 
--- Media file content storage (base64 encoded)
+-- Media file content storage (JSON array serialization)
 DEFINE TABLE media_content SCHEMAFULL
     PERMISSIONS
         FOR select WHERE true
@@ -20,7 +20,7 @@ DEFINE FIELD server_name ON TABLE media_content TYPE string
 
 DEFINE FIELD content ON TABLE media_content TYPE string 
     ASSERT string::is::not::empty($value);
-    -- Stores base64-encoded binary content
+    -- Stores binary content as JSON array (Vec<u8> serialization via SurrealDB)
 
 DEFINE FIELD content_type ON TABLE media_content TYPE string 
     ASSERT string::is::not::empty($value);
