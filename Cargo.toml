@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "packages/client",
     "packages/entity", 
     "packages/server",
     "packages/surrealdb",

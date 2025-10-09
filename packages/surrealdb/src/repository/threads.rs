@@ -543,7 +543,7 @@ impl<C: Connection> ThreadsRepository<C> {
         room_id: &str,
         thread_root_id: &str,
         user_id: &str,
-        event_id: &str,
+        _event_id: &str,
     ) -> Result<(), RepositoryError> {
         // Check if user already participates in this thread
         let existing_query = "

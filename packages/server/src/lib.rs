@@ -1,4 +1,4 @@
-// Deny unwrap/expect in production code to enforce proper error handling
+// Deny unwrap/expect to enforce proper error handling
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 // Allow unwrap/expect in test code

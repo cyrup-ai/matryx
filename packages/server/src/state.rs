@@ -78,6 +78,8 @@ pub struct AppState {
     pub outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
     /// Email service for sending verification and notification emails
     pub email_service: Option<Arc<crate::email::EmailService>>,
+    /// Server start time for uptime calculation
+    pub start_time: std::time::Instant,
 }
 
 impl AppState {
@@ -89,6 +91,7 @@ impl AppState {
         http_client: Arc<reqwest::Client>,
         event_signer: Arc<EventSigner>,
         dns_resolver: Arc<MatrixDnsResolver>,
+        outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Initialize OAuth2 service
         let oauth2_repo = OAuth2Repository::new(db.clone());
@@ -154,6 +157,7 @@ impl AppState {
             http_client.clone(),
             event_signer.clone(),
             homeserver_name.clone(),
+            config.use_https,
         ));
 
         // Initialize push engine
@@ -182,8 +186,7 @@ impl AppState {
         // Initialize filter cache for sync optimization
         let filter_cache = Arc::new(FilterCache::new());
 
-        // Create outbound queue channel
-        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+        // Use the provided outbound channel (no dummy creation needed)
 
         Ok(Self {
             db,
@@ -213,6 +216,7 @@ impl AppState {
             database_health_repo,
             outbound_tx,
             email_service,
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -226,6 +230,7 @@ impl AppState {
         http_client: Arc<reqwest::Client>,
         event_signer: Arc<EventSigner>,
         dns_resolver: Arc<MatrixDnsResolver>,
+        outbound_tx: mpsc::UnboundedSender<OutboundEvent>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Initialize OAuth2 service
         let oauth2_repo = OAuth2Repository::new(db.clone());
@@ -318,6 +323,7 @@ impl AppState {
             http_client.clone(),
             event_signer.clone(),
             homeserver_name.clone(),
+            config.use_https,
         ));
 
         // Initialize push engine
@@ -343,8 +349,7 @@ impl AppState {
             None
         };
 
-        // Create outbound queue channel
-        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+        // Use the provided outbound channel (no dummy creation needed)
 
         Ok(Self {
             db,
@@ -374,6 +379,7 @@ impl AppState {
             database_health_repo,
             outbound_tx,
             email_service,
+            start_time: std::time::Instant::now(),
         })
     }
 

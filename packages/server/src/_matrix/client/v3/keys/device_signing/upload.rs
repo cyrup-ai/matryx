@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -64,7 +65,7 @@ pub async fn post(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<DeviceSigningUploadRequest>,
-) -> Result<Json<Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let auth = extract_matrix_auth(&headers, &state.session_service).await.map_err(|e| {
         error!("Device signing upload failed - authentication extraction failed: {}", e);
         StatusCode::UNAUTHORIZED
@@ -88,8 +89,112 @@ pub async fn post(
             user_id,
             auth_data.get("type").and_then(|v| v.as_str()).unwrap_or("unknown")
         );
-        // TODO: Implement proper UIA (User Interactive Authentication) validation
-        // This should validate the auth data against current UIA session flows
+
+        // Extract auth type and session from auth data
+        let auth_type = auth_data.get("type")
+            .and_then(|v| v.as_str())
+            .ok_or(StatusCode::BAD_REQUEST)?;
+
+        let session_id = auth_data.get("session")
+            .and_then(|v| v.as_str())
+            .ok_or(StatusCode::BAD_REQUEST)?;
+
+        // Parse auth data into UiaAuth struct
+        let uia_auth = crate::auth::uia::UiaAuth {
+            auth_type: auth_type.to_string(),
+            session: Some(session_id.to_string()),
+            auth_data: {
+                let mut data = std::collections::HashMap::new();
+                if let Some(obj) = auth_data.as_object() {
+                    for (key, value) in obj {
+                        if key != "type" && key != "session" {
+                            data.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                data
+            },
+        };
+
+        // Process UIA authentication
+        match state.uia_service.process_auth(session_id, uia_auth).await {
+            Ok(uia_response) => {
+                // Check if UIA flow is completed
+                if uia_response.completed.as_ref().map(|c| !c.is_empty()).unwrap_or(false) {
+                    // Get the session to check if it's truly completed
+                    let session = state.uia_service.uia_repo.get_session(session_id).await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    if let Some(session) = session {
+                        if !session.completed {
+                            // More stages required - return 401 with updated completed stages
+                            return Ok((StatusCode::UNAUTHORIZED, Json(json!({
+                                "flows": uia_response.flows,
+                                "params": uia_response.params,
+                                "session": uia_response.session,
+                                "completed": uia_response.completed,
+                                "errcode": "M_FORBIDDEN",
+                                "error": "Additional authentication required"
+                            }))).into_response());
+                        }
+                        // Session is completed - delete it and proceed with request
+                        let _ = state.uia_service.uia_repo.delete_session(session_id).await;
+                    }
+                } else {
+                    // First stage completed but more required
+                    return Ok((StatusCode::UNAUTHORIZED, Json(json!({
+                        "flows": uia_response.flows,
+                        "params": uia_response.params,
+                        "session": uia_response.session,
+                        "completed": uia_response.completed,
+                        "errcode": "M_FORBIDDEN",
+                        "error": "Additional authentication required"
+                    }))).into_response());
+                }
+            },
+            Err(uia_error) => {
+                // Authentication failed or session issue
+                return Ok((StatusCode::UNAUTHORIZED, Json(json!({
+                    "flows": uia_error.flows,
+                    "params": uia_error.params,
+                    "session": uia_error.session,
+                    "completed": uia_error.completed,
+                    "errcode": uia_error.errcode,
+                    "error": uia_error.error
+                }))).into_response());
+            }
+        }
+    } else {
+        // No auth data provided - initiate UIA flow
+        use crate::auth::uia::UiaFlow;
+
+        let flows = vec![
+            UiaFlow {
+                stages: vec!["m.login.password".to_string()],
+            }
+        ];
+
+        let params = std::collections::HashMap::new();
+
+        // Start new UIA session
+        let session = state.uia_service.start_session(
+            Some(&user_id),
+            None,
+            flows.clone(),
+            params.clone(),
+        ).await.map_err(|e| {
+            error!("Failed to start UIA session: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Return 401 with UIA flow information
+        return Ok((StatusCode::UNAUTHORIZED, Json(json!({
+            "flows": flows,
+            "params": params,
+            "session": session.session_id,
+            "errcode": "M_FORBIDDEN",
+            "error": "User-interactive authentication required"
+        }))).into_response());
     }
 
     // Store master key
@@ -161,5 +266,5 @@ pub async fn post(
         info!("User-signing key uploaded for user: {}", user_id);
     }
 
-    Ok(Json(json!({})))
+    Ok(Json(json!({})).into_response())
 }

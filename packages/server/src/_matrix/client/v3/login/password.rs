@@ -1,7 +1,7 @@
 use crate::utils::session_helpers::create_secure_session_cookie;
 use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::State};
 use bcrypt::verify;
 use chrono::Utc;
 use serde::Deserialize;
@@ -12,7 +12,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::LoginResponse;
+use crate::auth::errors::MatrixAuthError;
 use crate::auth::uia::UserIdentifier;
+use crate::config::ServerConfig;
 use crate::state::AppState;
 use matryx_entity::types::{Device, Session, User};
 use matryx_surrealdb::repository::{
@@ -23,7 +25,7 @@ use matryx_surrealdb::repository::{
 pub struct PasswordLoginRequest {
     #[serde(rename = "type")]
     pub login_type: String,
-    pub user: Option<String>, // Keep for backward compatibility
+    pub user: Option<String>,
     pub identifier: Option<UserIdentifier>, // Matrix spec UserIdentifier support
     pub password: String,
     pub device_id: Option<String>,
@@ -42,17 +44,17 @@ pub enum LoginError {
     SessionCreationFailed,
 }
 
-impl From<LoginError> for StatusCode {
+impl From<LoginError> for MatrixAuthError {
     fn from(error: LoginError) -> Self {
         match error {
-            LoginError::InvalidRequest => StatusCode::BAD_REQUEST,
-            LoginError::InvalidCredentials => StatusCode::FORBIDDEN,
-            LoginError::UserNotFound => StatusCode::FORBIDDEN,
-            LoginError::UserDeactivated => StatusCode::FORBIDDEN,
-            LoginError::DatabaseError => StatusCode::INTERNAL_SERVER_ERROR,
-            LoginError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-            LoginError::DeviceCreationFailed => StatusCode::INTERNAL_SERVER_ERROR,
-            LoginError::SessionCreationFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            LoginError::InvalidRequest => MatrixAuthError::InvalidCredentials,
+            LoginError::InvalidCredentials => MatrixAuthError::InvalidCredentials,
+            LoginError::UserNotFound => MatrixAuthError::InvalidCredentials,
+            LoginError::UserDeactivated => MatrixAuthError::Forbidden,
+            LoginError::DatabaseError => MatrixAuthError::DatabaseError("Database error".to_string()),
+            LoginError::InternalError => MatrixAuthError::DatabaseError("Internal error".to_string()),
+            LoginError::DeviceCreationFailed => MatrixAuthError::DatabaseError("Device creation failed".to_string()),
+            LoginError::SessionCreationFailed => MatrixAuthError::DatabaseError("Session creation failed".to_string()),
         }
     }
 }
@@ -74,7 +76,7 @@ pub async fn post_password_login(
     headers: HeaderMap,
     cookies: Cookies,
     Json(request): Json<PasswordLoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     // Extract user identifier from request (Matrix spec UserIdentifier support)
     let user_string = if let Some(identifier) = &request.identifier {
         match identifier.id_type.as_str() {
@@ -108,7 +110,6 @@ pub async fn post_password_login(
             },
         }
     } else if let Some(user) = &request.user {
-        // Backward compatibility with legacy user field
         user.clone()
     } else {
         warn!("No user identifier provided");
@@ -187,7 +188,7 @@ pub async fn post_password_login(
     cookies.add(session_cookie);
 
     // Build well-known discovery information
-    let well_known = build_well_known_config(&state.homeserver_name);
+    let well_known = build_well_known_config(state.config);
 
     info!("Password login successful for user: {}", user_id);
 
@@ -400,13 +401,13 @@ async fn create_user_session(
 ///
 /// Creates well-known configuration for Matrix client discovery
 /// following Matrix specification for homeserver and identity server URLs.
-fn build_well_known_config(homeserver_name: &str) -> Value {
+fn build_well_known_config(config: &ServerConfig) -> Value {
     json!({
         "m.homeserver": {
-            "base_url": format!("https://{}", homeserver_name)
+            "base_url": config.base_url()
         },
         "m.identity_server": {
-            "base_url": format!("https://identity.{}", homeserver_name)
+            "base_url": config.identity_server_url()
         }
     })
 }

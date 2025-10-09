@@ -11,9 +11,9 @@ DEFINE TABLE room_state_events SCHEMAFULL
         FOR create WHERE $auth.user_id != NONE
         FOR update, delete WHERE $auth.admin = true;
 
-DEFINE FIELD event_id ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD room_id ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD sender ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD event_id ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '$') AND string::contains($value, ':');
+DEFINE FIELD room_id ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
+DEFINE FIELD sender ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD event_type ON TABLE room_state_events TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD state_key ON TABLE room_state_events TYPE string;
 DEFINE FIELD content ON TABLE room_state_events TYPE object DEFAULT {};

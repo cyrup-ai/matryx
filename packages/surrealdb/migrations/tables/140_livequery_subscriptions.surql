@@ -8,7 +8,7 @@
 -- LiveQuery subscription tracking for real-time Matrix /sync
 DEFINE TABLE livequery_subscriptions SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE user_id = $auth.user_id OR $auth.admin = true
+        FOR select WHERE user_id = $auth.user_id OR $auth.admin = true OR $auth.monitoring = true
         FOR create WHERE $auth.user_id != NONE
         FOR delete WHERE user_id = $auth.user_id OR $auth.admin = true;
 
@@ -29,3 +29,5 @@ DEFINE FIELD last_active ON TABLE livequery_subscriptions TYPE datetime DEFAULT 
 -- Indexes based on repository query patterns
 DEFINE INDEX livequery_subscriptions_subscription_id_idx ON TABLE livequery_subscriptions COLUMNS subscription_id UNIQUE;
 DEFINE INDEX livequery_subscriptions_user_idx ON TABLE livequery_subscriptions COLUMNS user_id;
+DEFINE INDEX livequery_subscriptions_last_active_idx ON TABLE livequery_subscriptions COLUMNS last_active;
+DEFINE INDEX livequery_subscriptions_created_idx ON TABLE livequery_subscriptions COLUMNS created_at;

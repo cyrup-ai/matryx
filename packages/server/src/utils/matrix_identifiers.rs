@@ -301,43 +301,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_hostname_with_port() {
-        let parsed = parse_server_name("example.com:8448").unwrap();
+    fn test_parse_hostname_with_port() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_server_name("example.com:8448")?;
         assert_eq!(parsed.hostname, "example.com");
         assert_eq!(parsed.port, 8448);
         assert!(!parsed.is_ip_literal);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_hostname_without_port() {
-        let parsed = parse_server_name("example.com").unwrap();
+    fn test_parse_hostname_without_port() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_server_name("example.com")?;
         assert_eq!(parsed.hostname, "example.com");
         assert_eq!(parsed.port, 8448);
         assert!(!parsed.is_ip_literal);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_ipv4_with_port() {
-        let parsed = parse_server_name("192.168.1.1:8080").unwrap();
+    fn test_parse_ipv4_with_port() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_server_name("192.168.1.1:8080")?;
         assert_eq!(parsed.hostname, "192.168.1.1");
         assert_eq!(parsed.port, 8080);
         assert!(parsed.is_ip_literal);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_ipv6_with_port() {
-        let parsed = parse_server_name("[::1]:8080").unwrap();
+    fn test_parse_ipv6_with_port() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_server_name("[::1]:8080")?;
         assert_eq!(parsed.hostname, "[::1]");
         assert_eq!(parsed.port, 8080);
         assert!(parsed.is_ip_literal);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_ipv6_without_port() {
-        let parsed = parse_server_name("[2001:db8::1]").unwrap();
+    fn test_parse_ipv6_without_port() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_server_name("[2001:db8::1]")?;
         assert_eq!(parsed.hostname, "[2001:db8::1]");
         assert_eq!(parsed.port, 8448);
         assert!(parsed.is_ip_literal);
+        Ok(())
     }
 
     #[test]

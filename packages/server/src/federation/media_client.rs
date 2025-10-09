@@ -34,6 +34,7 @@ pub struct FederationMediaClient {
     http_client: Arc<reqwest::Client>,
     event_signer: Arc<EventSigner>,
     homeserver_name: String,
+    use_https: bool,
 }
 
 impl FederationMediaClient {
@@ -42,8 +43,9 @@ impl FederationMediaClient {
         http_client: Arc<reqwest::Client>,
         event_signer: Arc<EventSigner>,
         homeserver_name: String,
+        use_https: bool,
     ) -> Self {
-        Self { http_client, event_signer, homeserver_name }
+        Self { http_client, event_signer, homeserver_name, use_https }
     }
 
     /// Download media with automatic fallback to deprecated endpoints
@@ -101,8 +103,9 @@ impl FederationMediaClient {
         media_id: &str,
     ) -> Result<MediaDownloadResult, FederationMediaError> {
         // Construct federation endpoint URL
+        let protocol = if self.use_https { "https" } else { "http" };
         let url =
-            format!("https://{}/_matrix/federation/v1/media/download/{}", server_name, media_id);
+            format!("{}://{}/_matrix/federation/v1/media/download/{}", protocol, server_name, media_id);
 
         debug!("Attempting federation media download: url={}", url);
 
@@ -147,9 +150,10 @@ impl FederationMediaClient {
         media_id: &str,
     ) -> Result<MediaDownloadResult, FederationMediaError> {
         // Construct deprecated endpoint URL with required allow_remote=false parameter
+        let protocol = if self.use_https { "https" } else { "http" };
         let url = format!(
-            "https://{}/_matrix/media/v3/download/{}/{}?allow_remote=false",
-            server_name, server_name, media_id
+            "{}://{}/_matrix/media/v3/download/{}/{}?allow_remote=false",
+            protocol, server_name, server_name, media_id
         );
 
         debug!("Attempting deprecated media download: url={}", url);
@@ -314,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_unrecognized_error_with_valid_json() {
-        let _client = create_test_client();
+        let _client = create_test_client().await;
 
         // Mock response would be created here in a real test environment
         // For now, this demonstrates the test structure
@@ -332,9 +336,45 @@ mod tests {
         // Would need to create a mock Response with this body
     }
 
-    fn create_test_client() -> FederationMediaClient {
-        // This would create a test client with mocked dependencies
-        // Implementation would depend on the testing framework used
-        todo!("Implement test client creation")
+    async fn create_test_client() -> FederationMediaClient {
+        use matryx_surrealdb::test_utils::create_test_database;
+        use std::sync::Arc;
+
+        let test_database = create_test_database().await.expect("Failed to create test database");
+        let test_db = test_database.db.clone();
+
+        let session_repo =
+            matryx_surrealdb::repository::session::SessionRepository::new(test_db.clone());
+        let key_server_repo =
+            matryx_surrealdb::repository::key_server::KeyServerRepository::new(test_db.clone());
+
+        let session_service = Arc::new(crate::auth::session_service::MatrixSessionService::new(
+            b"test_secret",
+            b"test_secret",
+            "test.example.org".to_string(),
+            session_repo,
+            key_server_repo,
+        ));
+
+        let http_client = Arc::new(reqwest::Client::new());
+        let well_known_client =
+            Arc::new(crate::federation::well_known_client::WellKnownClient::new(http_client.clone(), true));
+        let dns_resolver = Arc::new(
+            crate::federation::dns_resolver::MatrixDnsResolver::new(well_known_client, true)
+                .expect("Failed to create DNS resolver"),
+        );
+
+        let event_signer = Arc::new(
+            EventSigner::new(
+                session_service,
+                test_db,
+                dns_resolver,
+                "test.example.org".to_string(),
+                "ed25519:test".to_string(),
+            )
+            .expect("Failed to create event signer"),
+        );
+
+        FederationMediaClient::new(http_client, event_signer, "test.example.org".to_string(), true)
     }
 }

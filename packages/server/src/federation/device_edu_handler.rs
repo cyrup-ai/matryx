@@ -162,14 +162,27 @@ impl DeviceEDUHandler {
 
     /// Get device statistics from repository
     pub async fn get_device_stats(&self) -> Result<DeviceStats, DeviceError> {
-        // Note: This is a simplified implementation that doesn't provide exact statistics
-        // In a production system, you would implement a more efficient query in the repository
-        info!("Device statistics requested - returning placeholder stats");
+        info!("Device statistics requested");
+
+        let total_users = self.device_repo
+            .count_unique_users()
+            .await
+            .map_err(|e| DeviceError::DatabaseError(format!("Failed to count users: {:?}", e)))?;
+        
+        let total_devices = self.device_repo
+            .count_total_devices()
+            .await
+            .map_err(|e| DeviceError::DatabaseError(format!("Failed to count devices: {:?}", e)))?;
+        
+        let users_with_devices = self.device_repo
+            .get_users_with_devices()
+            .await
+            .map_err(|e| DeviceError::DatabaseError(format!("Failed to get user list: {:?}", e)))?;
 
         Ok(DeviceStats {
-            total_users: 0,
-            total_devices: 0,
-            users_with_devices: Vec::new(),
+            total_users,
+            total_devices,
+            users_with_devices,
         })
     }
 }

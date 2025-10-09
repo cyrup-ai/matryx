@@ -1,4 +1,5 @@
 use crate::repository::error::RepositoryError;
+use crate::repository::EventRepository;
 
 use matryx_entity::filter::EventFilter;
 use matryx_entity::types::{
@@ -8,6 +9,7 @@ use matryx_entity::types::{
     PowerLevels,
     Room,
     SpaceHierarchyResponse as HierarchyResponse,
+    SpaceHierarchyStrippedStateEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1499,6 +1501,10 @@ impl RoomRepository {
             }
         })?;
 
+        // Get old room's creation event for predecessor
+        let old_creation_event = self.get_room_creation_event(room_id).await?;
+        let old_creation_event_id = old_creation_event.event_id.clone();
+
         // Create new room with upgraded version
         let new_room = Room {
             room_id: new_room_id.clone(),
@@ -1520,7 +1526,7 @@ impl RoomRepository {
             room_type: current_room.room_type.clone(),
             predecessor: Some(serde_json::json!({
                 "room_id": room_id,
-                "event_id": "$" // TODO: Get actual creation event ID
+                "event_id": old_creation_event_id
             })),
             federate: current_room.federate,
             tombstone: None,
@@ -1532,12 +1538,33 @@ impl RoomRepository {
         // Create the new room
         self.create(&new_room).await?;
 
+        // Create EventRepository to store the tombstone event
+        let event_repo = EventRepository::new(self.db.clone());
+
+        // Create the tombstone event content
+        let tombstone_content = serde_json::json!({
+            "body": "This room has been replaced",
+            "replacement_room": new_room_id.clone()
+        });
+
+        // Create and persist the tombstone event
+        let tombstone_event = event_repo.create_room_event(
+            room_id,
+            "m.room.tombstone",
+            &current_room.creator,
+            tombstone_content,
+            Some("".to_string())
+        ).await?;
+
+        // Store the tombstone event ID
+        let tombstone_event_id = tombstone_event.event_id.clone();
+
         // Update old room with successor
         let mut old_room = current_room;
         old_room.tombstone = Some(serde_json::json!({
             "replacement_room": new_room_id,
             "body": "This room has been replaced",
-            "event_id": "$" // TODO: Get actual tombstone event ID
+            "event_id": tombstone_event_id
         }));
         self.update(&old_room).await?;
 
@@ -1597,6 +1624,100 @@ impl RoomRepository {
             .await?;
 
         Ok(())
+    }
+
+    /// Get the count of joined members in a room
+    async fn get_joined_member_count(&self, room_id: &str) -> Result<i64, RepositoryError> {
+        let query = "
+            SELECT count()
+            FROM membership
+            WHERE room_id = $room_id
+              AND membership = 'join'
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+        let count: Option<i64> = response.take(0)?;
+        Ok(count.unwrap_or(0))
+    }
+
+    /// Get m.space.child state events for a space room (WITH origin_server_ts per Matrix spec)
+    async fn get_children_state_events(&self, room_id: &str) -> Result<Vec<SpaceHierarchyStrippedStateEvent>, RepositoryError> {
+        let query = "
+            SELECT content, origin_server_ts, sender, state_key, event_type
+            FROM event
+            WHERE room_id = $room_id
+              AND event_type = 'm.space.child'
+            ORDER BY origin_server_ts DESC
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+
+        #[derive(Deserialize)]
+        struct EventData {
+            content: matryx_entity::types::EventContent,
+            origin_server_ts: i64,
+            sender: String,
+            state_key: String,
+            event_type: String,
+        }
+
+        let events: Vec<EventData> = response.take(0)?;
+
+        Ok(events.into_iter().map(|e| {
+            SpaceHierarchyStrippedStateEvent::new(
+                e.content,
+                e.origin_server_ts,
+                e.sender,
+                e.state_key,
+                e.event_type,
+            )
+        }).collect())
+    }
+
+    /// Get allowed room IDs for restricted rooms
+    async fn get_allowed_room_ids(&self, room_id: &str) -> Result<Option<Vec<String>>, RepositoryError> {
+        // Get the m.room.join_rules state event
+        let join_rules_event = self.get_room_state_event(room_id, "m.room.join_rules", "").await?;
+
+        if let Some(event) = join_rules_event {
+            // Check if it's a restricted or knock_restricted room
+            if let Some(join_rule) = event.content.get("join_rule").and_then(|v| v.as_str()) {
+                if join_rule == "restricted" || join_rule == "knock_restricted" {
+                    // Extract room IDs from allow conditions
+                    if let Some(allow) = event.content.get("allow").and_then(|v| v.as_array()) {
+                        let room_ids: Vec<String> = allow
+                            .iter()
+                            .filter_map(|condition| {
+                                if condition.get("type")?.as_str()? == "m.room_membership" {
+                                    condition.get("room_id")?.as_str().map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        if !room_ids.is_empty() {
+                            return Ok(Some(room_ids));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get encryption algorithm for a room
+    async fn get_room_encryption(&self, room_id: &str) -> Result<Option<String>, RepositoryError> {
+        let encryption_event = self.get_room_state_event(room_id, "m.room.encryption", "").await?;
+
+        if let Some(event) = encryption_event {
+            if let Some(algorithm) = event.content.get("algorithm").and_then(|v| v.as_str()) {
+                return Ok(Some(algorithm.to_string()));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Get room hierarchy (spaces)
@@ -1687,7 +1808,7 @@ impl RoomRepository {
                             children_state: Vec::new(), // Would recursively get children if depth allows
                             room_type: child_room.room_type,
                             name: child_room.name,
-                            num_joined_members: 0, // TODO: Get actual member count
+                            num_joined_members: self.get_joined_member_count(child_room_id).await.unwrap_or(0),
                             topic: child_room.topic,
                             world_readable: child_room.history_visibility == Some("world_readable".to_string()),
                             guest_can_join: child_room.guest_access == Some("can_join".to_string()),
@@ -1751,17 +1872,17 @@ impl RoomRepository {
         let parent_room = SpaceHierarchyParentRoom {
             room_id: room.room_id.clone(),
             canonical_alias: room.canonical_alias,
-            children_state: Vec::new(), // TODO: Implement children state
+            children_state: self.get_children_state_events(&room.room_id).await.unwrap_or_else(|_| Vec::new()),
             room_type: room.room_type,
             name: room.name,
-            num_joined_members: 0, // TODO: Get actual member count
+            num_joined_members: self.get_joined_member_count(&room.room_id).await.unwrap_or(0),
             topic: room.topic,
             world_readable: room.history_visibility == Some("world_readable".to_string()),
             guest_can_join: room.guest_access == Some("can_join".to_string()),
             join_rule: Some(room.join_rules.unwrap_or_else(|| "invite".to_string())),
             avatar_url: room.avatar_url,
-            allowed_room_ids: None, // TODO: Implement space access control
-            encryption: None,       // TODO: Get encryption info from room state
+            allowed_room_ids: self.get_allowed_room_ids(&room.room_id).await.unwrap_or(None),
+            encryption: self.get_room_encryption(&room.room_id).await.unwrap_or(None),
             room_version: Some(room.room_version),
         };
 

@@ -29,49 +29,48 @@ mod tests {
     use axum::http::{Method, Uri};
 
     #[test]
-    fn test_extract_request_uri_with_query_params() {
+    fn test_extract_request_uri_with_query_params() -> Result<(), Box<dyn std::error::Error>> {
         let uri: Uri = "/_matrix/federation/v1/media/download/test?timeout_ms=5000&animated=true"
-            .parse()
-            .unwrap();
+            .parse()?;
 
         let request = Request::builder()
             .method(Method::GET)
             .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+            .body(Body::empty())?;
 
         let extracted_uri = extract_request_uri(&request);
         assert_eq!(
             extracted_uri,
             "/_matrix/federation/v1/media/download/test?timeout_ms=5000&animated=true"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_extract_request_uri_without_query_params() {
-        let uri: Uri = "/_matrix/federation/v1/media/download/test".parse().unwrap();
+    fn test_extract_request_uri_without_query_params() -> Result<(), Box<dyn std::error::Error>> {
+        let uri: Uri = "/_matrix/federation/v1/media/download/test".parse()?;
 
         let request = Request::builder()
             .method(Method::GET)
             .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+            .body(Body::empty())?;
 
         let extracted_uri = extract_request_uri(&request);
         assert_eq!(extracted_uri, "/_matrix/federation/v1/media/download/test");
+        Ok(())
     }
 
     #[test]
-    fn test_extract_request_uri_root_path() {
-        let uri: Uri = "/".parse().unwrap();
+    fn test_extract_request_uri_root_path() -> Result<(), Box<dyn std::error::Error>> {
+        let uri: Uri = "/".parse()?;
 
         let request = Request::builder()
             .method(Method::GET)
             .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+            .body(Body::empty())?;
 
         let extracted_uri = extract_request_uri(&request);
         assert_eq!(extracted_uri, "/");
+        Ok(())
     }
 }

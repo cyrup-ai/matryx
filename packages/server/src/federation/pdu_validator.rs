@@ -196,6 +196,7 @@ impl PduValidator {
             state.http_client.clone(),
             state.event_signer.clone(),
             state.homeserver_name.clone(),
+            state.config.use_https,
         ));
 
         Self::new(PduValidatorParams {
@@ -1233,8 +1234,8 @@ impl PduValidator {
         // Room version-specific hash validation per Matrix specification
         let supports_sha256 = match room_version {
             "1" | "2" | "3" | "4" | "5" => {
-                // Legacy room versions - SHA-256 optional but recommended
-                debug!("Legacy room version {}: SHA-256 validation optional", room_version);
+                // Room versions 1-5 - SHA-256 optional but recommended per Matrix spec
+                debug!("Room version {}: SHA-256 validation optional per spec", room_version);
                 true
             },
             "6" | "7" | "8" | "9" | "10" | "11" => {
@@ -1351,7 +1352,7 @@ impl PduValidator {
             )));
         }
 
-        // Check if it looks like a valid hash-based ID or legacy ID
+        // Check if it looks like a valid hash-based ID or v1-v5 format ID
         let event_id_content = &event_id[1..];
         if event_id_content.len() < 10 {
             return Err(PduValidationError::InvalidFormat(format!(

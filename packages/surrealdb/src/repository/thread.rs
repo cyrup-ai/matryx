@@ -204,6 +204,8 @@ impl<C: Connection> ThreadRepository<C> {
             count,
             participated: false, // This will be set by the caller based on user context
             participants,
+            notification_count: None,
+            highlight_count: None,
         })
     }
 

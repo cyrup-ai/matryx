@@ -479,14 +479,29 @@ impl RoomAliasResolver {
             .get(url.as_str())
             .header("User-Agent", format!("Matrix/{}", env!("CARGO_PKG_VERSION")));
 
-        // Sign request with X-Matrix authentication (SUBTASK8)
-        // TODO: Fix sign_federation_request method visibility issue
-        // let signed_request = state.event_signer
-        //     .as_ref()
-        //     .sign_federation_request(request, &state.homeserver_name)
-        //     .await
-        //     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let signed_request = request;
+        // Sign request with X-Matrix authentication
+        // Build URI from path and query (e.g., "/_matrix/federation/v1/query/directory?room_alias=...")
+        let uri = if let Some(query) = url.query() {
+            format!("{}?{}", url.path(), query)
+        } else {
+            url.path().to_string()
+        };
+
+        // Sign the federation request using EventSigner
+        let signed_request = state
+            .event_signer
+            .sign_federation_request(
+                request,
+                "GET",
+                &uri,
+                server_name,
+                None, // No content for GET requests
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to sign federation request: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
         // Execute request
         let response = signed_request.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;

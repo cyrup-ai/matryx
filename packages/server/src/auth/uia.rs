@@ -97,7 +97,7 @@ pub struct ThreepidCredentials {
 
 /// Service for managing User-Interactive Authentication flows
 pub struct UiaService {
-    uia_repo: UiaRepository<Any>,
+    pub uia_repo: UiaRepository<Any>,
     auth_repo: AuthRepository<Any>,
     homeserver_name: String,
     session_lifetime: Duration,

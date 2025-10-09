@@ -1,9 +1,10 @@
 use axum::extract::ConnectInfo;
 use axum::http::HeaderMap;
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::State};
 use std::net::SocketAddr;
 
 use crate::_matrix::client::v3::login::{LoginRequest, LoginResponse};
+use crate::auth::errors::MatrixAuthError;
 use crate::state::AppState;
 
 /// POST /_matrix/client/login
@@ -15,7 +16,7 @@ pub async fn post(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     // Delegate to v3 login implementation
     crate::_matrix::client::v3::login::post(
         State(state),

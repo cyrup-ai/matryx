@@ -12,9 +12,9 @@ DEFINE TABLE notifications SCHEMAFULL
         FOR update, delete WHERE $auth.user_id = user_id OR $auth.admin = true;
 
 DEFINE FIELD notification_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD user_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD event_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD room_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
+DEFINE FIELD event_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '$') AND string::contains($value, ':');
+DEFINE FIELD room_id ON TABLE notifications TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
 DEFINE FIELD read ON TABLE notifications TYPE bool DEFAULT false;
 DEFINE FIELD highlight ON TABLE notifications TYPE bool DEFAULT false;
 DEFINE FIELD created_at ON TABLE notifications TYPE datetime DEFAULT time::now();

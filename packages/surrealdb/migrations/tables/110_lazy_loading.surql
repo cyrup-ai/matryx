@@ -11,8 +11,8 @@ DEFINE TABLE lazy_loading SCHEMAFULL
         FOR create WHERE $auth.user_id != NONE
         FOR update, delete WHERE $auth.admin = true;
 
-DEFINE FIELD room_id ON TABLE lazy_loading TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD user_id ON TABLE lazy_loading TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD room_id ON TABLE lazy_loading TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
+DEFINE FIELD user_id ON TABLE lazy_loading TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD load_time_ms ON TABLE lazy_loading TYPE float;
 DEFINE FIELD memory_saved_mb ON TABLE lazy_loading TYPE float;
 DEFINE FIELD timestamp ON TABLE lazy_loading TYPE datetime DEFAULT time::now();

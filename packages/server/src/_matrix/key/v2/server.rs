@@ -1,6 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode};
 use base64::{Engine, engine::general_purpose};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::env;
 use tracing::{error, info};
 
@@ -132,8 +133,26 @@ async fn get_or_generate_signing_keys(
         }),
     );
 
-    // Build old_verify_keys JSON (empty for now)
-    let old_verify_keys = json!({});
+    // Build old_verify_keys JSON from repository
+    let old_keys_map = infrastructure_service
+        .get_old_verify_keys(&server_name)
+        .await
+        .unwrap_or_else(|e| {
+            error!("Failed to get old verify keys: {}", e);
+            HashMap::new()
+        });
+
+    let mut old_verify_keys = serde_json::Map::new();
+    for (key_id, old_key) in old_keys_map {
+        old_verify_keys.insert(
+            key_id,
+            json!({
+                "key": old_key.key,
+                "expired_ts": old_key.expired_ts
+            }),
+        );
+    }
+    let old_verify_keys = json!(old_verify_keys);
 
     // Build signatures JSON
     let canonical_json = build_canonical_server_json(server_name, &verify_keys)?;
@@ -157,7 +176,8 @@ async fn generate_ed25519_keypair(
 
     // Generate proper Ed25519 keypair using cryptographically secure random number generator
     let mut secret_bytes = [0u8; 32];
-    getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
+    getrandom::fill(&mut secret_bytes)
+        .map_err(|e| format!("Failed to generate random bytes for Ed25519 key: {}", e))?;
     let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
     let verifying_key = signing_key.verifying_key();
 

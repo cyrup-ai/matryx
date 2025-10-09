@@ -95,20 +95,36 @@ pub async fn get(
             );
 
             // Convert ThreadRootsResponse to ThreadsResponse (Matrix spec compliant)
-            let chunk: Vec<matryx_entity::types::ThreadSummary> = thread_roots_response
-                .threads
-                .into_iter()
-                .map(|thread_root| {
-                    // Convert from repository ThreadSummary to entity ThreadSummary per Matrix spec
-                    let repo_summary = thread_root.unsigned.thread;
-                    matryx_entity::types::ThreadSummary {
-                        latest_event: Some(repo_summary.latest_event),
-                        count: repo_summary.count as usize,
-                        participated: repo_summary.current_user_participated,
-                        participants: vec![], // TODO: Extract from thread metadata per Matrix spec
-                    }
-                })
-                .collect();
+            let mut chunk: Vec<matryx_entity::types::ThreadSummary> = Vec::new();
+
+            for thread_root in thread_roots_response.threads {
+                // Convert from repository ThreadSummary to entity ThreadSummary per Matrix spec
+                let repo_summary = thread_root.unsigned.thread;
+                let thread_root_id = thread_root.event_id.clone();
+
+                // Fetch participants for this thread
+                let participants_list = state
+                    .room_operations
+                    .threads_repo()
+                    .get_thread_participants(&room_id, &thread_root_id)
+                    .await
+                    .unwrap_or_else(|_| Vec::new());
+
+                let participants: Vec<String> = participants_list
+                    .into_iter()
+                    .filter(|p| p.participating)
+                    .map(|p| p.user_id)
+                    .collect();
+
+                chunk.push(matryx_entity::types::ThreadSummary {
+                    latest_event: Some(repo_summary.latest_event),
+                    count: repo_summary.count as usize,
+                    participated: repo_summary.current_user_participated,
+                    participants,
+                    notification_count: None,
+                    highlight_count: None,
+                });
+            }
 
             let threads_response = ThreadsResponse {
                 chunk,

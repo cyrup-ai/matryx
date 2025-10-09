@@ -43,6 +43,7 @@ pub struct UiaSessionStats {
     pub active_sessions: u64,
 }
 
+#[derive(Clone)]
 pub struct UiaRepository<C: Connection> {
     db: Surreal<C>,
 }

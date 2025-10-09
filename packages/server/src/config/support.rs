@@ -50,7 +50,7 @@ impl Default for SupportConfig {
 
 impl SupportConfig {
     /// Create a new SupportConfig from environment variables and server configuration
-    pub fn from_env(homeserver_name: &str, admin_email: &str) -> Self {
+    pub fn from_env(homeserver_name: &str, admin_email: &str, use_https: bool) -> Self {
         let mut contacts = Vec::new();
 
         // Add primary administrator contact
@@ -85,8 +85,9 @@ impl SupportConfig {
         }
 
         // Configure support page
+        let protocol = if use_https { "https" } else { "http" };
         let support_page_url = env::var("MATRIX_SUPPORT_PAGE")
-            .unwrap_or_else(|_| format!("https://{}/support", homeserver_name));
+            .unwrap_or_else(|_| format!("{}://{}/support", protocol, homeserver_name));
 
         let support_page_enabled = env::var("MATRIX_SUPPORT_PAGE_ENABLED")
             .map(|val| val.parse().unwrap_or(true))

@@ -111,7 +111,8 @@ impl KeyManagementService {
 
         // Generate new Ed25519 keypair
         let mut secret_bytes = [0u8; 32];
-        getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
+        getrandom::fill(&mut secret_bytes)
+            .map_err(|e| format!("Failed to generate random bytes for Ed25519 keypair: {}", e))?;
         let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
 
@@ -134,6 +135,18 @@ impl KeyManagementService {
             created_at,
             expires_at: Some(expires_at),
         };
+
+        // Mark any existing active keys as inactive before storing new key
+        infrastructure_service
+            .mark_old_keys_inactive(server_name)
+            .await
+            .map_err(|e| {
+                error!("Failed to mark old keys as inactive: {:?}", e);
+                Box::new(std::io::Error::other("Failed to mark old keys inactive"))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+
+        info!("Marked old signing keys as inactive for server {}", server_name);
 
         // Store the new key
         infrastructure_service

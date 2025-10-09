@@ -209,13 +209,15 @@ impl<C: Connection> ThirdPartyService<C> {
         let users = self.third_party_repo.lookup_third_party_user(protocol, &empty_fields).await?;
         let locations = self.third_party_repo.lookup_third_party_location(protocol, &empty_fields).await?;
 
-        // Calculate average uptime from bridge statistics
+        // Calculate aggregate metrics from bridge_metrics table
         let mut total_uptime = 0.0;
+        let mut total_messages_24h = 0u64;
         let mut bridge_count = 0;
         
         for bridge in &bridges {
-            if let Ok(stats) = self.bridge_repo.get_bridge_statistics(&bridge.bridge_id).await {
-                total_uptime += stats.uptime_percentage;
+            if let Ok(perf_metrics) = self.bridge_repo.get_bridge_performance_metrics(&bridge.bridge_id).await {
+                total_messages_24h += perf_metrics.messages_24h;
+                total_uptime += perf_metrics.uptime_percentage;
                 bridge_count += 1;
             }
         }
@@ -232,7 +234,7 @@ impl<C: Connection> ThirdPartyService<C> {
             active_bridges,
             total_users: users.len() as u64,
             total_locations: locations.len() as u64,
-            messages_24h: 0, // Would need message tracking implementation
+            messages_24h: total_messages_24h,
             uptime_percentage,
         })
     }

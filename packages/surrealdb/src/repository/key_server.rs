@@ -508,6 +508,86 @@ impl<C: Connection> KeyServerRepository<C> {
 
         Ok(signing_key_record)
     }
+
+    /// Get old verify keys for server key response
+    /// Returns keys that are no longer active but still valid for verifying old signatures
+    pub async fn get_old_verify_keys(
+        &self,
+        server_name: &str,
+    ) -> Result<HashMap<String, OldVerifyKey>, RepositoryError> {
+        let query = "
+            SELECT key_id, public_key, expires_at
+            FROM server_signing_keys
+            WHERE server_name = $server_name
+              AND (is_active = false OR (expires_at IS NOT NULL AND expires_at < datetime::now()))
+            ORDER BY created_at DESC
+        ";
+
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "query old verify keys".to_string(),
+            })?;
+
+        #[derive(Deserialize)]
+        struct OldKeyRecord {
+            key_id: String,
+            public_key: String,
+            expires_at: Option<DateTime<Utc>>,
+        }
+
+        let records: Vec<OldKeyRecord> = result.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "parse old verify keys".to_string(),
+        })?;
+
+        let mut old_keys = HashMap::new();
+        for record in records {
+            // Use expires_at if available, otherwise use current time (key was manually rotated)
+            let expired_ts = record
+                .expires_at
+                .unwrap_or_else(Utc::now)
+                .timestamp_millis();
+
+            old_keys.insert(
+                record.key_id,
+                OldVerifyKey {
+                    key: record.public_key,
+                    expired_ts,
+                },
+            );
+        }
+
+        Ok(old_keys)
+    }
+
+    /// Mark old keys as inactive during key rotation
+    pub async fn mark_old_keys_inactive(
+        &self,
+        server_name: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPDATE server_signing_keys
+            SET is_active = false
+            WHERE server_name = $server_name
+              AND is_active = true
+        ";
+
+        self.db
+            .query(query)
+            .bind(("server_name", server_name.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "mark old keys inactive".to_string(),
+            })?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

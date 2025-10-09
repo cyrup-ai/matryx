@@ -4,8 +4,8 @@ use matryx_surrealdb::repository::filter::{FilterLiveUpdate, FilterRepository};
 use std::time::Duration;
 
 #[tokio::test]
-async fn test_live_query_creation_and_streaming() {
-    let test_db = setup_test_database().await;
+async fn test_live_query_creation_and_streaming() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let filter_repo = FilterRepository::new(test_db.clone());
     let user_id = "@test:example.com";
 
@@ -32,11 +32,12 @@ async fn test_live_query_creation_and_streaming() {
     } else {
         panic!("Expected filter creation notification");
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_live_query_cleanup_and_lifecycle() {
-    let test_db = setup_test_database().await;
+async fn test_live_query_cleanup_and_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let filter_repo = FilterRepository::new(test_db.clone());
     let user_id = "@test:example.com";
 
@@ -61,6 +62,7 @@ async fn test_live_query_cleanup_and_lifecycle() {
         Err(e) => panic!("Failed to get active subscriptions after cleanup: {:?}", e),
     };
     assert!(!active.contains(&user_id.to_string()));
+    Ok(())
 }
 
 #[tokio::test]
@@ -79,14 +81,13 @@ async fn test_concurrent_live_queries() {
 }
 
 // Helper functions for testing
-async fn setup_test_database() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+async fn setup_test_database() -> Result<surrealdb::Surreal<surrealdb::engine::any::Any>, Box<dyn std::error::Error>> {
     use surrealdb::engine::any;
-    let db = any::connect("memory").await.expect("Failed to connect to memory database");
+    let db = any::connect("memory").await?;
     db.use_ns("test")
         .use_db("test")
-        .await
-        .expect("Failed to set namespace/database");
-    db
+        .await?;
+    Ok(db)
 }
 
 fn create_test_matrix_filter() -> MatrixFilter {

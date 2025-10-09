@@ -12,8 +12,8 @@ DEFINE TABLE direct_to_device_messages SCHEMAFULL
         FOR update, delete WHERE $auth.admin = true;
 
 DEFINE FIELD message_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD sender_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD recipient_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD sender_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
+DEFINE FIELD recipient_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD device_id ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD message_type ON TABLE direct_to_device_messages TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD content ON TABLE direct_to_device_messages TYPE object DEFAULT {};

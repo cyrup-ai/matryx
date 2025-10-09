@@ -13,7 +13,12 @@ use crate::{
     auth::{MatrixAuth, extract_matrix_auth},
 };
 use matryx_entity::MembershipState;
-use matryx_surrealdb::repository::{MembershipRepository, RoomAliasRepository};
+use matryx_surrealdb::repository::{
+    MembershipRepository,
+    RoomAliasRepository,
+    PowerLevelsRepository,
+    PowerLevelAction
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct RoomAliasResponse {
@@ -63,9 +68,27 @@ async fn validate_alias_permissions(
 
     match membership {
         Some(membership) if membership.membership == MembershipState::Join => {
-            // TODO: Implement proper power level validation per Matrix spec
-            // Only users with sufficient power levels should be able to manage aliases
-            // Default power level requirement for alias management is typically 50+
+            // Check if user has power level to manage aliases
+            let power_levels_repo = PowerLevelsRepository::new(state.db.clone());
+            let can_manage_aliases = power_levels_repo
+                .can_user_perform_action(
+                    room_id,
+                    user_id,
+                    PowerLevelAction::SendState("m.room.canonical_alias".to_string()),
+                )
+                .await
+                .map_err(|e| {
+                    error!("Failed to check power levels for user {} in room {}: {}", user_id, room_id, e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            if !can_manage_aliases {
+                error!(
+                    "User {} lacks power level to manage aliases in room {}",
+                    user_id, room_id
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
 
             // Validate alias domain permissions
             // According to Matrix spec, users should only be able to manage aliases

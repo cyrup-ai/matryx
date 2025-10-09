@@ -1866,10 +1866,10 @@ impl AuthorizationEngine {
     }
 }
 
-/// Federation join validation according to Matrix specification (Legacy sync version)
+/// Federation join validation according to Matrix specification (Synchronous version)
 /// Validates that a remote server is allowed to join events for a room
 ///
-/// NOTE: This is a legacy synchronous version that performs basic validation only.
+/// NOTE: This is a synchronous version that performs basic validation only.
 /// For complete server ACL checking with state event parsing, use:
 /// `AuthorizationEngine::validate_federation_join_allowed()` which implements
 /// full Matrix specification compliance including m.room.server_acl state events.

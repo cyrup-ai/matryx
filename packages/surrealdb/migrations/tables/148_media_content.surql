@@ -20,6 +20,7 @@ DEFINE FIELD server_name ON TABLE media_content TYPE string
 
 DEFINE FIELD content ON TABLE media_content TYPE string 
     ASSERT string::is::not::empty($value);
+    -- Stores base64-encoded binary content
 
 DEFINE FIELD content_type ON TABLE media_content TYPE string 
     ASSERT string::is::not::empty($value);

@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
 
+use crate::pagination;
 use crate::repository::RepositoryError;
 
 // Type alias for complex tuple types to satisfy clippy::type_complexity
@@ -248,6 +249,19 @@ pub struct SyncPosition {
     pub room_positions: HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StreamPosition {
+    id: String,
+    position: u64,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StreamCounter {
+    position: u64,
+    updated_at: DateTime<Utc>,
+}
+
 pub struct SyncRepository {
     db: Surreal<Any>,
 }
@@ -267,7 +281,7 @@ impl SyncRepository {
         let account_data = self.get_account_data_sync(user_id, None).await?;
 
         let sync_position = SyncPosition {
-            stream_id: self.get_current_stream_id().await?,
+            stream_id: self.increment_stream_id().await?,
             timestamp: Utc::now(),
             room_positions: HashMap::new(),
         };
@@ -299,7 +313,7 @@ impl SyncRepository {
             Some(self.get_device_list_sync(user_id, Some(&since_position.timestamp)).await?);
 
         let new_position = SyncPosition {
-            stream_id: self.get_current_stream_id().await?,
+            stream_id: self.increment_stream_id().await?,
             timestamp: Utc::now(),
             room_positions: HashMap::new(),
         };
@@ -404,13 +418,26 @@ impl SyncRepository {
         let unread_notifications = self.get_unread_notification_counts(user_id, room_id).await?;
         let summary = self.get_room_summary(room_id).await?;
 
+        // Convert timeline_events from Vec<Value> to Vec<Event> for pagination
+        let events_for_pagination: Vec<matryx_entity::types::Event> = timeline_events
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+
+        // Generate prev_batch token using pagination helper
+        let prev_batch_token = pagination::generate_prev_batch(
+            &events_for_pagination,
+            room_id,
+            20, // limit used in query
+        );
+
         Ok(RoomSyncData {
             room_id: room_id.to_string(),
             state: state_events,
             timeline: TimelineSync {
                 events: timeline_events,
-                limited: false, // TODO: Implement proper pagination
-                prev_batch: None,
+                limited: events_for_pagination.len() >= 20,
+                prev_batch: prev_batch_token,
             },
             ephemeral: EphemeralSync { events: ephemeral_events },
             account_data: account_data_events,
@@ -976,8 +1003,61 @@ impl SyncRepository {
     }
 
     async fn get_current_stream_id(&self) -> Result<u64, RepositoryError> {
-        // Simple implementation - in practice this would be more sophisticated
-        Ok(Utc::now().timestamp() as u64)
+        // Query the current position from the global counter
+        let query = "SELECT VALUE position FROM stream_counter:global";
+        
+        let mut result = self.db
+            .query(query)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_current_stream_id".to_string(),
+            })?;
+        
+        let position: Option<u64> = result
+            .take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_current_stream_id_parse".to_string(),
+            })?;
+        
+        // Return current position, or 0 if counter not initialized yet
+        Ok(position.unwrap_or(0))
+    }
+
+    /// Atomically increment and return the next stream ID
+    async fn increment_stream_id(&self) -> Result<u64, RepositoryError> {
+        // Atomically increment the global counter using UPDATE with +=
+        // This is safe under concurrent load because UPDATE on a single record is atomic
+        let query = "
+            UPDATE stream_counter:global 
+            SET position += 1, updated_at = time::now() 
+            RETURN position;
+        ";
+        
+        let mut result = self.db
+            .query(query)
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "increment_stream_id".to_string(),
+            })?;
+        
+        // Parse the result - UPDATE returns array of updated records
+        let counter_result: Option<Vec<StreamCounter>> = result
+            .take(0)
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "increment_stream_id_parse".to_string(),
+            })?;
+        
+        // Extract position from first (and only) result
+        counter_result
+            .and_then(|v| v.first().map(|c| c.position))
+            .ok_or_else(|| RepositoryError::DatabaseError {
+                message: "Failed to increment stream ID - counter not initialized".to_string(),
+                operation: "increment_stream_id".to_string(),
+            })
     }
 
     // TASK14 SUBTASK 2: Add missing sync methods

@@ -209,12 +209,12 @@ async fn get_space_hierarchy(
     let root_room = get_room_hierarchy_info(state, room_id, requesting_server).await?;
 
     // Get all child rooms via m.space.child events
-    let children = get_space_children(state, room_id, requesting_server).await?;
+    let (children, inaccessible_children) = get_space_children(state, room_id, requesting_server).await?;
 
     Ok(SpaceHierarchyResponse {
         room: root_room,
         children,
-        inaccessible_children: vec![], // Empty for now - could be populated with rooms that exist but are not accessible
+        inaccessible_children,
     })
 }
 
@@ -331,8 +331,9 @@ async fn get_space_children(
     state: &AppState,
     room_id: &str,
     requesting_server: &str,
-) -> Result<Vec<SpaceHierarchyChildRoomsChunk>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Vec<SpaceHierarchyChildRoomsChunk>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     let event_repo = EventRepository::new(state.db.clone());
+    let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
 
     // Get m.space.child events
     let child_events = event_repo
@@ -341,19 +342,56 @@ async fn get_space_children(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     let mut children = Vec::new();
+    let mut inaccessible_children = Vec::new();
 
     for child_event in child_events {
         let child_room_id = child_event.state_key.unwrap_or_default();
+        
+        if child_room_id.is_empty() {
+            continue; // Skip invalid state_key
+        }
 
-        // Check if child room exists and is accessible
-        if let Ok(child_room_info) =
-            get_child_room_info(state, &child_room_id, requesting_server).await
-        {
-            children.push(child_room_info);
+        // Check if child room exists on this server
+        let child_room = match room_repo.get_by_id(&child_room_id).await {
+            Ok(Some(room)) => room,
+            Ok(None) => {
+                // Room doesn't exist on this server - exclude entirely per spec
+                debug!("Child room {} not found on this server, excluding from hierarchy", child_room_id);
+                continue;
+            }
+            Err(e) => {
+                warn!("Failed to query child room {}: {}", child_room_id, e);
+                continue; // Exclude on error
+            }
+        };
+
+        // Check if requesting server has access to this child room
+        match check_space_access_permission(state, &child_room, requesting_server).await {
+            Ok(true) => {
+                // Room is accessible - get full details
+                match get_child_room_info(state, &child_room_id, requesting_server).await {
+                    Ok(child_info) => {
+                        children.push(child_info);
+                    }
+                    Err(e) => {
+                        warn!("Failed to get info for accessible child room {}: {}", child_room_id, e);
+                        // Could not get details - exclude entirely
+                    }
+                }
+            }
+            Ok(false) => {
+                // Room exists but is not accessible - add to inaccessible_children
+                debug!("Child room {} is inaccessible to server {}", child_room_id, requesting_server);
+                inaccessible_children.push(child_room_id);
+            }
+            Err(e) => {
+                warn!("Failed to check access for child room {}: {}", child_room_id, e);
+                // Exclude on error
+            }
         }
     }
 
-    Ok(children)
+    Ok((children, inaccessible_children))
 }
 
 /// Get child room information for hierarchy display

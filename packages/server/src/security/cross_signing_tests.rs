@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::security::cross_signing::{CrossSigningVerifier, TestCryptoProvider};
+    use crate::security::cross_signing::CrossSigningVerifier;
     use matryx_surrealdb::repository::cross_signing::{
         CrossSigningKey, CrossSigningKeys, DeviceKey,
     };
@@ -8,10 +8,27 @@ mod tests {
     use std::sync::Arc;
     use surrealdb::{Surreal, engine::any::Any};
 
-    async fn setup_test_db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
-        db.use_ns("test").use_db("test").await.unwrap();
-        db
+    /// Test helper that always returns true for signature verification.
+    /// DO NOT use in production - this bypasses all cryptographic validation.
+    pub struct TestCryptoProvider;
+
+    #[async_trait::async_trait]
+    impl crate::security::cross_signing::CryptoProvider for TestCryptoProvider {
+        async fn verify_ed25519_signature(
+            &self,
+            _signature: &str,
+            _message: &str,
+            _public_key: &str,
+        ) -> Result<bool, crate::security::cross_signing::CryptoError> {
+            // Test implementation always succeeds
+            Ok(true)
+        }
+    }
+
+    async fn setup_test_db() -> Result<Surreal<Any>, Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
+        db.use_ns("test").use_db("test").await?;
+        Ok(db)
     }
 
     fn create_test_master_key(user_id: &str) -> CrossSigningKey {
@@ -86,8 +103,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cross_signing_verifier_creation() {
-        let db = setup_test_db().await;
+    async fn test_cross_signing_verifier_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -96,14 +113,14 @@ mod tests {
             verifier
                 .crypto
                 .verify_ed25519_signature("sig", "msg", "key")
-                .await
-                .unwrap()
+                .await?
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_store_and_retrieve_cross_signing_keys() {
-        let db = setup_test_db().await;
+    async fn test_store_and_retrieve_cross_signing_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -118,23 +135,25 @@ mod tests {
         };
 
         // Test storing cross-signing keys
-        verifier.store_cross_signing_keys(user_id, &keys).await.unwrap();
+        verifier.store_cross_signing_keys(user_id, &keys).await?;
 
         // Test retrieving cross-signing keys
-        let retrieved_keys = verifier.get_cross_signing_keys(user_id).await.unwrap();
+        let retrieved_keys = verifier.get_cross_signing_keys(user_id).await?;
         assert!(retrieved_keys.master_key.is_some());
         assert!(retrieved_keys.self_signing_key.is_some());
         assert!(retrieved_keys.user_signing_key.is_none());
 
-        let retrieved_master = retrieved_keys.master_key.unwrap();
+        let retrieved_master = retrieved_keys.master_key
+            .ok_or("Test: master key should be present")?;
         assert_eq!(retrieved_master.user_id, user_id);
         assert_eq!(retrieved_master.usage, vec!["master"]);
         assert!(retrieved_master.keys.contains_key("ed25519:master_key_id"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_device_signature_verification() {
-        let db = setup_test_db().await;
+    async fn test_device_signature_verification() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -146,14 +165,14 @@ mod tests {
         // Test device signature verification
         let verification_result = verifier
             .verify_device_signature(&device_key, &self_signing_key)
-            .await
-            .unwrap();
+            .await?;
         assert!(verification_result); // TestCryptoProvider always returns true
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_device_signature_verification_with_repository() {
-        let db = setup_test_db().await;
+    async fn test_device_signature_verification_with_repository() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -166,20 +185,19 @@ mod tests {
         verifier
             .repository
             .store_self_signing_key(user_id, &self_signing_key)
-            .await
-            .unwrap();
+            .await?;
 
         // Test device signature verification using repository
         let verification_result = verifier
             .verify_device_signature_with_repository(user_id, &device_key)
-            .await
-            .unwrap();
+            .await?;
         assert!(verification_result);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_self_signing_key_verification() {
-        let db = setup_test_db().await;
+    async fn test_self_signing_key_verification() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -190,14 +208,14 @@ mod tests {
         // Test self-signing key verification
         let verification_result = verifier
             .verify_self_signing_key(&self_signing_key, &master_key)
-            .await
-            .unwrap();
+            .await?;
         assert!(verification_result); // TestCryptoProvider always returns true
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_self_signing_key_verification_with_repository() {
-        let db = setup_test_db().await;
+    async fn test_self_signing_key_verification_with_repository() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -206,22 +224,22 @@ mod tests {
         let self_signing_key = create_test_self_signing_key(user_id);
 
         // Store keys
-        verifier.repository.store_master_key(user_id, &master_key).await.unwrap();
+        verifier.repository.store_master_key(user_id, &master_key).await?;
         verifier
             .repository
             .store_self_signing_key(user_id, &self_signing_key)
-            .await
-            .unwrap();
+            .await?;
 
         // Test self-signing key verification using repository
         let verification_result =
-            verifier.verify_self_signing_key_with_repository(user_id).await.unwrap();
+            verifier.verify_self_signing_key_with_repository(user_id).await?;
         assert!(verification_result);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_device_key_signing() {
-        let db = setup_test_db().await;
+    async fn test_device_key_signing() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -234,21 +252,20 @@ mod tests {
         verifier
             .repository
             .store_self_signing_key(user_id, &self_signing_key)
-            .await
-            .unwrap();
+            .await?;
 
         // Test device key signing
         let signature = verifier
             .sign_device_key_with_repository(user_id, device_id, &device_key)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(signature.algorithm, "ed25519");
         assert!(!signature.signature.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_device_trust_management() {
-        let db = setup_test_db().await;
+    async fn test_device_trust_management() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -257,10 +274,10 @@ mod tests {
         let trusted_by = "@bob:example.com";
 
         // Test marking device as trusted
-        verifier.mark_device_trusted(user_id, device_id, trusted_by).await.unwrap();
+        verifier.mark_device_trusted(user_id, device_id, trusted_by).await?;
 
         // Test getting trusted devices
-        let trusted_devices = verifier.get_trusted_devices(user_id).await.unwrap();
+        let trusted_devices = verifier.get_trusted_devices(user_id).await?;
         assert!(trusted_devices.contains(&device_id.to_string()));
 
         // Test device trust in cross-signing chain
@@ -273,15 +290,16 @@ mod tests {
             user_signing_key: None,
         };
 
-        verifier.store_cross_signing_keys(user_id, &keys).await.unwrap();
+        verifier.store_cross_signing_keys(user_id, &keys).await?;
 
-        let chain_verified = verifier.verify_cross_signing_chain(user_id, device_id).await.unwrap();
+        let chain_verified = verifier.verify_cross_signing_chain(user_id, device_id).await?;
         assert!(chain_verified);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_complete_cross_signing_chain_verification() {
-        let db = setup_test_db().await;
+    async fn test_complete_cross_signing_chain_verification() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -299,25 +317,25 @@ mod tests {
         };
 
         // Store keys and mark device as trusted
-        verifier.store_cross_signing_keys(user_id, &keys).await.unwrap();
-        verifier.mark_device_trusted(user_id, device_id, user_id).await.unwrap();
+        verifier.store_cross_signing_keys(user_id, &keys).await?;
+        verifier.mark_device_trusted(user_id, device_id, user_id).await?;
 
         // Verify complete chain
-        let chain_verified = verifier.verify_cross_signing_chain(user_id, device_id).await.unwrap();
+        let chain_verified = verifier.verify_cross_signing_chain(user_id, device_id).await?;
         assert!(chain_verified);
 
         // Test with untrusted device
         let untrusted_device = "DEVICE2";
         let untrusted_chain = verifier
             .verify_cross_signing_chain(user_id, untrusted_device)
-            .await
-            .unwrap();
+            .await?;
         assert!(!untrusted_chain);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_canonical_json_generation() {
-        let db = setup_test_db().await;
+    async fn test_canonical_json_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -329,18 +347,19 @@ mod tests {
         let canonical_result = verifier.canonical_json(&device_key);
         assert!(canonical_result.is_ok());
 
-        let canonical_json = canonical_result.unwrap();
+        let canonical_json = canonical_result?;
         // Canonical JSON should not contain signatures or unsigned fields
         assert!(!canonical_json.contains("signatures"));
         assert!(!canonical_json.contains("unsigned"));
         assert!(canonical_json.contains("user_id"));
         assert!(canonical_json.contains("device_id"));
         assert!(canonical_json.contains("keys"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_error_handling() {
-        let db = setup_test_db().await;
+    async fn test_error_handling() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -363,11 +382,12 @@ mod tests {
             .sign_device_key_with_repository(user_id, device_id, &device_key)
             .await;
         assert!(result.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_cross_signing_keys_with_user_signing() {
-        let db = setup_test_db().await;
+    async fn test_cross_signing_keys_with_user_signing() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup_test_db().await?;
         let crypto_provider = Arc::new(TestCryptoProvider);
         let verifier = CrossSigningVerifier::new(crypto_provider, db);
 
@@ -403,14 +423,16 @@ mod tests {
         };
 
         // Test storing and retrieving all three key types
-        verifier.store_cross_signing_keys(user_id, &keys).await.unwrap();
+        verifier.store_cross_signing_keys(user_id, &keys).await?;
 
-        let retrieved_keys = verifier.get_cross_signing_keys(user_id).await.unwrap();
+        let retrieved_keys = verifier.get_cross_signing_keys(user_id).await?;
         assert!(retrieved_keys.master_key.is_some());
         assert!(retrieved_keys.self_signing_key.is_some());
         assert!(retrieved_keys.user_signing_key.is_some());
 
-        let retrieved_user_signing = retrieved_keys.user_signing_key.unwrap();
+        let retrieved_user_signing = retrieved_keys.user_signing_key
+            .ok_or("Test: user signing key should be present")?;
         assert_eq!(retrieved_user_signing.usage, vec!["user_signing"]);
+        Ok(())
     }
 }

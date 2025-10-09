@@ -167,7 +167,7 @@ async fn validate_server_signature(
         }
         info!("X-Matrix destination validated: {}", destination);
     } else {
-        debug!("X-Matrix request without destination parameter (backward compatibility)");
+        debug!("X-Matrix request without destination parameter (optional per Matrix spec)");
     }
 
     // Use session service for server key validation per Matrix specification
@@ -263,7 +263,7 @@ async fn validate_server_signature(
             },
         }
     } else {
-        debug!("No X-Matrix-Token header present (optional for backward compatibility)");
+        debug!("No X-Matrix-Token header present (optional per Matrix spec)");
     }
 
     // Create the authenticated server result after validation
@@ -403,7 +403,7 @@ fn validate_hostname(cert: &X509Certificate, hostname: &str) -> Result<bool, Str
         }
     }
 
-    // Fallback to Common Name in Subject (legacy)
+    // Fallback to Common Name in Subject (deprecated per RFC 6125 - SAN is standard)
     let subject = &cert.subject();
     for rdn in subject.iter() {
         for attr in rdn.iter() {

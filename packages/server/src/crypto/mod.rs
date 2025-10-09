@@ -321,7 +321,8 @@ impl MatryxCryptoProvider {
 
         // Generate random IV for AES-CBC
         let mut iv = [0u8; 16];
-        getrandom::fill(&mut iv).expect("Failed to generate random bytes");
+        getrandom::fill(&mut iv)
+            .map_err(|e| CryptoError::InvalidKey(format!("Failed to generate random IV for AES-CBC: {}", e)))?;
 
         // Encrypt with AES-256-CBC
         let cipher = cbc::Encryptor::<Aes256>::new(&aes_key.into(), &iv.into());

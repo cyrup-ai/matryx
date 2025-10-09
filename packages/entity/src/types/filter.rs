@@ -80,9 +80,6 @@ pub struct RoomEventFilter {
     pub contains_url: Option<bool>,
 }
 
-// Legacy Filter alias for backward compatibility
-pub type Filter = MatrixFilter;
-
 impl MatrixFilter {
     pub fn new() -> Self {
         Self {

@@ -10,8 +10,8 @@ DEFINE TABLE room_account_data SCHEMAFULL
         FOR select, create, update WHERE $auth.user_id = user_id
         FOR delete WHERE $auth.user_id = user_id OR $auth.admin = true;
 
-DEFINE FIELD user_id ON TABLE room_account_data TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD room_id ON TABLE room_account_data TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE room_account_data TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
+DEFINE FIELD room_id ON TABLE room_account_data TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
 DEFINE FIELD data_type ON TABLE room_account_data TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD content ON TABLE room_account_data TYPE object DEFAULT {};
 DEFINE FIELD updated_at ON TABLE room_account_data TYPE datetime DEFAULT time::now();

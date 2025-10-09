@@ -25,6 +25,7 @@ pub struct SmsConfig {
     pub api_key: String,
     pub api_secret: String,
     pub from_number: String,
+    pub api_base_url: String,
     pub enabled: bool,
 }
 
@@ -140,6 +141,7 @@ pub struct ServerConfig {
     pub environment: String,
     pub server_implementation_name: String,
     pub server_implementation_version: String,
+    pub use_https: bool,
     pub email_config: EmailConfig,
     pub sms_config: SmsConfig,
     pub push_cache_config: PushCacheConfig,
@@ -156,6 +158,12 @@ impl ServerConfig {
                 warn!("HOMESERVER_NAME not set, defaulting to localhost (development only)");
                 "localhost".to_string()
             });
+
+            // Add protocol configuration
+            let use_https = env::var("USE_HTTPS")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true);
 
             let email_config = EmailConfig {
                 smtp_server: env::var("SMTP_SERVER").unwrap_or_else(|_| "localhost".to_string()),
@@ -178,6 +186,8 @@ impl ServerConfig {
                 api_key: env::var("SMS_API_KEY").unwrap_or_default(),
                 api_secret: env::var("SMS_API_SECRET").unwrap_or_default(),
                 from_number: env::var("SMS_FROM_NUMBER").unwrap_or_default(),
+                api_base_url: env::var("SMS_API_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.twilio.com".to_string()),
                 enabled: env::var("SMS_ENABLED")
                     .unwrap_or_else(|_| "false".to_string())
                     .parse()
@@ -213,7 +223,10 @@ impl ServerConfig {
                     .unwrap_or(8448),
 
                 media_base_url: env::var("MEDIA_BASE_URL")
-                    .unwrap_or_else(|_| format!("https://{}", homeserver_name)),
+                    .unwrap_or_else(|_| {
+                        let protocol = if use_https { "https" } else { "http" };
+                        format!("{}://{}", protocol, homeserver_name)
+                    }),
 
                 admin_email: env::var("MATRIX_ADMIN_EMAIL")
                     .unwrap_or_else(|_| format!("admin@{}", homeserver_name)),
@@ -227,6 +240,7 @@ impl ServerConfig {
                 server_implementation_version: env::var("SERVER_IMPLEMENTATION_VERSION")
                     .unwrap_or_else(|_| "0.1.0".to_string()),
 
+                use_https,
                 email_config,
                 sms_config,
                 push_cache_config: PushCacheConfig {
@@ -249,58 +263,71 @@ impl ServerConfig {
                 captcha: CaptchaConfig::from_env(),
             };
 
-            // Enhanced validation
-            if config.environment == "production" {
-                // 1. Validate homeserver name is not localhost
+            // Enhanced validation - secure by default
+            // Only skip validations if explicitly opted out for local development
+            let allow_insecure = std::env::var("ALLOW_INSECURE_CONFIG")
+                .ok()
+                .and_then(|s| s.parse::<bool>().ok())
+                .unwrap_or(false);
+
+            if !allow_insecure {
+                // 1. Validate HTTPS is enabled
+                if !config.use_https {
+                    error!("USE_HTTPS must be true when ALLOW_INSECURE_CONFIG is not set");
+                    panic!("Invalid configuration: HTTPS required (set ALLOW_INSECURE_CONFIG=true to bypass for development)");
+                }
+
+                // 2. Validate homeserver name is not localhost
                 if config.homeserver_name == "localhost" {
-                    error!("HOMESERVER_NAME must not be localhost in production");
-                    panic!("Invalid production configuration: localhost server name");
+                    error!("HOMESERVER_NAME must not be localhost");
+                    panic!("Invalid configuration: localhost server name");
                 }
 
                 // 2. Validate homeserver name format
                 if !crate::utils::matrix_identifiers::is_valid_server_name(&config.homeserver_name)
                 {
                     error!("Invalid server name format: {}", config.homeserver_name);
-                    panic!("Invalid production configuration: malformed server name");
+                    panic!("Invalid configuration: malformed server name");
                 }
 
                 // 3. Validate homeserver name is not an IP literal
                 if crate::utils::matrix_identifiers::is_ip_literal(&config.homeserver_name) {
-                    error!("homeserver_name cannot be an IP address in production: {}", config.homeserver_name);
-                    panic!("Invalid production configuration: homeserver_name must be a domain name (FQDN)");
+                    error!("homeserver_name cannot be an IP address: {}", config.homeserver_name);
+                    panic!("Invalid configuration: homeserver_name must be a domain name (FQDN)");
                 }
 
                 // 4. Validate database URL is not in-memory
                 let db_url = env::var("DATABASE_URL").unwrap_or_default();
                 if db_url.contains("memory://") || db_url == "memory" {
-                    error!("DATABASE_URL cannot use in-memory database in production: {}", db_url);
-                    panic!("Invalid production configuration: memory database not allowed");
+                    error!("DATABASE_URL cannot use in-memory database (data will be lost on restart): {}", db_url);
+                    panic!("Invalid configuration: memory database not allowed");
                 }
                 if db_url.is_empty() {
-                    error!("DATABASE_URL must be explicitly set in production");
-                    panic!("Invalid production configuration: missing database URL");
+                    error!("DATABASE_URL must be explicitly set");
+                    panic!("Invalid configuration: missing database URL");
                 }
 
-                // 5. Validate media base URL uses HTTPS
-                if !config.media_base_url.starts_with("https://") {
-                    error!("media_base_url must use HTTPS in production, got: {}", config.media_base_url);
-                    panic!("Invalid production configuration: media_base_url must use https://");
+                // 5. Validate media base URL uses configured protocol
+                let expected_protocol = if config.use_https { "https://" } else { "http://" };
+                if !config.media_base_url.starts_with(expected_protocol) {
+                    error!("media_base_url must use {}, got: {}", expected_protocol, config.media_base_url);
+                    panic!("Invalid configuration: media_base_url protocol mismatch");
                 }
 
                 // 6. Validate admin email format
                 if config.admin_email.is_empty() || !config.admin_email.contains('@') {
                     error!("admin_email is invalid: {}", config.admin_email);
-                    panic!("Invalid production configuration: admin_email must be valid email address");
+                    panic!("Invalid configuration: admin_email must be valid email address");
                 }
 
                 // 7. Validate TLS certificate validation is enabled
                 if !config.tls_config.validate_certificates {
-                    error!("TLS certificate validation is disabled in production");
-                    panic!("Invalid production configuration: certificate validation must be enabled");
+                    error!("TLS certificate validation is disabled");
+                    panic!("Invalid configuration: certificate validation must be enabled");
                 }
                 if !config.tls_config.skip_validation_domains.is_empty() {
                     warn!(
-                        "TLS validation is skipped for {} domains in production: {:?}",
+                        "TLS validation is skipped for {} domains: {:?}",
                         config.tls_config.skip_validation_domains.len(),
                         config.tls_config.skip_validation_domains
                     );
@@ -308,24 +335,37 @@ impl ServerConfig {
 
                 // 8. Validate rate limiting is enabled
                 if !config.rate_limiting.enabled {
-                    error!("Rate limiting is disabled in production");
-                    panic!("Invalid production configuration: rate limiting must be enabled");
+                    error!("Rate limiting is disabled");
+                    panic!("Invalid configuration: rate limiting must be enabled");
                 }
 
-                // 9. Validate JWT secret is explicitly set
-                if env::var("JWT_SECRET").is_err() {
-                    error!("JWT_SECRET must be explicitly set in production (not auto-generated)");
-                    panic!("Invalid production configuration: JWT_SECRET environment variable required");
+                // 9. Validate JWT private key is explicitly set (not auto-generated)
+                if env::var("JWT_PRIVATE_KEY").is_err() {
+                    error!("JWT_PRIVATE_KEY must be explicitly set (not auto-generated)");
+                    panic!("Invalid configuration: JWT_PRIVATE_KEY environment variable required");
                 }
 
                 // 10. Warn about development port usage (non-fatal)
                 if config.federation_port == 8008 {
                     warn!(
-                        "Federation port 8008 is typically for client API. Production usually uses 8448 for federation. \
+                        "Federation port 8008 is typically for client API. Standard federation uses 8448. \
                         Current setting: {}",
                         config.federation_port
                     );
                 }
+            } else {
+                // Loud warnings when security is bypassed
+                warn!("╔════════════════════════════════════════════════════════════╗");
+                warn!("║ SECURITY WARNING: ALLOW_INSECURE_CONFIG=true              ║");
+                warn!("║ Security validations are DISABLED                         ║");
+                warn!("║ This configuration is NOT safe for production deployment  ║");
+                warn!("║ Possible risks:                                            ║");
+                warn!("║   - Data loss (in-memory database)                        ║");
+                warn!("║   - Credential theft (HTTP instead of HTTPS)              ║");
+                warn!("║   - MITM attacks (disabled TLS validation)                ║");
+                warn!("║   - DoS attacks (disabled rate limiting)                  ║");
+                warn!("║   - Session hijacking (weak JWT secrets)                  ║");
+                warn!("╚════════════════════════════════════════════════════════════╝");
             }
 
             // Validate server implementation details
@@ -351,6 +391,22 @@ impl ServerConfig {
         SERVER_CONFIG
             .get()
             .ok_or_else(|| ConfigError::MissingRequired("ServerConfig not initialized".to_string()))
+    }
+
+    /// Get the protocol scheme based on configuration
+    /// Returns "https" or "http"
+    pub fn protocol_scheme(&self) -> &'static str {
+        if self.use_https { "https" } else { "http" }
+    }
+
+    /// Build a base URL with the configured protocol
+    pub fn base_url(&self) -> String {
+        format!("{}://{}", self.protocol_scheme(), self.homeserver_name)
+    }
+
+    /// Build a base URL for identity server
+    pub fn identity_server_url(&self) -> String {
+        format!("{}://identity.{}", self.protocol_scheme(), self.homeserver_name)
     }
 }
 

@@ -137,21 +137,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_canonical_json_sorts_keys() {
+    fn test_canonical_json_sorts_keys() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "zebra": "last",
             "apple": "first",
             "beta": "middle"
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Keys should be sorted alphabetically
         assert_eq!(canonical, r#"{"apple":"first","beta":"middle","zebra":"last"}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_nested_objects() {
+    fn test_canonical_json_nested_objects() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "outer": {
                 "z": 1,
@@ -160,14 +161,15 @@ mod tests {
             "array": [{"b": 1, "a": 2}]
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Both outer keys and nested object keys should be sorted
         assert_eq!(canonical, r#"{"array":[{"a":2,"b":1}],"outer":{"a":2,"z":1}}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_preserves_types() {
+    fn test_canonical_json_preserves_types() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "number": 42,
             "string": "hello",
@@ -176,30 +178,32 @@ mod tests {
             "array": [1, 2, 3]
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // All data types should be preserved, keys sorted
         assert_eq!(
             canonical,
             r#"{"array":[1,2,3],"boolean":true,"null":null,"number":42,"string":"hello"}"#
         );
+        Ok(())
     }
 
     #[test]
-    fn test_empty_objects_and_arrays() {
+    fn test_empty_objects_and_arrays() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "empty_object": {},
             "empty_array": []
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Empty structures should be handled correctly
         assert_eq!(canonical, r#"{"empty_array":[],"empty_object":{}}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_complex_nested_structure() {
+    fn test_complex_nested_structure() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "server_keys": [
                 {
@@ -220,15 +224,16 @@ mod tests {
             }
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Complex nested structure with multiple levels of key sorting
         let expected = r#"{"server_keys":[{"server_name":"example.org","verify_keys":{"ed25519:1":{"key":"otherkey"},"ed25519:auto":{"key":"base64key"}}}],"signatures":{"example.org":{"ed25519:auto":"mysig"},"other.org":{"ed25519:1":"signature"}}}"#;
         assert_eq!(canonical, expected);
+        Ok(())
     }
 
     #[test]
-    fn test_matrix_server_key_format() {
+    fn test_matrix_server_key_format() -> Result<(), Box<dyn std::error::Error>> {
         // Test with actual Matrix server key structure
         let input = json!({
             "valid_until_ts": 1234567890,
@@ -241,29 +246,31 @@ mod tests {
             "old_verify_keys": {}
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // This is the format used for Matrix server key signing
         let expected = r#"{"old_verify_keys":{},"server_name":"matrix.example.org","valid_until_ts":1234567890,"verify_keys":{"ed25519:auto":{"key":"abcd1234"}}}"#;
         assert_eq!(canonical, expected);
+        Ok(())
     }
 
     #[test]
-    fn test_unicode_handling() {
+    fn test_unicode_handling() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "unicode": "Hello 世界 🚀",
             "emoji": "🔑",
             "accents": "café"
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Unicode should be preserved correctly
         assert_eq!(canonical, r#"{"accents":"café","emoji":"🔑","unicode":"Hello 世界 🚀"}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_number_formatting() {
+    fn test_number_formatting() -> Result<(), Box<dyn std::error::Error>> {
         let input = json!({
             "integer": 42,
             "zero": 0,
@@ -272,18 +279,19 @@ mod tests {
             "scientific": 1.23e-4
         });
 
-        let canonical = to_canonical_json(&input).unwrap();
+        let canonical = to_canonical_json(&input)?;
 
         // Numbers should be formatted consistently
         // serde_json handles number formatting canonically
-        let result: Value = serde_json::from_str(&canonical).unwrap();
+        let result: Value = serde_json::from_str(&canonical)?;
         assert_eq!(result["integer"], 42);
         assert_eq!(result["zero"], 0);
         assert_eq!(result["negative"], -123);
+        Ok(())
     }
 
     #[test]
-    fn test_error_types() {
+    fn test_error_types() -> Result<(), Box<dyn std::error::Error>> {
         // Test that our function returns the specific error type
         let input = json!({
             "test": "value"
@@ -293,11 +301,12 @@ mod tests {
         assert!(result.is_ok());
 
         // The error type is now CanonicalJsonError, not Box<dyn Error>
-        let _canonical: String = result.unwrap();
+        let _canonical: String = result?;
+        Ok(())
     }
 
     #[test]
-    fn test_deeply_nested_structure() {
+    fn test_deeply_nested_structure() -> Result<(), Box<dyn std::error::Error>> {
         // Test performance with deeply nested structure
         let mut nested = json!("value");
         for i in 0..100 {
@@ -309,9 +318,10 @@ mod tests {
         let result = to_canonical_json(&nested);
         assert!(result.is_ok(), "Should handle deeply nested structures");
 
-        let canonical = result.unwrap();
+        let canonical = result?;
         assert!(canonical.contains("\"level_0\""));
         assert!(canonical.contains("\"level_99\""));
+        Ok(())
     }
 
     #[test]
@@ -400,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normal_operation_still_works() {
+    fn test_normal_operation_still_works() -> Result<(), Box<dyn std::error::Error>> {
         // Ensure normal cases still work after adding error detection
         let normal_object = json!({
             "server_name": "example.org",
@@ -412,12 +422,13 @@ mod tests {
         let result = to_canonical_json(&normal_object);
         assert!(result.is_ok(), "Normal operation should still work");
 
-        let canonical = result.unwrap();
+        let canonical = result?;
         assert!(canonical.contains("\"server_name\":\"example.org\""));
         assert!(canonical.contains("\"verify_keys\""));
 
         // Verify it still produces canonical JSON (keys sorted)
         assert!(canonical.starts_with("{\"server_name\":"));
         assert!(canonical.contains("\"verify_keys\":{\"ed25519:auto\":{\"key\":\"test_key\"}}"));
+        Ok(())
     }
 }

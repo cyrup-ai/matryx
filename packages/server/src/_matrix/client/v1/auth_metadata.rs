@@ -7,7 +7,7 @@ use serde_json::Value;
 /// Discovery endpoint for OAuth 2.0 API support.
 /// Returns 404 with M_UNRECOGNIZED to indicate OAuth 2.0 is not (publicly) supported.
 ///
-/// Clients receiving this error will fall back to the Legacy API (/_matrix/client/v3/login),
+/// Clients receiving this error will fall back to the password login API (/_matrix/client/v3/login),
 /// which is fully implemented and functional in Matryx.
 ///
 /// Matrix Specification: https://spec.matrix.org/v1.15/client-server-api/#get_matrixclientv1auth_metadata

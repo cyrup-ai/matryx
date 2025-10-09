@@ -257,7 +257,7 @@ pub async fn post_register(
                 expires_in_ms: registration_result.expires_in_ms,
                 well_known: Some(serde_json::json!({
                     "m.homeserver": {
-                        "base_url": format!("https://{}", state.homeserver_name)
+                        "base_url": state.config.base_url()
                     }
                 })),
             }))

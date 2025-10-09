@@ -495,7 +495,7 @@ impl KeyBackupRepository {
         Ok(backup_version.count == actual_count)
     }
 
-    /// Store room key with raw encrypted data (for legacy compatibility)
+    /// Store room key with raw encrypted data (for compatibility with older clients)
     pub async fn store_room_key_raw(
         &self,
         user_id: &str,

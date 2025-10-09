@@ -62,7 +62,6 @@ var/
 
 # PyInstaller
 *.manifest
-*.spec
 
 # Unit Test / Coverage Reports
 htmlcov/
@@ -234,9 +233,7 @@ logs
 .dynamodb/
 # ROLLUP cache
 .rollup.cache
-# Temporary directories
-.temp/
-tmp/
+
 # Storybook build outputs
 out/
 .storybook-out/

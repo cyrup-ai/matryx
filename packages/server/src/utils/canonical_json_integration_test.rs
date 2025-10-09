@@ -19,7 +19,8 @@ mod integration_tests {
             "valid_until_ts": 1234567890123i64
         });
 
-        let canonical = to_canonical_json(&server_object).unwrap();
+        let canonical = to_canonical_json(&server_object)
+            .expect("Test: canonical JSON serialization should succeed");
         
         // Keys should be sorted: old_verify_keys, server_name, valid_until_ts, verify_keys
         let expected = r#"{"old_verify_keys":{},"server_name":"example.homeserver.org","valid_until_ts":1234567890123,"verify_keys":{"ed25519:auto":{"key":"abcd1234567890"}}}"#;
@@ -27,11 +28,14 @@ mod integration_tests {
         assert_eq!(canonical, expected);
         
         // Verify it's different from standard JSON (which doesn't guarantee key order)
-        let standard_json = serde_json::to_string(&server_object).unwrap();
+        let standard_json = serde_json::to_string(&server_object)
+            .expect("Test: standard JSON serialization should succeed");
         
         // Parse both back to ensure they contain the same data
-        let canonical_parsed: Value = serde_json::from_str(&canonical).unwrap();
-        let standard_parsed: Value = serde_json::from_str(&standard_json).unwrap();
+        let canonical_parsed: Value = serde_json::from_str(&canonical)
+            .expect("Test: canonical JSON parsing should succeed");
+        let standard_parsed: Value = serde_json::from_str(&standard_json)
+            .expect("Test: standard JSON parsing should succeed");
         
         assert_eq!(canonical_parsed, standard_parsed);
         // Canonical JSON validated - ready for cryptographic signatures
@@ -54,7 +58,8 @@ mod integration_tests {
             // Note: signatures field is removed before canonicalization in the actual code
         });
 
-        let canonical = to_canonical_json(&notary_data).unwrap();
+        let canonical = to_canonical_json(&notary_data)
+            .expect("Test: notary canonical JSON serialization should succeed");
         
         // Keys should be sorted alphabetically
         let expected = r#"{"old_verify_keys":{},"server_name":"remote.matrix.org","valid_until_ts":9876543210123,"verify_keys":{"ed25519:1":{"key":"remote_key_here"}}}"#;
@@ -77,9 +82,12 @@ mod integration_tests {
         });
 
         // Generate canonical JSON multiple times
-        let canonical1 = to_canonical_json(&test_object).unwrap();
-        let canonical2 = to_canonical_json(&test_object).unwrap();
-        let canonical3 = to_canonical_json(&test_object).unwrap();
+        let canonical1 = to_canonical_json(&test_object)
+            .expect("Test: canonical JSON serialization should succeed (1)");
+        let canonical2 = to_canonical_json(&test_object)
+            .expect("Test: canonical JSON serialization should succeed (2)");
+        let canonical3 = to_canonical_json(&test_object)
+            .expect("Test: canonical JSON serialization should succeed (3)");
 
         // All should be identical (deterministic)
         assert_eq!(canonical1, canonical2);

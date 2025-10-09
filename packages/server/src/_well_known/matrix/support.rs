@@ -24,7 +24,7 @@ pub async fn get() -> Result<Json<Value>, StatusCode> {
 
     // Create support configuration from environment and server config
     let support_config =
-        SupportConfig::from_env(&server_config.homeserver_name, &server_config.admin_email);
+        SupportConfig::from_env(&server_config.homeserver_name, &server_config.admin_email, server_config.use_https);
 
     // Validate support configuration
     if let Err(validation_error) = support_config.validate() {

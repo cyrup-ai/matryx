@@ -118,19 +118,14 @@ impl<C: Connection> BridgeRepository<C> {
             operation: "get_bridge_statistics_rooms_parse".to_string(),
         })?;
 
-        // Calculate uptime percentage (simplified)
-        let uptime_percentage = match bridge.status {
-            BridgeStatus::Active => 99.9,
-            BridgeStatus::Inactive => 0.0,
-            BridgeStatus::Error => 50.0,
-            BridgeStatus::Maintenance => 95.0,
-        };
+        // Get performance metrics from bridge_metrics table
+        let perf_metrics = self.get_bridge_performance_metrics(bridge_id).await?;
 
         Ok(BridgeStatistics {
             total_users: user_count.unwrap_or(0) as u64,
             total_rooms: room_count.unwrap_or(0) as u64,
-            messages_bridged_24h: 0, // Would need message tracking
-            uptime_percentage,
+            messages_bridged_24h: perf_metrics.messages_24h,
+            uptime_percentage: perf_metrics.uptime_percentage,
             last_error: None, // Would need error tracking
         })
     }

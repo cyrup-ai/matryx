@@ -35,7 +35,7 @@ pub async fn get() -> Result<impl axum::response::IntoResponse, StatusCode> {
     }
 
     // Construct base URL for the homeserver
-    let base_url = format!("https://{}", homeserver_name);
+    let base_url = config.base_url();
 
     // Validate the homeserver base URL by checking /_matrix/client/versions endpoint
     // This implements Matrix specification requirement for auto-discovery validation

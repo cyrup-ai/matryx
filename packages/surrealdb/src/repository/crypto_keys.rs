@@ -295,10 +295,62 @@ impl<C: Connection> CryptoKeysRepository<C> {
                             .await?;
                     }
                 } else {
-                    failures.insert(
-                        format!("{}:{}", user_id, device_id),
-                        serde_json::json!({"errcode": "M_NOT_FOUND"}),
-                    );
+                    // No one-time key found - try fallback key
+                    let fallback_query = "
+                        SELECT * FROM fallback_keys
+                        WHERE user_id = $user_id 
+                          AND device_id = $device_id 
+                          AND algorithm = $algorithm
+                        LIMIT 1
+                    ";
+
+                    let mut fallback_result = self
+                        .db
+                        .query(fallback_query)
+                        .bind(("user_id", user_id.to_string()))
+                        .bind(("device_id", device_id.to_string()))
+                        .bind(("algorithm", algorithm.to_string()))
+                        .await?;
+
+                    let fallback_data: Vec<Value> = fallback_result.take(0)?;
+
+                    if let Some(fallback_key_data) = fallback_data.first() {
+                        if let (Some(key_id), Some(key_value)) = (
+                            fallback_key_data.get("key_id").and_then(|v| v.as_str()),
+                            fallback_key_data.get("key_data"),
+                        ) {
+                            // Return fallback key (do NOT delete - reusable)
+                            let mut device_keys = HashMap::new();
+                            
+                            // Mark as fallback key in response by adding fallback field to existing object
+                            let fallback_marked = if let Some(obj) = key_value.as_object() {
+                                let mut modified = obj.clone();
+                                modified.insert("fallback".to_string(), serde_json::json!(true));
+                                serde_json::Value::Object(modified)
+                            } else {
+                                // Edge case: if key_value is not an object, wrap it
+                                serde_json::json!({
+                                    "key": key_value,
+                                    "fallback": true
+                                })
+                            };
+                            
+                            device_keys.insert(key_id.to_string(), fallback_marked);
+                            user_keys.insert(device_id.clone(), device_keys);
+                        } else {
+                            // Fallback key found but malformed
+                            failures.insert(
+                                format!("{}:{}", user_id, device_id),
+                                serde_json::json!({"errcode": "M_NOT_FOUND"}),
+                            );
+                        }
+                    } else {
+                        // No one-time key AND no fallback key
+                        failures.insert(
+                            format!("{}:{}", user_id, device_id),
+                            serde_json::json!({"errcode": "M_NOT_FOUND"}),
+                        );
+                    }
                 }
             }
 
@@ -607,6 +659,86 @@ impl<C: Connection> CryptoKeysRepository<C> {
             .bind(("keys", serde_json::to_value(&key.keys)?))
             .bind(("signatures", serde_json::to_value(&key.signatures)?))
             .await?;
+
+        Ok(())
+    }
+
+    /// Get one-time key counts for a device
+    pub async fn get_one_time_key_counts(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<HashMap<String, u32>, RepositoryError> {
+        let query = "
+            SELECT algorithm, count() as count FROM one_time_keys
+            WHERE user_id = $user_id AND device_id = $device_id
+            GROUP BY algorithm
+        ";
+
+        let mut result = self.db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?;
+
+        let counts_data: Vec<Value> = result.take(0)?;
+
+        let mut key_counts = HashMap::new();
+        for count_data in counts_data {
+            if let (Some(algorithm), Some(count)) = (
+                count_data.get("algorithm").and_then(|v| v.as_str()),
+                count_data.get("count").and_then(|v| v.as_u64()),
+            ) {
+                key_counts.insert(algorithm.to_string(), count as u32);
+            }
+        }
+
+        Ok(key_counts)
+    }
+
+    /// Upload fallback keys for a device (replaces existing fallback keys)
+    pub async fn upload_fallback_keys(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        fallback_keys: &HashMap<String, Value>,
+    ) -> Result<(), RepositoryError> {
+        // Delete existing fallback keys for this device
+        let delete_query = "
+            DELETE FROM fallback_keys
+            WHERE user_id = $user_id AND device_id = $device_id
+        ";
+
+        self.db
+            .query(delete_query)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await?;
+
+        // Insert new fallback keys (only one per algorithm per device)
+        for (key_id, key_data) in fallback_keys {
+            let insert_query = "
+                CREATE fallback_keys SET
+                    user_id = $user_id,
+                    device_id = $device_id,
+                    key_id = $key_id,
+                    key_data = $key_data,
+                    algorithm = $algorithm,
+                    uploaded_at = time::now()
+            ";
+
+            // Extract algorithm from key_id (format: algorithm:key_id)
+            let algorithm = key_id.split(':').next().unwrap_or("unknown");
+
+            self.db
+                .query(insert_query)
+                .bind(("user_id", user_id.to_string()))
+                .bind(("device_id", device_id.to_string()))
+                .bind(("key_id", key_id.clone()))
+                .bind(("key_data", key_data.clone()))
+                .bind(("algorithm", algorithm.to_string()))
+                .await?;
+        }
 
         Ok(())
     }

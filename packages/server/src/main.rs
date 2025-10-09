@@ -151,7 +151,7 @@ async fn oauth2_token_wrapper(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
@@ -229,9 +229,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create DNS resolver for Matrix federation
-    let well_known_client = Arc::new(WellKnownClient::new(http_client.clone()));
+    let well_known_client = Arc::new(WellKnownClient::new(http_client.clone(), config.use_https));
     let dns_resolver = Arc::new(
-        MatrixDnsResolver::new(well_known_client)
+        MatrixDnsResolver::new(well_known_client, config.use_https)
             .map_err(|e| format!("Failed to create DNS resolver: {}", e))?,
     );
 
@@ -263,8 +263,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create outbound transaction queue channel
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // Create application state
-    let mut app_state_instance = AppState::new(
+    // Create application state with the real outbound channel
+    let app_state_instance = AppState::new(
         db,
         session_service,
         homeserver_name.clone(),
@@ -272,11 +272,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client.clone(),
         event_signer.clone(),
         dns_resolver.clone(),
-    )
-    .expect("Failed to initialize application state");
+        outbound_tx,
+    )?;
 
-    // Update outbound_tx in app_state since new() creates a dummy channel
-    app_state_instance.outbound_tx = outbound_tx;
+    // No need to replace the channel - it's already correct
     let app_state = Arc::new(app_state_instance);
 
     // Spawn outbound transaction queue background task
@@ -284,6 +283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http_client.clone(),
         event_signer.clone(),
         homeserver_name.clone(),
+        config.use_https,
     ));
     let queue = crate::federation::outbound_queue::OutboundTransactionQueue::new(
         outbound_rx,

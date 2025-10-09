@@ -236,6 +236,42 @@ impl DeviceRepository {
         Ok(count.unwrap_or(0) > 0)
     }
 
+    /// Get total count of all devices in the system
+    pub async fn count_total_devices(&self) -> Result<usize, RepositoryError> {
+        let query = "SELECT count() as count FROM device GROUP ALL";
+        let mut result = self.db.query(query).await?;
+        let count: Option<i64> = result.take(0)?;
+        Ok(count.unwrap_or(0) as usize)
+    }
+
+    /// Get count of unique users who have at least one device
+    pub async fn count_unique_users(&self) -> Result<usize, RepositoryError> {
+        let query = "SELECT DISTINCT user_id FROM device";
+        let mut result = self.db.query(query).await?;
+        
+        #[derive(serde::Deserialize)]
+        struct UserIdResult {
+            user_id: String,
+        }
+        
+        let users: Vec<UserIdResult> = result.take(0)?;
+        Ok(users.len())
+    }
+
+    /// Get list of all user IDs who have devices
+    pub async fn get_users_with_devices(&self) -> Result<Vec<String>, RepositoryError> {
+        let query = "SELECT DISTINCT user_id FROM device ORDER BY user_id";
+        let mut result = self.db.query(query).await?;
+        
+        #[derive(serde::Deserialize)]
+        struct UserIdResult {
+            user_id: String,
+        }
+        
+        let users: Vec<UserIdResult> = result.take(0)?;
+        Ok(users.into_iter().map(|u| u.user_id).collect())
+    }
+
     /// Subscribe to device key changes for a specific user using SurrealDB LiveQuery
     /// Returns a stream of notifications for device key changes for the specified user
     pub async fn subscribe_to_device_keys(

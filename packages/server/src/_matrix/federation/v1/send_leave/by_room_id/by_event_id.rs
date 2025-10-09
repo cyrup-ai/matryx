@@ -239,6 +239,7 @@ pub async fn put(
         state.http_client.clone(),
         state.event_signer.clone(),
         state.homeserver_name.clone(),
+        state.config.use_https,
     ));
     let pdu_validator = PduValidator::new(PduValidatorParams {
         session_service: state.session_service.clone(),

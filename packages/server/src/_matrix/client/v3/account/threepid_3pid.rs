@@ -387,8 +387,8 @@ async fn send_verification_email(
     }
 
     let verification_url = format!(
-        "https://{}/_matrix/client/v3/account/3pid/email/verify?token={}",
-        state.config.homeserver_name, token
+        "{}/_matrix/client/v3/account/3pid/email/verify?token={}",
+        state.config.base_url(), token
     );
 
     let email_body = format!(
@@ -491,8 +491,11 @@ async fn send_twilio_sms(
 ) -> Result<(), StatusCode> {
     use base64::{Engine, engine::general_purpose};
 
-    let url =
-        format!("https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json", config.api_key);
+    let url = format!(
+        "{}/2010-04-01/Accounts/{}/Messages.json",
+        config.api_base_url,
+        config.api_key
+    );
 
     let params = [("To", to), ("From", &config.from_number), ("Body", message)];
 
@@ -647,6 +650,6 @@ pub async fn request_3pid_token(
 
     Ok(Json(json!({
         "sid": session.session_id,
-        "submit_url": format!("https://{}/_matrix/client/v3/account/3pid/verify", state.config.homeserver_name)
+        "submit_url": format!("{}/_matrix/client/v3/account/3pid/verify", state.config.base_url())
     })))
 }

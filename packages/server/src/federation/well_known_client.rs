@@ -50,10 +50,11 @@ pub struct WellKnownClient {
     http_client: Arc<Client>,
     cache: Cache<String, CachedWellKnown>,
     max_redirects: u32,
+    use_https: bool,
 }
 
 impl WellKnownClient {
-    pub fn new(http_client: Arc<Client>) -> Self {
+    pub fn new(http_client: Arc<Client>, use_https: bool) -> Self {
         Self {
             http_client,
             cache: Cache::builder()
@@ -61,6 +62,7 @@ impl WellKnownClient {
                 .time_to_live(Duration::from_secs(3600))
                 .build(),
             max_redirects: 5,
+            use_https,
         }
     }
 
@@ -123,7 +125,8 @@ impl WellKnownClient {
         &self,
         hostname: &str,
     ) -> WellKnownResult<(WellKnownResponse, Duration)> {
-        let url = format!("https://{}/.well-known/matrix/server", hostname);
+        let protocol = if self.use_https { "https" } else { "http" };
+        let url = format!("{}://{}/.well-known/matrix/server", protocol, hostname);
         let mut current_url = url;
         let mut redirect_count = 0;
 

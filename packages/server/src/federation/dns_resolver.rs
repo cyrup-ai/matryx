@@ -68,7 +68,7 @@ pub enum ResolutionMethod {
     WellKnownDelegation,
     /// SRV record lookup (_matrix-fed._tcp)
     SrvMatrixFed,
-    /// Legacy SRV record lookup (_matrix._tcp)
+    /// Deprecated SRV record lookup (_matrix._tcp) - Matrix v1.8 introduced _matrix-fed._tcp
     SrvMatrixLegacy,
     /// Fallback to hostname:8448
     FallbackPort8448,
@@ -148,6 +148,7 @@ pub struct MatrixDnsResolver {
     dns_resolver: Arc<TokioResolver>,
     well_known_client: Arc<WellKnownClient>,
     timeout: Duration,
+    use_https: bool,
     // Caching for successful well-known responses (24-48 hours)
     well_known_cache: Arc<
         RwLock<
@@ -165,13 +166,14 @@ pub struct MatrixDnsResolver {
 
 impl MatrixDnsResolver {
     /// Create a new Matrix DNS resolver
-    pub fn new(well_known_client: Arc<WellKnownClient>) -> DnsResult<Self> {
+    pub fn new(well_known_client: Arc<WellKnownClient>, use_https: bool) -> DnsResult<Self> {
         let resolver = TokioResolver::builder_tokio()?.build();
 
         Ok(Self {
             dns_resolver: Arc::new(resolver),
             well_known_client,
             timeout: Duration::from_secs(10),
+            use_https,
             well_known_cache: Arc::new(RwLock::new(HashMap::new())),
             error_cache: Arc::new(RwLock::new(HashMap::new())),
             backoff_state: Arc::new(RwLock::new(HashMap::new())),
@@ -184,6 +186,7 @@ impl MatrixDnsResolver {
         _opts: ResolverOpts,
         well_known_client: Arc<WellKnownClient>,
         timeout: Duration,
+        use_https: bool,
     ) -> DnsResult<Self> {
         // Build resolver with tokio runtime
         let resolver = TokioResolver::builder_tokio()?.build();
@@ -192,6 +195,7 @@ impl MatrixDnsResolver {
             dns_resolver: Arc::new(resolver),
             well_known_client,
             timeout,
+            use_https,
             well_known_cache: Arc::new(RwLock::new(HashMap::new())),
             error_cache: Arc::new(RwLock::new(HashMap::new())),
             backoff_state: Arc::new(RwLock::new(HashMap::new())),
@@ -305,10 +309,10 @@ impl MatrixDnsResolver {
             },
         }
 
-        // Try legacy _matrix._tcp (deprecated)
+        // Try deprecated _matrix._tcp SRV record (Matrix v1.8+ uses _matrix-fed._tcp)
         match self.resolve_via_srv(&hostname, "_matrix._tcp").await {
             Ok(resolved) => {
-                info!("Resolved via legacy _matrix._tcp SRV record: {:?}", resolved);
+                info!("Resolved via deprecated _matrix._tcp SRV record (Matrix v1.8): {:?}", resolved);
                 return Ok(resolved);
             },
             Err(e) => {
@@ -465,7 +469,7 @@ impl MatrixDnsResolver {
             });
         }
 
-        // Try legacy _matrix._tcp
+        // Try deprecated _matrix._tcp SRV record (Matrix v1.8+ prefers _matrix-fed._tcp)
         if let Ok(resolved) = self.resolve_via_srv(&delegated_hostname, "_matrix._tcp").await {
             return Ok(ResolvedServer {
                 ip_address: resolved.ip_address,
@@ -682,7 +686,8 @@ impl MatrixDnsResolver {
 
     /// Get the base URL for a resolved server
     pub fn get_base_url(&self, resolved: &ResolvedServer) -> String {
-        format!("https://{}:{}", resolved.ip_address, resolved.port)
+        let protocol = if self.use_https { "https" } else { "http" };
+        format!("{}://{}:{}", protocol, resolved.ip_address, resolved.port)
     }
 
     /// Get the Host header value for a resolved server
@@ -705,7 +710,7 @@ mod tests {
     fn create_test_resolver() -> MatrixDnsResolver {
         let http_client = Arc::new(Client::new());
         let well_known_client = Arc::new(WellKnownClient::new(http_client));
-        MatrixDnsResolver::new(well_known_client)
+        MatrixDnsResolver::new(well_known_client, true)
             .expect("Test: Failed to create DNS resolver")
     }
 

@@ -355,26 +355,6 @@ impl DeviceCacheManager {
     }
 }
 
-impl Default for DeviceCacheManager {
-    fn default() -> Self {
-        // Note: This default implementation creates a dummy repository
-        // In practice, this should be injected with a real database connection
-        let db = surrealdb::Surreal::init();
-        let performance_repo = Arc::new(PerformanceRepository::new(db));
-        Self {
-            cache: HashMap::new(),
-            cache_expiry: HashMap::new(),
-            max_cache_size: 1000,
-            cache_ttl: Duration::minutes(60),
-            hit_count: 0,
-            miss_count: 0,
-            performance_repo,
-            federation_client: None,
-            key_server_repo: None,
-        }
-    }
-}
-
 /// Cache performance statistics
 #[derive(Debug, Clone)]
 pub struct DeviceCacheStats {

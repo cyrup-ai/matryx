@@ -18,7 +18,7 @@ use crate::{
 };
 use matryx_entity::types::{SignedThirdPartyInvite, Event, EventContent};
 use matryx_surrealdb::repository::{
-    EventRepository, MembershipRepository, PowerLevelsRepository, RoomManagementService,
+    EventRepository, MembershipRepository, PowerLevelsRepository, RoomAliasRepository, RoomManagementService,
     RoomRepository, error::RepositoryError, room::RoomCreationConfig,
 };
 
@@ -317,21 +317,32 @@ pub async fn post(
                 }
             }
 
-            // Apply creation content if provided (custom room creation parameters)
-            if let Some(ref creation_content) = request.creation_content {
-                info!(
-                    "Applying custom creation content for room {}: {:?}",
-                    room.room_id, creation_content
-                );
-                // TODO: Store custom creation content in room metadata
-                // This content is typically used for room versioning or custom room types
-            }
-
             // Create room alias if requested
             let room_alias = if let Some(alias_name) = request.room_alias_name {
                 let full_alias = format!("#{}:{}", alias_name, state.homeserver_name);
-                // TODO: Create alias in database
-                Some(full_alias)
+
+                // Create alias in database
+                let alias_repo = RoomAliasRepository::new(state.db.clone());
+
+                match alias_repo.create_alias(&full_alias, &room.room_id, &user_id).await {
+                    Ok(_) => {
+                        // Set as canonical alias (optional but recommended)
+                        if let Err(e) = alias_repo.set_canonical_alias(
+                            &room.room_id,
+                            Some(&full_alias),
+                            &user_id
+                        ).await {
+                            warn!("Failed to set canonical alias for room {}: {}", room.room_id, e);
+                            // Continue anyway - alias was created
+                        }
+                        Some(full_alias)
+                    }
+                    Err(e) => {
+                        warn!("Failed to create room alias {}: {}", full_alias, e);
+                        // Don't fail room creation if alias creation fails
+                        None
+                    }
+                }
             } else {
                 None
             };

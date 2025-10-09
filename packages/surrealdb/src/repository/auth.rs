@@ -549,6 +549,7 @@ pub struct SsoProvider {
     pub name: String,
     pub icon_url: Option<String>,
     pub brand: Option<String>,
+    pub redirect_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

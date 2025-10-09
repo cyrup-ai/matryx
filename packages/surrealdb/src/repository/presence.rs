@@ -276,25 +276,5 @@ impl PresenceRepository {
         Ok(count)
     }
 
-    /// Create a live query for presence changes affecting a user's contacts
-    pub async fn create_presence_live_query(
-        &self,
-        user_id: &str,
-    ) -> Result<surrealdb::Response, RepositoryError> {
-        let query = r#"
-            LIVE SELECT * FROM presence_events
-            WHERE user_id IN (
-                SELECT VALUE target_user_id FROM user_relationships
-                WHERE user_id = $user_id AND relationship_type = 'friend'
-            )
-            OR user_id = $user_id
-        "#;
 
-        let response = self.db
-            .query(query)
-            .bind(("user_id", user_id.to_string()))
-            .await?;
-
-        Ok(response)
-    }
 }

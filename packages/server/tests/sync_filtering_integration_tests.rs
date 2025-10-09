@@ -12,12 +12,10 @@ mod common;
 
 /// Test complete sync filtering integration with all filter types
 #[tokio::test]
-async fn test_complete_sync_filtering_integration() {
-    let test_db = TestDatabase::new().await
-        .expect("Test setup: failed to create test database for sync filtering tests");
+async fn test_complete_sync_filtering_integration() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = TestDatabase::new().await?;
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app)
-        .expect("Test setup: failed to create test server for sync filtering integration tests");
+    let server = TestServer::new(app)?;
 
     // Create room with diverse event types
     let room_id = "!test:example.com";
@@ -35,8 +33,7 @@ async fn test_complete_sync_filtering_integration() {
             ("m.room.message", json!({"body": "Another message"})),
         ],
     )
-    .await
-    .expect("Test setup: failed to create test events for sync filtering tests");
+    .await?;
 
     // Test comprehensive filter
     let filter = MatrixFilter {
@@ -58,7 +55,7 @@ async fn test_complete_sync_filtering_integration() {
     };
 
     // Test sync with comprehensive filtering
-    let filter_json = serde_json::to_string(&filter).expect("Failed to serialize filter");
+    let filter_json = serde_json::to_string(&filter)?;
     let encoded_filter = urlencoding::encode(&filter_json);
 
     let response = server
@@ -112,17 +109,16 @@ async fn test_complete_sync_filtering_integration() {
         }
     }
 
-    test_db.cleanup().await.expect("Failed to cleanup test database");
+    test_db.cleanup().await?;
+    Ok(())
 }
 
 /// Test wildcard event type filtering patterns
 #[tokio::test]
-async fn test_wildcard_event_type_filtering() {
-    let test_db = TestDatabase::new().await
-        .expect("Test setup: failed to create test database for sync filtering tests");
+async fn test_wildcard_event_type_filtering() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = TestDatabase::new().await?;
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app)
-        .expect("Test setup: failed to create test server for sync filtering integration tests");
+    let server = TestServer::new(app)?;
 
     let room_id = "!wildcard:example.com";
 
@@ -138,8 +134,7 @@ async fn test_wildcard_event_type_filtering() {
             ("m.receipt", json!({"receipts": {}})),
         ],
     )
-    .await
-    .expect("Test setup: failed to create test events for sync filtering tests");
+    .await?;
 
     // Test wildcard patterns
     let test_cases = vec![
@@ -163,7 +158,7 @@ async fn test_wildcard_event_type_filtering() {
             ..Default::default()
         };
 
-        let filter_json = serde_json::to_string(&filter).expect("Failed to serialize filter");
+        let filter_json = serde_json::to_string(&filter)?;
         let encoded_filter = urlencoding::encode(&filter_json);
 
         let response = server
@@ -181,17 +176,16 @@ async fn test_wildcard_event_type_filtering() {
         }
     }
 
-    test_db.cleanup().await.expect("Failed to cleanup test database");
+    test_db.cleanup().await?;
+    Ok(())
 }
 
 /// Test filter precedence rules (not_types takes precedence over types)
 #[tokio::test]
-async fn test_filter_precedence_rules() {
-    let test_db = TestDatabase::new().await
-        .expect("Test setup: failed to create test database for sync filtering tests");
+async fn test_filter_precedence_rules() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = TestDatabase::new().await?;
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app)
-        .expect("Test setup: failed to create test server for sync filtering integration tests");
+    let server = TestServer::new(app)?;
 
     let room_id = "!precedence:example.com";
 
@@ -204,8 +198,7 @@ async fn test_filter_precedence_rules() {
             ("m.room.name", json!({"name": "Test Room"})),
         ],
     )
-    .await
-    .expect("Test setup: failed to create test events for sync filtering tests");
+    .await?;
 
     // Test that not_types takes precedence over types
     let filter = MatrixFilter {
@@ -223,7 +216,7 @@ async fn test_filter_precedence_rules() {
         ..Default::default()
     };
 
-    let filter_json = serde_json::to_string(&filter).expect("Failed to serialize filter");
+    let filter_json = serde_json::to_string(&filter)?;
     let encoded_filter = urlencoding::encode(&filter_json);
 
     let response = server
@@ -244,17 +237,16 @@ async fn test_filter_precedence_rules() {
         }
     }
 
-    test_db.cleanup().await.expect("Failed to cleanup test database");
+    test_db.cleanup().await?;
+    Ok(())
 }
 
 /// Test database-level filtering performance
 #[tokio::test]
-async fn test_database_level_filtering_performance() {
-    let test_db = TestDatabase::new().await
-        .expect("Test setup: failed to create test database for sync filtering tests");
+async fn test_database_level_filtering_performance() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = TestDatabase::new().await?;
     let app = common::create_test_app_with_db(test_db.db.clone()).await;
-    let server = TestServer::new(app)
-        .expect("Test setup: failed to create test server for sync filtering integration tests");
+    let server = TestServer::new(app)?;
 
     let room_id = "!performance:example.com";
 
@@ -266,8 +258,7 @@ async fn test_database_level_filtering_performance() {
     }
 
     create_test_room_with_events(&test_db, room_id, events)
-        .await
-        .expect("Test setup: failed to create test events for sync filtering tests");
+        .await?;
 
     let filter = MatrixFilter {
         room: Some(RoomFilter {
@@ -286,7 +277,7 @@ async fn test_database_level_filtering_performance() {
 
     let start_time = std::time::Instant::now();
 
-    let filter_json = serde_json::to_string(&filter).expect("Failed to serialize filter");
+    let filter_json = serde_json::to_string(&filter)?;
     let encoded_filter = urlencoding::encode(&filter_json);
 
     let response = server
@@ -312,7 +303,8 @@ async fn test_database_level_filtering_performance() {
     // Performance assertion - should complete within reasonable time
     assert!(duration.as_millis() < 1000, "Filtering took too long: {:?}", duration);
 
-    test_db.cleanup().await.expect("Failed to cleanup test database");
+    test_db.cleanup().await?;
+    Ok(())
 }
 
 /// Helper function to create a room with test events

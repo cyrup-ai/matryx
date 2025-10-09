@@ -339,6 +339,19 @@ impl<C: Connection> InfrastructureService<C> {
             .await
     }
 
+    /// Get old verify keys for server key response
+    pub async fn get_old_verify_keys(
+        &self,
+        server_name: &str,
+    ) -> Result<HashMap<String, crate::repository::key_server::OldVerifyKey>, RepositoryError> {
+        self.key_server_repo.get_old_verify_keys(server_name).await
+    }
+
+    /// Mark old keys as inactive during key rotation
+    pub async fn mark_old_keys_inactive(&self, server_name: &str) -> Result<(), RepositoryError> {
+        self.key_server_repo.mark_old_keys_inactive(server_name).await
+    }
+
     /// Register a new user with device
     pub async fn register_new_user(
         &self,

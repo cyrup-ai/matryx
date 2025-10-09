@@ -16,5 +16,5 @@ DEFINE FIELD txn_id ON TABLE transaction_mapping TYPE string ASSERT string::is::
 DEFINE FIELD event_id ON TABLE transaction_mapping TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD created_at ON TABLE transaction_mapping TYPE datetime DEFAULT time::now();
 
-DEFINE INDEX tm_user_txn_idx ON TABLE transaction_mapping COLUMNS user_id, txn_id;
+DEFINE INDEX tm_user_txn_idx ON TABLE transaction_mapping COLUMNS user_id, txn_id UNIQUE;
 DEFINE INDEX tm_event_idx ON TABLE transaction_mapping COLUMNS event_id;

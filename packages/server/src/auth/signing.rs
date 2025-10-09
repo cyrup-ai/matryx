@@ -139,7 +139,7 @@ impl FederationRequestSigner {
 
         // Build X-Matrix authorization header per RFC 9110
         Ok(format!(
-            "X-Matrix origin=\"{}\",destination=\"{}\",key=\"{}\",sig=\"{}\"",
+            "X-Matrix origin=\"{}\",destination=\"{}\",key=\"{}\",signature=\"{}\"",
             self.homeserver_name, destination, key_id, signature
         ))
     }

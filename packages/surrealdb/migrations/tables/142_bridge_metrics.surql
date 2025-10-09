@@ -29,3 +29,5 @@ DEFINE FIELD last_updated ON TABLE bridge_metrics TYPE datetime DEFAULT time::no
 
 -- Indexes based on repository query patterns (bridge.rs line 327)
 DEFINE INDEX bridge_metrics_bridge_id_idx ON TABLE bridge_metrics COLUMNS bridge_id UNIQUE;
+DEFINE INDEX bridge_metrics_last_updated_idx ON TABLE bridge_metrics COLUMNS last_updated;
+DEFINE INDEX bridge_metrics_last_health_check_idx ON TABLE bridge_metrics COLUMNS last_health_check;

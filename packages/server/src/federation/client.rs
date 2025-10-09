@@ -49,6 +49,7 @@ pub struct FederationClient {
     event_signer: Arc<EventSigner>,
     homeserver_name: String,
     request_timeout: Duration,
+    use_https: bool,
 }
 
 impl FederationClient {
@@ -57,12 +58,14 @@ impl FederationClient {
         http_client: Arc<Client>,
         event_signer: Arc<EventSigner>,
         homeserver_name: String,
+        use_https: bool,
     ) -> Self {
         Self {
             http_client,
             event_signer,
             homeserver_name,
             request_timeout: Duration::from_secs(30),
+            use_https,
         }
     }
 
@@ -89,8 +92,10 @@ impl FederationClient {
         // Construct federation API URL for membership query
         // This would typically be a Matrix federation endpoint like:
         // GET /_matrix/federation/v1/state/{roomId}?event_type=m.room.member&state_key={userId}
+        let protocol = if self.use_https { "https" } else { "http" };
         let url = format!(
-            "https://{}/_matrix/federation/v1/state/{}",
+            "{}://{}/_matrix/federation/v1/state/{}",
+            protocol,
             server_name,
             urlencoding::encode(room_id)
         );
@@ -190,8 +195,10 @@ impl FederationClient {
         );
 
         // Construct federation API URL
+        let protocol = if self.use_https { "https" } else { "http" };
         let url = format!(
-            "https://{}/_matrix/federation/v1/send/{}",
+            "{}://{}/_matrix/federation/v1/send/{}",
+            protocol,
             destination,
             urlencoding::encode(txn_id)
         );
@@ -266,8 +273,10 @@ impl FederationClient {
         }
 
         // Construct federation API URL
+        let protocol = if self.use_https { "https" } else { "http" };
         let url = format!(
-            "https://{}/_matrix/federation/v1/user/devices/{}",
+            "{}://{}/_matrix/federation/v1/user/devices/{}",
+            protocol,
             server_name,
             urlencoding::encode(user_id)
         );

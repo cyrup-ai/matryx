@@ -8,7 +8,7 @@
 -- Application service bridge configurations
 DEFINE TABLE bridges SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE $auth.admin = true
+        FOR select WHERE $auth.admin = true OR $auth.monitoring = true
         FOR create, update, delete WHERE $auth.admin = true;
 
 DEFINE FIELD bridge_id ON TABLE bridges TYPE string 

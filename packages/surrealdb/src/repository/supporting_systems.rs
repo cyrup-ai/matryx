@@ -173,7 +173,10 @@ impl SupportingSystemsService {
             self.crypto_keys_repo.upload_one_time_keys(user_id, device_id, one_time_keys).await?;
         }
 
-        // TODO: Handle fallback keys if needed
+        // Handle fallback keys if provided (replaces existing fallback keys)
+        if let Some(fallback_keys) = &keys.fallback_keys {
+            self.crypto_keys_repo.upload_fallback_keys(user_id, device_id, fallback_keys).await?;
+        }
 
         // Count remaining one-time keys
         let one_time_key_counts = self.get_one_time_key_counts(user_id, device_id).await?;

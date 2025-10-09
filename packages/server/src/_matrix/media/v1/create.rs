@@ -1,3 +1,8 @@
+//! POST /_matrix/media/v1/create endpoint
+//!
+//! This endpoint is deprecated as of Matrix v1.11 in favor of
+//! authenticated v3 media endpoints at /_matrix/client/v3/media/*
+
 use crate::config::ServerConfig;
 use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};

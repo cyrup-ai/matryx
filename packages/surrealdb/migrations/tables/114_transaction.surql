@@ -14,8 +14,8 @@ DEFINE TABLE transaction SCHEMAFULL
 DEFINE FIELD txn_id ON TABLE transaction TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD origin ON TABLE transaction TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD destination ON TABLE transaction TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD pdus ON TABLE transaction TYPE array DEFAULT [];
-DEFINE FIELD edus ON TABLE transaction TYPE array DEFAULT [];
+DEFINE FIELD pdus ON TABLE transaction TYPE array<object> DEFAULT [];
+DEFINE FIELD edus ON TABLE transaction TYPE array<object> DEFAULT [];
 DEFINE FIELD created_at ON TABLE transaction TYPE datetime DEFAULT time::now();
 
 DEFINE INDEX txn_id_idx ON TABLE transaction COLUMNS txn_id;

@@ -7,8 +7,8 @@ mod crypto_tests {
     use vodozemac::olm::{Account, SessionConfig};
 
     #[tokio::test]
-    async fn test_device_key_validation_with_vodozemac() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_device_key_validation_with_vodozemac() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
         let account = Account::new();
 
@@ -22,12 +22,13 @@ mod crypto_tests {
 
         // Should pass validation
         let result = crypto_provider.verify_device_keys(&device_keys).await;
-        assert!(result.unwrap());
+        assert!(result?);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_cross_signing_verification() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_cross_signing_verification() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         // Create complete cross-signing chain using vodozemac
@@ -42,19 +43,20 @@ mod crypto_tests {
             )
             .await;
 
-        assert!(result.unwrap());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_olm_session_creation() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_olm_session_creation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let alice_account = Account::new();
         let mut bob_account = Account::new();
         bob_account.generate_one_time_keys(1);
 
-        let bob_otk = *bob_account.one_time_keys().values().next().unwrap();
+        let bob_otk = *bob_account.one_time_keys().values().next()
+            .ok_or("Test: should have one-time key")?;
 
         let session = crypto_provider
             .create_olm_session(
@@ -65,25 +67,27 @@ mod crypto_tests {
             .await;
 
         assert!(session.is_ok());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_megolm_group_session() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_megolm_group_session() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let group_session = crypto_provider.create_group_session().await;
         assert!(group_session.is_ok());
 
-        let mut session = group_session.unwrap();
+        let mut session = group_session?;
         let encrypted = session.encrypt("Hello, room!".as_bytes());
         // MegolmMessage doesn't have is_ok(), it's returned directly
         let _message = encrypted;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_invalid_device_key_signature() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_invalid_device_key_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         // Create device keys with invalid signature
@@ -91,16 +95,17 @@ mod crypto_tests {
         device_keys
             .signatures
             .get_mut("@test:example.com")
-            .unwrap()
+            .ok_or("Test: should have user signatures")?
             .insert("ed25519:DEVICE1".to_string(), "invalid_signature".to_string());
 
         let result = crypto_provider.verify_device_keys(&device_keys).await;
-        assert!(!result.unwrap());
+        assert!(!result?);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_missing_required_keys() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_missing_required_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         // Create device keys missing ed25519 key
@@ -109,11 +114,12 @@ mod crypto_tests {
 
         let result = crypto_provider.verify_device_keys(&device_keys).await;
         assert!(result.is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_backup_auth_data_validation() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_backup_auth_data_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let auth_data = create_test_backup_auth_data();
@@ -122,12 +128,13 @@ mod crypto_tests {
             .await;
 
         // Should pass with valid auth data
-        assert!(result.unwrap());
+        assert!(result?);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_room_key_encryption_for_backup() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_room_key_encryption_for_backup() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let room_key_data = create_test_room_key_backup_data();
@@ -137,11 +144,12 @@ mod crypto_tests {
             .encrypt_room_key_for_backup(&room_key_data, &auth_data)
             .await;
         assert!(encrypted.is_ok());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_canonical_json_generation() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_canonical_json_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
         let device_keys = create_test_device_keys();
 
@@ -150,45 +158,53 @@ mod crypto_tests {
 
         // Verify canonical JSON is deterministic
         let canonical_json2 = crypto_provider.canonical_json_device_keys(&device_keys);
-        assert_eq!(canonical_json.unwrap(), canonical_json2.unwrap());
+        assert_eq!(
+            canonical_json?,
+            canonical_json2?
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_one_time_key_validation() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_one_time_key_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let mut account = Account::new();
         account.generate_one_time_keys(1);
         let one_time_keys = account.one_time_keys();
-        let otk = one_time_keys.values().next().unwrap();
+        let otk = one_time_keys.values().next()
+            .ok_or("Test: should have one-time key")?;
 
         let key_json = json!(otk.to_base64());
         let result = crypto_provider
             .validate_one_time_key("signed_curve25519:AAABBB", &key_json)
             .await;
 
-        assert!(result.unwrap());
+        assert!(result?);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_cross_signing_key_extraction() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_cross_signing_key_extraction() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let master_key = create_test_master_key();
         let ed25519_key = crypto_provider.extract_ed25519_key(&master_key.keys);
 
         assert!(ed25519_key.is_ok());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_session_encryption_decryption() {
+    async fn test_session_encryption_decryption() -> Result<(), Box<dyn std::error::Error>> {
         let alice_account = Account::new();
         let mut bob_account = Account::new();
         bob_account.generate_one_time_keys(1);
 
-        let bob_otk = *bob_account.one_time_keys().values().next().unwrap();
+        let bob_otk = *bob_account.one_time_keys().values().next()
+            .ok_or("Test: Bob should have one-time key")?;
 
         // Alice creates outbound session
         let mut alice_session = alice_account.create_outbound_session(
@@ -209,10 +225,12 @@ mod crypto_tests {
 
         let mut bob_session_result = bob_account
             .create_inbound_session(alice_account.curve25519_key(), pre_key_message)
-            .unwrap();
+            .map_err(|e| format!("Test: Bob should create inbound session: {:?}", e))?;
 
-        let decrypted = bob_session_result.session.decrypt(&message).unwrap();
+        let decrypted = bob_session_result.session.decrypt(&message)
+            .map_err(|e| format!("Test: message decryption should succeed: {:?}", e))?;
         assert_eq!(decrypted, "Hello Bob!".as_bytes());
+        Ok(())
     }
 
     #[tokio::test]
@@ -229,8 +247,8 @@ mod crypto_tests {
     }
 
     #[tokio::test]
-    async fn test_error_handling_invalid_base64() {
-        let db = surrealdb::engine::any::connect("memory").await.unwrap();
+    async fn test_error_handling_invalid_base64() -> Result<(), Box<dyn std::error::Error>> {
+        let db = surrealdb::engine::any::connect("memory").await?;
         let crypto_provider = MatryxCryptoProvider::new(db);
 
         let mut device_keys = create_test_device_keys();
@@ -241,10 +259,12 @@ mod crypto_tests {
         let result = crypto_provider.verify_device_keys(&device_keys).await;
         assert!(result.is_err());
 
-        match result.unwrap_err() {
-            CryptoError::InvalidKey(_) => {}, // Expected error type
-            _ => panic!("Expected InvalidKey error"),
+        match result {
+            Err(CryptoError::InvalidKey(_)) => {}, // Expected error type
+            Err(_) => panic!("Expected InvalidKey error"),
+            Ok(_) => return Err("Test: should return error for invalid base64".into()),
         }
+        Ok(())
     }
 
     // Helper functions for creating test data
@@ -279,7 +299,7 @@ mod crypto_tests {
             "algorithms": device_keys.algorithms,
             "keys": device_keys.keys,
         }))
-        .unwrap();
+        .unwrap_or_else(|e| panic!("Test: canonical JSON serialization should succeed: {:?}", e));
 
         let signature = account.sign(&canonical_json);
         let mut user_signatures = HashMap::new();
@@ -375,7 +395,7 @@ mod crypto_tests {
             "usage": self_signing_key.usage,
             "keys": self_signing_key.keys,
         }))
-        .unwrap();
+        .unwrap_or_else(|e| panic!("Test: self-signing canonical JSON serialization should succeed: {:?}", e));
 
         let master_signature = master_account.sign(&self_signing_canonical);
         let mut master_sigs = HashMap::new();
@@ -396,13 +416,13 @@ mod crypto_tests {
             "algorithms": device_keys.algorithms,
             "keys": device_keys.keys,
         }))
-        .unwrap();
+        .unwrap_or_else(|e| panic!("Test: device canonical JSON serialization should succeed: {:?}", e));
 
         let self_signing_signature = self_signing_account.sign(&device_canonical);
         device_keys
             .signatures
             .get_mut("@test:example.com")
-            .unwrap()
+            .unwrap_or_else(|| panic!("Test: should have user signatures"))
             .insert("ed25519:self_signing".to_string(), self_signing_signature.to_base64());
 
         (master_key, self_signing_key, device_keys)

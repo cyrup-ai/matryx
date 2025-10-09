@@ -1,5 +1,6 @@
 use crate::repository::error::RepositoryError;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -367,6 +368,144 @@ impl ToDeviceRepository {
 
         let devices: Vec<Value> = result.take(0)?;
         Ok(!devices.is_empty())
+    }
+
+    /// Subscribe to to-device messages using SurrealDB LIVE query
+    /// Returns a stream of notifications for to-device messages for the specified user
+    pub async fn subscribe_to_device_messages(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<
+        impl futures_util::Stream<Item = Result<ToDeviceMessage, RepositoryError>>,
+        RepositoryError,
+    > {
+        // Create SurrealDB LiveQuery for to-device messages
+        let mut stream = self
+            .db
+            .query("LIVE SELECT * FROM to_device_messages WHERE recipient_id = $user_id AND device_id = $device_id AND is_delivered = false")
+            .bind(("user_id", user_id.to_string()))
+            .bind(("device_id", device_id.to_string()))
+            .await
+            .map_err(RepositoryError::Database)?;
+
+        // Transform SurrealDB notification stream with proper error handling
+        let message_stream = stream
+            .stream::<surrealdb::Notification<serde_json::Value>>(0)
+            .map_err(RepositoryError::Database)?
+            .map(|notification_result| -> Result<ToDeviceMessage, RepositoryError> {
+                let notification = notification_result.map_err(RepositoryError::Database)?;
+
+                match notification.action {
+                    surrealdb::Action::Create | surrealdb::Action::Update => {
+                        // Convert to ToDeviceMessage or return error
+                        Self::convert_notification_to_message_result(notification.data)
+                    },
+                    surrealdb::Action::Delete => {
+                        // Return the deleted message data for proper handling
+                        Self::convert_notification_to_message_result(notification.data)
+                    },
+                    _ => {
+                        // Handle unexpected actions with error
+                        Err(RepositoryError::Database(surrealdb::Error::msg(format!(
+                            "Unexpected action in to-device message notification: {:?}",
+                            notification.action
+                        ))))
+                    },
+                }
+            });
+
+        Ok(message_stream)
+    }
+
+    /// Convert notification data to ToDeviceMessage with proper error handling
+    fn convert_notification_to_message_result(value: Value) -> Result<ToDeviceMessage, RepositoryError> {
+        let message_id = value.get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "message_id".to_string(),
+                message: "Missing or invalid message_id".to_string(),
+            })?;
+        
+        let sender_id = value.get("sender_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "sender_id".to_string(),
+                message: "Missing or invalid sender_id".to_string(),
+            })?;
+        
+        let recipient_id = value.get("recipient_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "recipient_id".to_string(),
+                message: "Missing or invalid recipient_id".to_string(),
+            })?;
+        
+        let device_id = value.get("device_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "device_id".to_string(),
+                message: "Missing or invalid device_id".to_string(),
+            })?;
+        
+        let event_type = value.get("event_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "event_type".to_string(),
+                message: "Missing or invalid event_type".to_string(),
+            })?;
+        
+        let content = value.get("content")
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "content".to_string(),
+                message: "Missing content field".to_string(),
+            })?;
+        
+        let created_at_str = value.get("created_at")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "created_at".to_string(),
+                message: "Missing or invalid created_at".to_string(),
+            })?;
+        
+        let is_delivered = value.get("is_delivered")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| RepositoryError::Validation {
+                field: "is_delivered".to_string(),
+                message: "Missing or invalid is_delivered".to_string(),
+            })?;
+
+        let created_at = created_at_str.parse::<DateTime<Utc>>()
+            .map_err(|e| RepositoryError::Validation {
+                field: "created_at".to_string(),
+                message: format!("Invalid datetime format: {}", e),
+            })?;
+
+        let delivered_at = if is_delivered {
+            value
+                .get("delivered_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        } else {
+            None
+        };
+
+        let txn_id = value.get("txn_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Ok(ToDeviceMessage {
+            message_id: message_id.to_string(),
+            sender_id: sender_id.to_string(),
+            recipient_id: recipient_id.to_string(),
+            device_id: device_id.to_string(),
+            event_type: event_type.to_string(),
+            content: content.clone(),
+            txn_id,
+            created_at,
+            delivered_at,
+            is_delivered,
+        })
     }
 
     /// Convert database value to ToDeviceMessage

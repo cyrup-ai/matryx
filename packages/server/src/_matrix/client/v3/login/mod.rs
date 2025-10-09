@@ -1,6 +1,6 @@
 use crate::utils::session_helpers::create_secure_session_cookie;
 use axum::http::HeaderMap;
-use axum::{Json, extract::ConnectInfo, extract::State, http::StatusCode};
+use axum::{Json, extract::ConnectInfo, extract::State};
 use regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::auth::captcha::CaptchaService;
 use crate::state::AppState;
-// use crate::auth::errors::MatrixAuthError; // TODO: Use for proper error handling
+use crate::auth::errors::MatrixAuthError;
 use crate::auth::refresh_token::TokenPair;
 // Cookie helper function is in main.rs
 use matryx_surrealdb::repository::{
@@ -61,7 +61,7 @@ pub struct LoginFlowsResponse {
 }
 
 /// GET /_matrix/client/v3/login
-pub async fn get(State(state): State<AppState>) -> Result<Json<LoginFlowsResponse>, StatusCode> {
+pub async fn get(State(state): State<AppState>) -> Result<Json<LoginFlowsResponse>, MatrixAuthError> {
     // Build available login flows based on server configuration
     let mut flows = vec![LoginFlow {
         flow_type: "m.login.password".to_string(),
@@ -96,13 +96,13 @@ pub async fn post(
     cookies: Cookies,
     headers: HeaderMap,
     Json(request): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     let result = match request.login_type.as_str() {
         "m.login.password" => {
             handle_password_login(state, addr, headers, cookies.clone(), request).await
         },
         "m.login.token" => handle_token_login(state, addr, headers, request).await,
-        _ => return Err(StatusCode::BAD_REQUEST),
+        _ => return Err(MatrixAuthError::InvalidCredentials),
     };
 
     // Set secure session cookie for OAuth2 integration upon successful login
@@ -121,7 +121,7 @@ async fn handle_password_login(
     headers: HeaderMap,
     cookies: Cookies,
     request: LoginRequest,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     // Handle refresh token login if present
     if let Some(refresh_token) = request.refresh_token {
         return handle_refresh_token_login(state, refresh_token, request.device_id).await;
@@ -133,8 +133,8 @@ async fn handle_password_login(
     }
 
     // Validate required fields for password login
-    let username = request.user.ok_or(StatusCode::BAD_REQUEST)?;
-    let password_value = request.password.ok_or(StatusCode::BAD_REQUEST)?;
+    let username = request.user.ok_or(MatrixAuthError::InvalidCredentials)?;
+    let password_value = request.password.ok_or(MatrixAuthError::InvalidCredentials)?;
 
     // Check if CAPTCHA is required for this login attempt
     let captcha_repo = CaptchaRepository::new(state.db.clone());
@@ -151,25 +151,31 @@ async fn handle_password_login(
     if captcha_service
         .is_captcha_required(&client_ip, "login")
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            error!("Failed to check CAPTCHA requirement: {}", e);
+            MatrixAuthError::DatabaseError(e.to_string())
+        })?
     {
         // Return CAPTCHA challenge - client must retry with CAPTCHA response
         let _challenge = captcha_service
             .create_challenge(Some(client_ip.clone()), Some(user_agent.to_string()), None)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                error!("Failed to create CAPTCHA challenge: {}", e);
+                MatrixAuthError::DatabaseError(e.to_string())
+            })?;
 
         info!("CAPTCHA challenge required for login attempt: user={}, ip={}", username, client_ip);
 
         // Return Matrix M_CAPTCHA_NEEDED error with challenge data
-        return Err(StatusCode::TOO_MANY_REQUESTS); // Client should handle this as CAPTCHA needed
+        return Err(MatrixAuthError::InvalidCredentials); // Client should handle this as CAPTCHA needed
     }
 
     // Create password login request
     let password_request = password::PasswordLoginRequest {
         login_type: request.login_type,
         user: Some(username.clone()),
-        identifier: None, // Legacy path uses user field
+        identifier: None, // Deprecated path uses user field instead of identifier
         password: password_value,
         device_id: request.device_id,
         initial_device_display_name: request.initial_device_display_name,
@@ -210,7 +216,7 @@ async fn handle_token_login(
     addr: SocketAddr,
     headers: HeaderMap,
     request: LoginRequest,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     // Handle SSO and application service authentication
     match request.login_type.as_str() {
         "m.login.sso" => handle_sso_login(state, addr, headers, &request).await,
@@ -219,7 +225,7 @@ async fn handle_token_login(
         },
         _ => {
             warn!("Unsupported login type: {}", request.login_type);
-            Err(StatusCode::BAD_REQUEST)
+            Err(MatrixAuthError::InvalidCredentials)
         },
     }
 }
@@ -228,24 +234,24 @@ async fn handle_refresh_token_login(
     state: AppState,
     refresh_token: String,
     device_id: Option<String>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     info!("Processing refresh token login attempt");
 
     // Validate refresh token and extract claims
     let claims = state.session_service.validate_token(&refresh_token).map_err(|e| {
         warn!("Invalid refresh token: {}", e);
-        StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Extract user and device information from claims
     let user_id = claims.matrix_user_id.ok_or_else(|| {
         error!("Refresh token missing user ID");
-        StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     let current_device_id = claims.matrix_device_id.ok_or_else(|| {
         error!("Refresh token missing device ID");
-        StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Use existing device ID or provided device ID
@@ -255,7 +261,7 @@ async fn handle_refresh_token_login(
     let (new_access_token, new_refresh_token) =
         state.session_service.refresh_token(&refresh_token).await.map_err(|e| {
             error!("Failed to refresh tokens: {}", e);
-            StatusCode::UNAUTHORIZED
+            MatrixAuthError::UnknownToken
         })?;
 
     // Create structured token pair for organized token management
@@ -278,7 +284,7 @@ async fn handle_refresh_token_login(
         )
         .map_err(|e| {
             error!("Failed to create JWT token: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::JwtError(e.to_string())
         })?;
 
     info!("Refresh token login successful for user: {}", user_id);
@@ -297,19 +303,19 @@ async fn handle_sso_token_login(
     state: AppState,
     sso_token: String,
     device_id: Option<String>,
-) -> Result<Json<LoginResponse>, StatusCode> {
+) -> Result<Json<LoginResponse>, MatrixAuthError> {
     info!("Processing SSO token login attempt");
 
     // Validate SSO token using session service
     let claims = state.session_service.validate_token(&sso_token).map_err(|e| {
         warn!("Invalid SSO token: {}", e);
-        StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Extract user information from SSO token claims
     let user_id = claims.matrix_user_id.ok_or_else(|| {
         error!("SSO token missing user ID");
-        StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Generate device ID if not provided
@@ -325,7 +331,7 @@ async fn handle_sso_token_login(
         .await
         .map_err(|e| {
             error!("Failed to create user session for SSO: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::DatabaseError(e.to_string())
         })?;
 
     // Generate new access token for Matrix API usage
@@ -335,13 +341,13 @@ async fn handle_sso_token_login(
         .await
         .map_err(|e| {
             error!("Failed to create access token for SSO user: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::JwtError(e.to_string())
         })?;
 
     // Build well-known configuration for SSO response
     let well_known = serde_json::json!({
         "m.homeserver": {
-            "base_url": format!("https://{}", state.homeserver_name)
+            "base_url": state.config.base_url()
         }
     });
 
@@ -386,20 +392,20 @@ async fn handle_sso_login(
     addr: SocketAddr,
     headers: HeaderMap,
     request: &LoginRequest,
-) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
+) -> Result<axum::Json<LoginResponse>, MatrixAuthError> {
     use axum::Json;
     use uuid::Uuid;
 
     // SSO login requires a token parameter
     let sso_token = request.token.as_ref().ok_or_else(|| {
         warn!("SSO login missing required 'token' parameter");
-        axum::http::StatusCode::BAD_REQUEST
+        MatrixAuthError::InvalidCredentials
     })?;
 
     // Validate SSO token and extract user information
     let user_info = validate_sso_token(&state, sso_token).await.map_err(|e| {
         warn!("SSO token validation failed: {}", e);
-        axum::http::StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Generate new device ID if not provided
@@ -422,7 +428,7 @@ async fn handle_sso_login(
         .await
         .map_err(|e| {
             error!("Failed to create JWT token for SSO user {}: {}", user_info.user_id, e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::JwtError(e.to_string())
         })?;
 
     // Store device information using repository
@@ -442,7 +448,7 @@ async fn handle_sso_login(
         .await
         .map_err(|e| {
             error!("Failed to store device info for SSO login: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::DatabaseError(e.to_string())
         })?;
 
     info!("SSO login successful for user: {}", user_info.user_id);
@@ -463,32 +469,32 @@ async fn handle_application_service_login(
     addr: SocketAddr,
     headers: HeaderMap,
     request: &LoginRequest,
-) -> Result<axum::Json<LoginResponse>, axum::http::StatusCode> {
+) -> Result<axum::Json<LoginResponse>, MatrixAuthError> {
     use axum::Json;
     use uuid::Uuid;
 
     // Application service login requires a token (AS token)
     let as_token = request.token.as_ref().ok_or_else(|| {
         warn!("Application service login missing required 'token' parameter");
-        axum::http::StatusCode::BAD_REQUEST
+        MatrixAuthError::InvalidCredentials
     })?;
 
     // Application service login also requires a user parameter (user to login as)
     let target_user = request.user.as_ref().ok_or_else(|| {
         warn!("Application service login missing required 'user' parameter");
-        axum::http::StatusCode::BAD_REQUEST
+        MatrixAuthError::InvalidCredentials
     })?;
 
     // Validate application service token and permissions
     let app_service = validate_application_service_token(&state, as_token).await.map_err(|e| {
         warn!("Application service token validation failed: {}", e);
-        axum::http::StatusCode::UNAUTHORIZED
+        MatrixAuthError::UnknownToken
     })?;
 
     // Verify the application service can login as this user
     if !can_app_service_login_as(&app_service, target_user) {
         warn!("Application service {} cannot login as user {}", app_service.id, target_user);
-        return Err(axum::http::StatusCode::FORBIDDEN);
+        return Err(MatrixAuthError::Forbidden);
     }
 
     // Generate device ID if not provided
@@ -511,7 +517,7 @@ async fn handle_application_service_login(
         .await
         .map_err(|e| {
             error!("Failed to create JWT token for AS user {}: {}", target_user, e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::JwtError(e.to_string())
         })?;
 
     // Store device information using repository
@@ -531,7 +537,7 @@ async fn handle_application_service_login(
         .await
         .map_err(|e| {
             error!("Failed to store device info for AS login: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            MatrixAuthError::DatabaseError(e.to_string())
         })?;
 
     info!("Application service login successful: {} as user {}", app_service.id, target_user);

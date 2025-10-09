@@ -20,7 +20,8 @@ DEFINE FIELD user_id ON TABLE openid_tokens TYPE string
     AND string::starts_with($value, '@') 
     AND string::contains($value, ':');
 
-DEFINE FIELD expires_at ON TABLE openid_tokens TYPE int ASSERT $value > 0;
+DEFINE FIELD expires_at ON TABLE openid_tokens TYPE datetime 
+    ASSERT $value > time::now();
 
 DEFINE FIELD created_at ON TABLE openid_tokens TYPE datetime DEFAULT time::now();
 

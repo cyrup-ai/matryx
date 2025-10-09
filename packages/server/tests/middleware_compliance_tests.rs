@@ -29,7 +29,7 @@ use matryx_server::{
 
 /// Test Matrix-compliant CORS headers
 #[tokio::test]
-async fn test_cors_compliance() {
+async fn test_cors_compliance() -> Result<(), Box<dyn std::error::Error>> {
     let cors_layer = create_cors_layer();
 
     let app = Router::new().route("/test", get(|| async { "OK" })).layer(cors_layer);
@@ -41,10 +41,9 @@ async fn test_cors_compliance() {
         .header("Origin", "https://app.element.io")
         .header("Access-Control-Request-Method", "POST")
         .header("Access-Control-Request-Headers", "authorization,content-type")
-        .body(Body::empty())
-        .expect("Failed to build request");
+        .body(Body::empty())?;
 
-    let response = app.oneshot(request).await.expect("Request failed");
+    let response = app.oneshot(request).await?;
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -52,32 +51,31 @@ async fn test_cors_compliance() {
     assert_eq!(
         headers
             .get("access-control-allow-origin")
-            .expect("Missing CORS origin header"),
+            .ok_or("Missing CORS origin header")?,
         "*"
     );
     assert!(
         headers
             .get("access-control-allow-methods")
-            .expect("Missing CORS methods header")
-            .to_str()
-            .expect("Invalid header value")
+            .ok_or("Missing CORS methods header")?
+            .to_str()?
             .contains("POST")
     );
     assert!(
         headers
             .get("access-control-allow-headers")
-            .expect("Missing CORS headers header")
-            .to_str()
-            .expect("Invalid header value")
+            .ok_or("Missing CORS headers header")?
+            .to_str()?
             .contains("authorization")
     );
+    Ok(())
 }
 
 /// Test rate limiting with proper M_LIMIT_EXCEEDED responses
 #[tokio::test]
-async fn test_rate_limiting_compliance() {
+async fn test_rate_limiting_compliance() -> Result<(), Box<dyn std::error::Error>> {
     let rate_limit_service =
-        Arc::new(RateLimitService::new(Some(2)).expect("Should create rate limit service"));
+        Arc::new(RateLimitService::new(Some(2))?);
 
     async fn test_handler() -> axum::Json<serde_json::Value> {
         axum::Json(json!({"success": true}))
@@ -94,10 +92,9 @@ async fn test_rate_limiting_compliance() {
         .method(Method::GET)
         .uri("/test")
         .extension(ConnectInfo(addr))
-        .body(Body::empty())
-        .expect("Failed to build request");
+        .body(Body::empty())?;
 
-    let response1 = app.clone().oneshot(request1).await.expect("Request failed");
+    let response1 = app.clone().oneshot(request1).await?;
     assert_eq!(response1.status(), StatusCode::OK);
 
     // Second request should succeed
@@ -105,10 +102,9 @@ async fn test_rate_limiting_compliance() {
         .method(Method::GET)
         .uri("/test")
         .extension(ConnectInfo(addr))
-        .body(Body::empty())
-        .expect("Failed to build request");
+        .body(Body::empty())?;
 
-    let response2 = app.clone().oneshot(request2).await.expect("Request failed");
+    let response2 = app.clone().oneshot(request2).await?;
     assert_eq!(response2.status(), StatusCode::OK);
 
     // Third request should be rate limited
@@ -116,31 +112,30 @@ async fn test_rate_limiting_compliance() {
         .method(Method::GET)
         .uri("/test")
         .extension(ConnectInfo(addr))
-        .body(Body::empty())
-        .expect("Failed to build request");
+        .body(Body::empty())?;
 
-    let response3 = app.oneshot(request3).await.expect("Request failed");
+    let response3 = app.oneshot(request3).await?;
     assert_eq!(response3.status(), StatusCode::TOO_MANY_REQUESTS);
 
     // Verify Matrix-compliant error response
     let body = axum::body::to_bytes(response3.into_body(), usize::MAX)
-        .await
-        .expect("Failed to read response body");
-    let error_response: Value = serde_json::from_slice(&body).expect("Invalid JSON response");
+        .await?;
+    let error_response: Value = serde_json::from_slice(&body)?;
 
     assert_eq!(error_response["errcode"], "M_LIMIT_EXCEEDED");
     assert!(
         error_response["error"]
             .as_str()
-            .expect("Missing error message")
+            .ok_or("Missing error message")?
             .contains("Rate limit exceeded")
     );
     assert!(error_response["retry_after_ms"].is_number());
+    Ok(())
 }
 
 /// Test error code format compliance
 #[tokio::test]
-async fn test_error_code_format_compliance() {
+async fn test_error_code_format_compliance() -> Result<(), Box<dyn std::error::Error>> {
     // Test various Matrix error codes for proper format
     let errors = vec![
         MatrixError::Forbidden,
@@ -155,12 +150,11 @@ async fn test_error_code_format_compliance() {
     for error in errors {
         let response = error.into_response();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("Failed to read response body");
-        let error_json: Value = serde_json::from_slice(&body).expect("Invalid JSON response");
+            .await?;
+        let error_json: Value = serde_json::from_slice(&body)?;
 
         // Verify Matrix error code format
-        let errcode = error_json["errcode"].as_str().expect("Missing errcode");
+        let errcode = error_json["errcode"].as_str().ok_or("Missing errcode")?;
         assert!(errcode.starts_with("M_"), "Error code should start with M_: {}", errcode);
 
         // Verify required fields
@@ -178,15 +172,16 @@ async fn test_error_code_format_compliance() {
             },
             _ => {
                 // Standard errors should only have errcode and error
-                assert_eq!(error_json.as_object().expect("Response should be object").len(), 2);
+                assert_eq!(error_json.as_object().ok_or("Response should be object")?.len(), 2);
             },
         }
     }
+    Ok(())
 }
 
 /// Test CORS headers on error responses
 #[tokio::test]
-async fn test_cors_on_error_responses() {
+async fn test_cors_on_error_responses() -> Result<(), Box<dyn std::error::Error>> {
     let cors_layer = create_cors_layer();
 
     async fn error_handler() -> Result<String, MatrixError> {
@@ -199,19 +194,19 @@ async fn test_cors_on_error_responses() {
         .method(Method::GET)
         .uri("/error")
         .header("Origin", "https://app.element.io")
-        .body(Body::empty())
-        .expect("Failed to build request");
+        .body(Body::empty())?;
 
-    let response = app.oneshot(request).await.expect("Request failed");
+    let response = app.oneshot(request).await?;
 
     // Should still have CORS headers on error responses
     let headers = response.headers();
     assert_eq!(
         headers
             .get("access-control-allow-origin")
-            .expect("Missing CORS origin header"),
+            .ok_or("Missing CORS origin header")?,
         "*"
     );
+    Ok(())
 }
 
 /// Test rate limiting service configuration validation
@@ -236,8 +231,8 @@ async fn test_rate_limit_service_validation() {
 
 /// Test rate limiting cleanup functionality
 #[tokio::test]
-async fn test_rate_limiting_cleanup() {
-    let rate_limit_service = RateLimitService::new(Some(100)).expect("Should create service");
+async fn test_rate_limiting_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+    let rate_limit_service = RateLimitService::new(Some(100))?;
 
     // Trigger some rate limit checks to create entries
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
@@ -250,6 +245,7 @@ async fn test_rate_limiting_cleanup() {
     // Verify we can still use the service after cleanup
     let result = rate_limit_service.check_ip_rate_limit(ip).await;
     assert!(result.is_ok(), "Service should still work after cleanup");
+    Ok(())
 }
 
 /// Test Matrix specification compliance for transaction patterns

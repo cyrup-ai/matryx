@@ -19,6 +19,11 @@ pub struct LazyLoadingMetrics {
     avg_processing_time_us: AtomicU64,
     members_filtered_out: AtomicU64,
     db_queries_avoided: AtomicU64,
+    // Database query performance metrics
+    db_query_count: AtomicU64,
+    db_query_total_time_us: AtomicU64,
+    db_query_min_time_us: AtomicU64,  // 0 means no queries yet
+    db_query_max_time_us: AtomicU64,
 }
 
 impl LazyLoadingMetrics {
@@ -32,6 +37,10 @@ impl LazyLoadingMetrics {
             avg_processing_time_us: AtomicU64::new(0),
             members_filtered_out: AtomicU64::new(0),
             db_queries_avoided: AtomicU64::new(0),
+            db_query_count: AtomicU64::new(0),
+            db_query_total_time_us: AtomicU64::new(0),
+            db_query_min_time_us: AtomicU64::new(0),
+            db_query_max_time_us: AtomicU64::new(0),
         }
     }
 
@@ -130,9 +139,13 @@ impl LazyLoadingMetrics {
             total_requests: lazy_loading_metrics.rooms_optimized,
             cache_hit_ratio: lazy_loading_metrics.cache_hit_rate,
             avg_processing_time_us: (lazy_loading_metrics.avg_load_time_ms * 1000.0) as u64, // Convert ms to us
-            total_members_filtered: 0, // Would need additional tracking
-            db_queries_avoided: 0,     // Would need additional tracking
+            total_members_filtered: self.members_filtered_out.load(Ordering::Relaxed),
+            db_queries_avoided: self.db_queries_avoided.load(Ordering::Relaxed),
             estimated_memory_usage_kb: (lazy_loading_metrics.memory_saved_mb * 1024.0) as usize,
+            db_query_count: self.get_db_query_count(),
+            db_avg_query_time_us: self.get_db_avg_query_time_us(),
+            db_query_min_time_us: self.get_db_query_min_time_us(),
+            db_query_max_time_us: self.get_db_query_max_time_us(),
         }
     }
 
@@ -143,19 +156,89 @@ impl LazyLoadingMetrics {
 
     /// Record database query time for monitoring
     pub fn record_db_query_time(&self, duration: std::time::Duration) {
-        // For now, this contributes to the overall processing time
-        // In a full implementation, this could be tracked separately
         let duration_us = duration.as_micros() as u64;
 
-        // Update database-specific metrics using the duration_us
-        // Log slow database queries for performance monitoring
-        if duration_us > 50_000 {
-            // 50ms threshold
-            tracing::warn!("Slow database query detected: {}μs", duration_us);
+        // Increment query count
+        self.db_query_count.fetch_add(1, Ordering::Relaxed);
+
+        // Add to total time
+        self.db_query_total_time_us.fetch_add(duration_us, Ordering::Relaxed);
+
+        // Update minimum time (0 means not initialized)
+        loop {
+            let current_min = self.db_query_min_time_us.load(Ordering::Relaxed);
+            if current_min == 0 || duration_us < current_min {
+                match self.db_query_min_time_us.compare_exchange(
+                    current_min,
+                    duration_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(_) => continue, // Another thread updated, retry
+                }
+            } else {
+                break;
+            }
         }
 
-        // Record the duration for database query metrics
-        tracing::debug!("Database query completed in {}μs", duration_us);
+        // Update maximum time
+        loop {
+            let current_max = self.db_query_max_time_us.load(Ordering::Relaxed);
+            if duration_us > current_max {
+                match self.db_query_max_time_us.compare_exchange(
+                    current_max,
+                    duration_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(_) => continue, // Another thread updated, retry
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Log slow queries for immediate visibility
+        if duration_us > 50_000 {
+            // 50ms threshold
+            tracing::warn!(
+                duration_us = duration_us,
+                "Slow database query detected"
+            );
+        }
+
+        tracing::debug!(
+            duration_us = duration_us,
+            total_queries = self.db_query_count.load(Ordering::Relaxed),
+            "Database query completed"
+        );
+    }
+
+    /// Get total number of database queries executed
+    pub fn get_db_query_count(&self) -> u64 {
+        self.db_query_count.load(Ordering::Relaxed)
+    }
+
+    /// Get average database query time in microseconds
+    pub fn get_db_avg_query_time_us(&self) -> u64 {
+        let count = self.db_query_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0;
+        }
+        let total = self.db_query_total_time_us.load(Ordering::Relaxed);
+        total / count
+    }
+
+    /// Get minimum database query time in microseconds (0 if no queries)
+    pub fn get_db_query_min_time_us(&self) -> u64 {
+        self.db_query_min_time_us.load(Ordering::Relaxed)
+    }
+
+    /// Get maximum database query time in microseconds
+    pub fn get_db_query_max_time_us(&self) -> u64 {
+        self.db_query_max_time_us.load(Ordering::Relaxed)
     }
 
     /// Check if performance thresholds are being met
@@ -290,6 +373,11 @@ impl LazyLoadingMetrics {
         self.members_filtered_out.store(0, Ordering::Relaxed);
         self.db_queries_avoided.store(0, Ordering::Relaxed);
         self.cache_memory_usage.store(0, Ordering::Relaxed);
+        // Reset database query metrics
+        self.db_query_count.store(0, Ordering::Relaxed);
+        self.db_query_total_time_us.store(0, Ordering::Relaxed);
+        self.db_query_min_time_us.store(0, Ordering::Relaxed);
+        self.db_query_max_time_us.store(0, Ordering::Relaxed);
     }
 }
 
@@ -301,51 +389,17 @@ pub struct LazyLoadingPerformanceSummary {
     pub total_members_filtered: u64,
     pub db_queries_avoided: u64,
     pub estimated_memory_usage_kb: usize,
+    // Database query metrics
+    pub db_query_count: u64,
+    pub db_avg_query_time_us: u64,
+    pub db_query_min_time_us: u64,
+    pub db_query_max_time_us: u64,
 }
 
 #[derive(Debug)]
 pub enum PerformanceStatus {
     Healthy,
     Degraded { issues: Vec<String> },
-}
-
-impl Default for LazyLoadingMetrics {
-    fn default() -> Self {
-        // Note: This default implementation creates a dummy repository
-        // In practice, this should be injected with a real database connection
-        let db: surrealdb::Surreal<Any> = surrealdb::Surreal::init();
-        let performance_repo = Arc::new(PerformanceRepository::new(db));
-        Self::new(performance_repo)
-    }
-}
-
-/// Global metrics instance for easy access across the application
-use std::sync::LazyLock;
-
-pub static LAZY_LOADING_METRICS: LazyLock<LazyLoadingMetrics> =
-    LazyLock::new(LazyLoadingMetrics::default);
-
-/// Convenience functions for recording metrics
-pub async fn record_lazy_loading_operation(
-    duration: std::time::Duration,
-    cache_hit: bool,
-    members_filtered: u64,
-) {
-    LAZY_LOADING_METRICS
-        .record_operation(duration, cache_hit, members_filtered)
-        .await;
-}
-
-pub async fn get_lazy_loading_performance_summary() -> LazyLoadingPerformanceSummary {
-    LAZY_LOADING_METRICS.get_performance_summary().await
-}
-
-pub fn update_lazy_loading_cache_memory_usage(bytes: usize) {
-    LAZY_LOADING_METRICS.update_cache_memory_usage(bytes);
-}
-
-pub fn check_lazy_loading_performance_status() -> PerformanceStatus {
-    LAZY_LOADING_METRICS.check_performance_thresholds()
 }
 
 /// Performance monitoring struct for tracking individual operations
@@ -367,14 +421,6 @@ impl LazyLoadingPerformanceMonitor {
     pub fn finish(self, members_filtered_out: usize) {
         let duration = self.start_time.elapsed();
         let filtered_count = self.room_member_count.saturating_sub(members_filtered_out);
-
-        // Spawn the async operation to avoid blocking
-        let duration_clone = duration;
-        let cache_hit = self.cache_hit;
-        tokio::spawn(async move {
-            let _ = record_lazy_loading_operation(duration_clone, cache_hit, filtered_count as u64)
-                .await;
-        });
 
         // Log performance warnings if thresholds are exceeded
         if duration.as_millis() > 100 {

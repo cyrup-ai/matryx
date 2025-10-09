@@ -243,11 +243,22 @@ impl<C: Connection> MetricsRepository<C> {
             0.0
         };
 
-        // Calculate additional metrics
-        let cache_hit_ratio = if !requests.is_empty() {
-            // Simplified calculation - in practice this would be more sophisticated
-            0.85 // 85% cache hit ratio
+        // Calculate cache hit ratio from actual metrics
+        let cache_hits = self.get_metrics("cache_hits", &time_range).await?;
+        let cache_misses = self.get_metrics("cache_misses", &time_range).await?;
+
+        let cache_hit_ratio = if !cache_hits.is_empty() || !cache_misses.is_empty() {
+            let total_hits: f64 = cache_hits.iter().map(|p| p.value).sum();
+            let total_misses: f64 = cache_misses.iter().map(|p| p.value).sum();
+            let total_cache_requests = total_hits + total_misses;
+            
+            if total_cache_requests > 0.0 {
+                total_hits / total_cache_requests
+            } else {
+                0.0
+            }
         } else {
+            // No cache metrics available yet
             0.0
         };
 

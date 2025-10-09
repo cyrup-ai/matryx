@@ -11,7 +11,7 @@ DEFINE TABLE room_summaries SCHEMAFULL
         FOR create, update WHERE $auth.user_id != NONE
         FOR delete WHERE $auth.admin = true;
 
-DEFINE FIELD room_id ON TABLE room_summaries TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD room_id ON TABLE room_summaries TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
 DEFINE FIELD joined_member_count ON TABLE room_summaries TYPE int DEFAULT 0;
 DEFINE FIELD invited_member_count ON TABLE room_summaries TYPE int DEFAULT 0;
 DEFINE FIELD heroes ON TABLE room_summaries TYPE array<string> DEFAULT [];

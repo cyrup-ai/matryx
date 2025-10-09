@@ -1,4 +1,4 @@
-use crate::types::StrippedStateEvent;
+use crate::types::SpaceHierarchyStrippedStateEvent;
 use serde::{Deserialize, Serialize};
 
 /// Parameters for creating a space hierarchy parent room
@@ -7,7 +7,7 @@ pub struct SpaceHierarchyParentRoomParams {
     pub allowed_room_ids: Option<Vec<String>>,
     pub avatar_url: Option<String>,
     pub canonical_alias: Option<String>,
-    pub children_state: Vec<StrippedStateEvent>,
+    pub children_state: Vec<SpaceHierarchyStrippedStateEvent>,
     pub encryption: Option<String>,
     pub guest_can_join: bool,
     pub join_rule: Option<String>,
@@ -27,7 +27,7 @@ pub struct SpaceHierarchyParentRoom {
     pub allowed_room_ids: Option<Vec<String>>,
     pub avatar_url: Option<String>,
     pub canonical_alias: Option<String>,
-    pub children_state: Vec<StrippedStateEvent>,
+    pub children_state: Vec<SpaceHierarchyStrippedStateEvent>,
     pub encryption: Option<String>,
     pub guest_can_join: bool,
     pub join_rule: Option<String>,

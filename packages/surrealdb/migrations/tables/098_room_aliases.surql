@@ -10,9 +10,9 @@ DEFINE TABLE room_aliases SCHEMAFULL
         FOR select WHERE true
         FOR create, update, delete WHERE $auth.user_id != NONE;
 
-DEFINE FIELD alias ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD room_id ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD creator ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD alias ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '#') AND string::contains($value, ':');
+DEFINE FIELD room_id ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
+DEFINE FIELD creator ON TABLE room_aliases TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD created_at ON TABLE room_aliases TYPE datetime DEFAULT time::now();
 
 DEFINE INDEX room_aliases_alias_idx ON TABLE room_aliases COLUMNS alias UNIQUE;

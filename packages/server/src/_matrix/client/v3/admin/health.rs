@@ -45,6 +45,9 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
         "unhealthy"
     };
 
+    // Calculate actual server uptime
+    let uptime_seconds = state.start_time.elapsed().as_secs();
+
     Ok(Json(json!({
         "status": overall_status,
         "timestamp": Utc::now().to_rfc3339(),
@@ -55,7 +58,7 @@ pub async fn get(State(state): State<AppState>) -> Result<Json<Value>, StatusCod
             "lazy_loading": app_health.lazy_loading,
             "memory": app_health.memory
         },
-        "uptime_seconds": 0, // TODO: Add actual uptime tracking
+        "uptime_seconds": uptime_seconds,
     })))
 }
 

@@ -144,19 +144,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_canonical_json_object_key_sorting() {
+    fn test_canonical_json_object_key_sorting() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "z_last": "value_z",
             "a_first": "value_a",
             "m_middle": "value_m"
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, r#"{"a_first":"value_a","m_middle":"value_m","z_last":"value_z"}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_nested_objects() {
+    fn test_canonical_json_nested_objects() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "outer": {
                 "z_nested": 123,
@@ -165,23 +166,25 @@ mod tests {
             "a_key": "value"
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, r#"{"a_key":"value","outer":{"a_nested":true,"z_nested":123}}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_arrays_preserve_order() {
+    fn test_canonical_json_arrays_preserve_order() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "array": ["z", "a", "m"],
             "numbers": [3, 1, 2]
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, r#"{"array":["z","a","m"],"numbers":[3,1,2]}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_primitive_types() {
+    fn test_canonical_json_primitive_types() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "string": "test",
             "number": 42,
@@ -189,12 +192,13 @@ mod tests {
             "null_value": null
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, r#"{"boolean":true,"null_value":null,"number":42,"string":"test"}"#);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_for_signing_removes_signatures() {
+    fn test_canonical_json_for_signing_removes_signatures() -> Result<(), Box<dyn std::error::Error>> {
         let event = json!({
             "event_id": "$test:example.com",
             "content": {"body": "Hello"},
@@ -208,58 +212,64 @@ mod tests {
             }
         });
 
-        let result = canonical_json_for_signing(&event).expect("Failed to canonicalize test JSON");
+        let result = canonical_json_for_signing(&event)?;
         assert!(!result.contains("signatures"));
         assert!(!result.contains("unsigned"));
         assert!(result.contains("event_id"));
         assert!(result.contains("content"));
+        Ok(())
     }
 
     #[test]
-    fn test_is_canonical_json_validation() {
+    fn test_is_canonical_json_validation() -> Result<(), Box<dyn std::error::Error>> {
         let canonical = r#"{"a":"first","z":"last"}"#;
         let non_canonical = r#"{"z":"last","a":"first"}"#;
 
-        assert!(is_canonical_json(canonical).expect("Canonical JSON validation failed"));
-        assert!(!is_canonical_json(non_canonical).expect("Canonical JSON validation failed"));
+        assert!(is_canonical_json(canonical)?);
+        assert!(!is_canonical_json(non_canonical)?);
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_empty_object() {
+    fn test_canonical_json_empty_object() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({});
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, "{}");
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_empty_array() {
+    fn test_canonical_json_empty_array() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!([]);
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         assert_eq!(result, "[]");
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_string_escaping() {
+    fn test_canonical_json_string_escaping() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "escaped": "line1\nline2\ttab\"quote\\backslash"
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         // Verify proper JSON escaping is preserved
         assert!(result.contains(r#""escaped":"line1\nline2\ttab\"quote\\backslash""#));
+        Ok(())
     }
 
     #[test]
-    fn test_canonical_json_unicode_handling() {
+    fn test_canonical_json_unicode_handling() -> Result<(), Box<dyn std::error::Error>> {
         let data = json!({
             "unicode": "Hello 👋 World 🌍",
             "émoji": "café"
         });
 
-        let result = canonical_json(&data).expect("Failed to canonicalize test JSON");
+        let result = canonical_json(&data)?;
         // Should preserve Unicode characters properly
         assert!(result.contains("👋"));
         assert!(result.contains("🌍"));
         assert!(result.contains("café"));
+        Ok(())
     }
 }

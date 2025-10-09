@@ -21,21 +21,18 @@ pub struct MatrixTestServer {
 }
 
 impl MatrixTestServer {
-    pub async fn new() -> Self {
-        let app = create_test_app().await;
-        let server = TestServer::new(app)
-            .expect("Test setup: failed to create test server for integration tests");
+    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let app = create_test_app().await?;
+        let server = TestServer::new(app)?;
         let mock_server = MockServer::start().await;
 
         // Create test app state
         let db_any = any::connect("surrealkv://test_data/integration_test.db")
-            .await
-            .expect("Failed to connect to test database");
+            .await?;
         db_any
             .use_ns("test")
             .use_db("matrix")
-            .await
-            .expect("Failed to select test namespace");
+            .await?;
 
         // Create required components for AppState
         use matryx_server::config::{EmailConfig, PushCacheConfig, SmsConfig};
@@ -93,8 +90,7 @@ impl MatrixTestServer {
             matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()),
         );
         let dns_resolver = Arc::new(
-            matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
-                .expect("Failed to create DNS resolver"),
+            matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)?,
         );
 
         let event_signer = Arc::new(
@@ -104,8 +100,7 @@ impl MatrixTestServer {
                 dns_resolver.clone(),
                 config.homeserver_name.clone(),
                 "ed25519:auto".to_string(),
-            )
-            .expect("Failed to create test event signer"),
+            )?,
         );
 
         let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
@@ -117,17 +112,15 @@ impl MatrixTestServer {
             http_client,
             event_signer,
             dns_resolver,
-        )
-        .expect("Failed to create AppState");
+        )?;
 
-        Self {
-            base_url: server.server_address()
-                .expect("Test setup: failed to get test server address for integration tests")
+        Ok(Self {
+            base_url: server.server_address()?
                 .to_string(),
             server,
             mock_server,
             app_state,
-        }
+        })
     }
 
     pub async fn test_endpoint(
@@ -231,18 +224,17 @@ impl MatrixTestServer {
 }
 
 /// Create test application with all routes
-async fn create_test_app() -> Router {
+async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
     // Initialize test database
-    let db_any = any::connect("memory").await.expect("Failed to connect to test database");
+    let db_any = any::connect("memory").await?;
     db_any
         .use_ns("test")
         .use_db("matrix")
-        .await
-        .expect("Failed to select test namespace");
+        .await?;
 
     // Run test schema
     let schema = include_str!("../../../../surrealdb/migrations/matryx.surql");
-    db_any.query(schema).await.expect("Failed to execute test schema");
+    db_any.query(schema).await?;
 
     // Create required components for AppState
     use matryx_server::config::{EmailConfig, PushCacheConfig, SmsConfig};
@@ -324,13 +316,12 @@ async fn create_test_app() -> Router {
         http_client,
         event_signer,
         dns_resolver,
-    )
-    .expect("Failed to create AppState");
+    )?;
 
     // Create a simple test router for now
-    Router::new()
+    Ok(Router::new()
         .route("/test", get(|| async { "test" }))
-        .with_state(app_state)
+        .with_state(app_state))
 }
 
 /// Test configuration for isolated test database
@@ -363,10 +354,10 @@ pub async fn create_test_user(
     if response.status_code() == 200 {
         let body: Value = response.json();
         let user_id = body["user_id"].as_str()
-            .expect("Test assertion: registration response must contain user_id field")
+            .ok_or("Test assertion: registration response must contain user_id field")?
             .to_string();
         let access_token = body["access_token"].as_str()
-            .expect("Test assertion: registration response must contain access_token field")
+            .ok_or("Test assertion: registration response must contain access_token field")?
             .to_string();
         Ok((user_id, access_token))
     } else {
@@ -398,7 +389,7 @@ pub async fn create_test_room(
     if response.status_code() == 200 {
         let body: Value = response.json();
         let room_id = body["room_id"].as_str()
-            .expect("Test assertion: createRoom response must contain room_id field")
+            .ok_or("Test assertion: createRoom response must contain room_id field")?
             .to_string();
         Ok(room_id)
     } else {
@@ -411,8 +402,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_matrix_test_server_functionality() {
-        let server = MatrixTestServer::new().await;
+    async fn test_matrix_test_server_functionality() -> Result<(), Box<dyn std::error::Error>> {
+        let server = MatrixTestServer::new().await?;
 
         // Test accessing app state
         let _app_state = server.get_app_state();
@@ -425,11 +416,13 @@ mod tests {
 
         // Test federation request
         let _response = server.test_federation_request("/_matrix/federation/v1/version").await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_helper_functions() {
+    async fn test_helper_functions() -> Result<(), Box<dyn std::error::Error>> {
         let _config = test_database_config();
-        let _app = create_test_app().await;
+        let _app = create_test_app().await?;
+        Ok(())
     }
 }

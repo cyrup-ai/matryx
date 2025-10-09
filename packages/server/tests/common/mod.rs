@@ -10,15 +10,13 @@ pub mod integration;
 
 /// Creates a test application router for basic integration testing
 /// This is used by integration test modules that need a minimal test app
-pub async fn create_test_app() -> Router {
+pub async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
     // Create test database with file storage
     let db = any::connect("surrealkv://test_data/common_test.db")
-        .await
-        .expect("Test setup: failed to connect to test database");
+        .await?;
     db.use_ns("test")
         .use_db("matrix")
-        .await
-        .expect("Test setup: failed to select test namespace");
+        .await?;
 
     // Create test configuration
     use matryx_server::config::{EmailConfig, PushCacheConfig, SmsConfig};
@@ -74,8 +72,7 @@ pub async fn create_test_app() -> Router {
         matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()),
     );
     let dns_resolver = Arc::new(
-        matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
-            .expect("Test setup: failed to create DNS resolver - required for federation tests"),
+        matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)?,
     );
 
     // Create event signer
@@ -86,13 +83,12 @@ pub async fn create_test_app() -> Router {
             dns_resolver.clone(),
             config.homeserver_name.clone(),
             "ed25519:auto".to_string(),
-        )
-        .expect("Test setup: failed to create event signer - required for federation tests"),
+        )?,
     );
 
     // Create application state
     let schema = include_str!("../../../surrealdb/migrations/matryx.surql");
-    db.query(schema).await.expect("Test setup: failed to execute schema migration");
+    db.query(schema).await?;
 
     // Create app state with all required fields
     let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
@@ -104,14 +100,13 @@ pub async fn create_test_app() -> Router {
         http_client,
         event_signer,
         dns_resolver,
-    )
-    .expect("Test setup: failed to create AppState - required for HTTP handler tests");
+    )?;
 
     // Create a simple test router
-    Router::new().route("/test", get(|| async { "test" })).with_state(state)
+    Ok(Router::new().route("/test", get(|| async { "test" })).with_state(state))
 }
 
-pub async fn create_test_app_with_db(db: Surreal<Any>) -> Router {
+pub async fn create_test_app_with_db(db: Surreal<Any>) -> Result<Router, Box<dyn std::error::Error>> {
     // Create test configuration
     use matryx_server::config::{EmailConfig, PushCacheConfig, SmsConfig};
     use matryx_server::middleware::TransactionConfig;
@@ -166,8 +161,7 @@ pub async fn create_test_app_with_db(db: Surreal<Any>) -> Router {
         matryx_server::federation::well_known_client::WellKnownClient::new(http_client.clone()),
     );
     let dns_resolver = Arc::new(
-        matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)
-            .expect("Test setup: failed to create DNS resolver - required for federation tests"),
+        matryx_server::federation::dns_resolver::MatrixDnsResolver::new(well_known_client)?,
     );
 
     // Create event signer
@@ -178,8 +172,7 @@ pub async fn create_test_app_with_db(db: Surreal<Any>) -> Router {
             dns_resolver.clone(),
             config.homeserver_name.clone(),
             "ed25519:auto".to_string(),
-        )
-        .expect("Test setup: failed to create event signer - required for federation tests"),
+        )?,
     );
 
     // We need to make config static for AppState - use Box::leak for tests
@@ -193,11 +186,10 @@ pub async fn create_test_app_with_db(db: Surreal<Any>) -> Router {
         http_client,
         event_signer,
         dns_resolver,
-    )
-    .expect("Test setup: failed to create AppState - required for HTTP handler tests");
+    )?;
 
     // Create a simple test router
-    Router::new().route("/test", get(|| async { "test" })).with_state(state)
+    Ok(Router::new().route("/test", get(|| async { "test" })).with_state(state))
 }
 
 #[cfg(test)]
@@ -205,31 +197,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_create_test_app() {
+    async fn test_create_test_app() -> Result<(), Box<dyn std::error::Error>> {
         // Test the create_test_app function
-        let app = create_test_app().await;
+        let app = create_test_app().await?;
 
         // Verify that the router was created successfully
         // We can't easily test the actual routes without starting a server,
         // but we can at least ensure the function executes without panicking
         drop(app); // Explicitly use the app variable
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_create_test_app_with_db() {
+    async fn test_create_test_app_with_db() -> Result<(), Box<dyn std::error::Error>> {
         // Create a test database
         let db = any::connect("surrealkv://test_data/common_with_db_test.db")
-            .await
-            .expect("Test setup: failed to connect to test database");
+            .await?;
         db.use_ns("test")
             .use_db("matrix")
-            .await
-            .expect("Test setup: failed to select test namespace");
+            .await?;
 
         // Test the create_test_app_with_db function
-        let app = create_test_app_with_db(db).await;
+        let app = create_test_app_with_db(db).await?;
 
         // Verify that the router was created successfully
         drop(app); // Explicitly use the app variable
+        Ok(())
     }
 }

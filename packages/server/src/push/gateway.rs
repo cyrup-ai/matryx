@@ -432,7 +432,8 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_string(&notification).unwrap();
+        let json = serde_json::to_string(&notification)
+            .expect("Test: notification serialization should succeed");
         assert!(json.contains("\"prio\":\"high\""));
         assert!(json.contains("\"unread\":5"));
     }

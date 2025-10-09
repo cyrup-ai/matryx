@@ -19,6 +19,19 @@ pub enum CryptoError {
     SerializationError(String),
 }
 
+impl std::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CryptoError::MissingSignature => write!(f, "Missing signature"),
+            CryptoError::InvalidKey => write!(f, "Invalid key"),
+            CryptoError::InvalidSignature => write!(f, "Invalid signature"),
+            CryptoError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
+
 impl From<serde_json::Error> for CryptoError {
     fn from(e: serde_json::Error) -> Self {
         CryptoError::SerializationError(e.to_string())
@@ -299,21 +312,5 @@ impl CrossSigningVerifier {
 
         // Sort keys and minimize whitespace
         Ok(serde_json::to_string(&value)?)
-    }
-}
-
-// Placeholder crypto provider for testing
-pub struct TestCryptoProvider;
-
-#[async_trait]
-impl CryptoProvider for TestCryptoProvider {
-    async fn verify_ed25519_signature(
-        &self,
-        _signature: &str,
-        _message: &str,
-        _public_key: &str,
-    ) -> Result<bool, CryptoError> {
-        // Placeholder implementation - always returns true for testing
-        Ok(true)
     }
 }

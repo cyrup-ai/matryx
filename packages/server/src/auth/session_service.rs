@@ -347,6 +347,40 @@ impl<C: Connection> MatrixSessionService<C> {
         Ok(())
     }
 
+    /// Get cached server public key
+    /// 
+    /// Retrieves a cached public key for the specified server and key ID.
+    /// Returns None if the key is not cached or has expired.
+    /// Used for identity server and federation server key verification.
+    pub async fn get_cached_server_public_key(
+        &self,
+        server_name: &str,
+        key_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        self.key_server_repo
+            .get_server_signing_key(server_name, key_id)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    /// Cache a server public key
+    /// 
+    /// Stores a public key for the specified server with expiration tracking.
+    /// Used to cache keys fetched from remote identity or homeservers.
+    pub async fn cache_server_public_key(
+        &self,
+        server_name: &str,
+        key_id: &str,
+        public_key: &str,
+        fetched_at: chrono::DateTime<chrono::Utc>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.key_server_repo
+            .cache_server_signing_key(server_name, key_id, public_key, fetched_at, expires_at)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
     /// Refresh an expired access token using refresh token
     pub async fn refresh_token(
         &self,

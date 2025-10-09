@@ -313,6 +313,17 @@ pub async fn build_joined_room_response(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         .ok_or("Room not found")?;
 
+    // Get unread notification counts from database
+    use matryx_surrealdb::repository::SyncRepository;
+    let sync_repo = SyncRepository::new(state.db.clone());
+    let unread_counts = sync_repo
+        .get_room_unread_notifications(user_id, room_id)
+        .await
+        .unwrap_or(matryx_surrealdb::repository::sync::UnreadNotificationCounts {
+            highlight_count: Some(0),
+            notification_count: Some(0),
+        });
+
     // Extract room filter for this room
     let room_filter = filter.and_then(|f| f.room.as_ref());
 
@@ -392,8 +403,8 @@ pub async fn build_joined_room_response(
             events: Vec::new(), // Room-specific account data would go here
         },
         unread_notifications: UnreadNotifications {
-            highlight_count: 0, // TODO: Calculate actual counts
-            notification_count: 0,
+            highlight_count: unread_counts.highlight_count.unwrap_or(0) as u32,
+            notification_count: unread_counts.notification_count.unwrap_or(0) as u32,
         },
     };
 

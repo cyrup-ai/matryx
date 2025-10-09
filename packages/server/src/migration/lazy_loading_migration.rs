@@ -298,7 +298,7 @@ impl LazyLoadingMigration {
 
     async fn record_request_metrics(&self, used_enhanced: bool, duration: Duration, success: bool) {
         // Record performance metrics for the lazy loading migration
-        let migration_type = if used_enhanced { "enhanced" } else { "legacy" };
+        let migration_type = if used_enhanced { "enhanced" } else { "standard" };
         let status = if success { "success" } else { "failure" };
 
         // Log the metrics for monitoring and analysis
@@ -313,7 +313,7 @@ impl LazyLoadingMigration {
         if used_enhanced {
             tracing::debug!("Enhanced lazy loading used, duration: {}ms", duration.as_millis());
         } else {
-            tracing::debug!("Legacy loading used, duration: {}ms", duration.as_millis());
+            tracing::debug!("Standard loading used, duration: {}ms", duration.as_millis());
         }
     }
 }

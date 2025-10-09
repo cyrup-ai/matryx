@@ -1,4 +1,5 @@
 use crate::repository::error::RepositoryError;
+use crate::repository::power_levels::{PowerLevelsRepository, PowerLevelAction};
 use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
 use ed25519_dalek::{SigningKey, Signature, VerifyingKey, Signer, Verifier};
@@ -2712,10 +2713,88 @@ impl EventRepository {
         
         Ok(false)
     }
+}
 
+/// Validate state event content based on event type
+fn validate_state_event_content(
+    event_type: &str,
+    content: &serde_json::Value
+) -> Result<(), RepositoryError> {
+    match event_type {
+        "m.room.name" => {
+            if let Some(name) = content.get("name") {
+                if !name.is_string() {
+                    return Err(RepositoryError::Validation {
+                        field: "name".to_string(),
+                        message: "m.room.name content.name must be a string".to_string(),
+                    });
+                }
+            }
+        },
+        "m.room.topic" => {
+            if let Some(topic) = content.get("topic") {
+                if !topic.is_string() {
+                    return Err(RepositoryError::Validation {
+                        field: "topic".to_string(),
+                        message: "m.room.topic content.topic must be a string".to_string(),
+                    });
+                }
+            }
+        },
+        "m.room.avatar" => {
+            if let Some(url) = content.get("url") {
+                if !url.is_string() {
+                    return Err(RepositoryError::Validation {
+                        field: "url".to_string(),
+                        message: "m.room.avatar content.url must be a string".to_string(),
+                    });
+                }
+            }
+        },
+        "m.room.canonical_alias" => {
+            if let Some(alias) = content.get("alias") {
+                if !alias.is_string() && !alias.is_null() {
+                    return Err(RepositoryError::Validation {
+                        field: "alias".to_string(),
+                        message: "m.room.canonical_alias content.alias must be a string or null".to_string(),
+                    });
+                }
+            }
+        },
+        _ => {
+            // Other event types: no validation
+        },
+    }
+    Ok(())
+}
+
+impl EventRepository {
     /// Update room state event for client endpoints
-    pub async fn update_room_state_event(&self, room_id: &str, event_type: &str, state_key: &str, content: serde_json::Value, sender: &str) -> Result<Event, RepositoryError> {
-        let event_id = format!("${}:{}", uuid::Uuid::new_v4(), "localhost"); // TODO: Use proper server name
+    pub async fn update_room_state_event(&self, room_id: &str, event_type: &str, state_key: &str, content: serde_json::Value, sender: &str, server_name: &str) -> Result<Event, RepositoryError> {
+        // Validate content based on event type
+        validate_state_event_content(event_type, &content)?;
+
+        // Check authorization
+        let power_repo = PowerLevelsRepository::new(self.db.clone());
+        let can_send = power_repo
+            .can_user_perform_action(
+                room_id,
+                sender,
+                PowerLevelAction::SendState(event_type.to_string())
+            )
+            .await?;
+
+        if !can_send {
+            return Err(RepositoryError::Forbidden {
+                reason: format!(
+                    "User {} does not have permission to send {} state events in room {}",
+                    sender, event_type, room_id
+                ),
+            });
+        }
+
+        // Generate event ID with proper server name
+        let event_id = format!("${}:{}", uuid::Uuid::new_v4(), server_name);
         let now = chrono::Utc::now();
 
         let event = Event {

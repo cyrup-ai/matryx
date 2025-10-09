@@ -11,9 +11,9 @@ DEFINE TABLE room_timeline_events SCHEMAFULL
         FOR create WHERE $auth.user_id != NONE
         FOR update, delete WHERE $auth.admin = true;
 
-DEFINE FIELD event_id ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD room_id ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD sender ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD event_id ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '$') AND string::contains($value, ':');
+DEFINE FIELD room_id ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '!') AND string::contains($value, ':');
+DEFINE FIELD sender ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD event_type ON TABLE room_timeline_events TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD content ON TABLE room_timeline_events TYPE object DEFAULT {};
 DEFINE FIELD origin_server_ts ON TABLE room_timeline_events TYPE int;

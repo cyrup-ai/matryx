@@ -163,7 +163,14 @@ impl ThreadManager {
             false
         };
 
-        Ok(ThreadSummary { latest_event, count, participated, participants })
+        Ok(ThreadSummary {
+            latest_event,
+            count,
+            participated,
+            participants,
+            notification_count: None,
+            highlight_count: None,
+        })
     }
 
     pub async fn apply_thread_relation(

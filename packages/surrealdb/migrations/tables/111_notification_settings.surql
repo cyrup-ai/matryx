@@ -10,7 +10,7 @@ DEFINE TABLE notification_settings SCHEMAFULL
         FOR select, create, update WHERE $auth.user_id = user_id
         FOR delete WHERE $auth.user_id = user_id OR $auth.admin = true;
 
-DEFINE FIELD user_id ON TABLE notification_settings TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE notification_settings TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD enabled ON TABLE notification_settings TYPE bool DEFAULT true;
 DEFINE FIELD rules ON TABLE notification_settings TYPE object DEFAULT {};
 

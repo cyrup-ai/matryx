@@ -18,8 +18,8 @@ pub fn matrix_error_response(error: MatrixError) -> impl IntoResponse {
     error.into_response()
 }
 
-/// Create JSON response with proper headers and CORS (legacy function)
-#[allow(dead_code)] // Legacy utility function for JSON responses
+/// Create JSON response with proper headers and CORS
+#[allow(dead_code)] // Unused utility - kept for backward compatibility
 pub fn json_response<T: serde::Serialize>(data: T) -> Result<Json<T>, StatusCode> {
     Ok(Json(data))
 }

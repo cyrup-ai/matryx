@@ -5,22 +5,17 @@ use matryx_surrealdb::repository::membership::MembershipRepository;
 use std::time::Duration;
 use surrealdb::{Surreal, engine::any::Any};
 
-async fn setup_test_database() -> Surreal<Any> {
+async fn setup_test_database() -> Result<Surreal<Any>, Box<dyn std::error::Error>> {
     let db = surrealdb::engine::any::connect("surrealkv://test_data/lazy_loading_test.db")
-        .await
-        .expect("Test setup: failed to connect to test database");
-    db.use_ns("test").use_db("test").await
-        .expect("Test setup: failed to select test namespace");
+        .await?;
+    db.use_ns("test").use_db("test").await?;
 
     // Apply database schema for testing
-    db.query("DEFINE TABLE room_membership SCHEMALESS").await
-        .expect("Test setup: failed to create room_membership table");
-    db.query("DEFINE TABLE power_levels SCHEMALESS").await
-        .expect("Test setup: failed to create power_levels table");
-    db.query("DEFINE TABLE rooms SCHEMALESS").await
-        .expect("Test setup: failed to create rooms table");
+    db.query("DEFINE TABLE room_membership SCHEMALESS").await?;
+    db.query("DEFINE TABLE power_levels SCHEMALESS").await?;
+    db.query("DEFINE TABLE rooms SCHEMALESS").await?;
 
-    db
+    Ok(db)
 }
 
 async fn create_membership_event(
@@ -85,8 +80,8 @@ async fn create_message_event(
 }
 
 #[tokio::test]
-async fn test_lazy_loading_performance_optimization() {
-    let test_db = setup_test_database().await;
+async fn test_lazy_loading_performance_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let lazy_cache = LazyLoadingCache::new();
 
     use matryx_surrealdb::repository::PerformanceRepository;
@@ -102,15 +97,13 @@ async fn test_lazy_loading_performance_optimization() {
     for i in 0..1000 {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
-            .await
-            .expect("Test setup: failed to create membership event");
+            .await?;
     }
 
     // Add power users (admins and moderators)
     for i in 0..5 {
         let admin_id = format!("@admin{}:example.com", i);
-        create_power_level_event(&test_db, room_id, &admin_id, 100).await
-            .expect("Test setup: failed to create power level event"); // Admin
+        create_power_level_event(&test_db, room_id, &admin_id, 100).await?; // Admin
     }
 
     // Add timeline events from specific senders
@@ -129,8 +122,7 @@ async fn test_lazy_loading_performance_optimization() {
     let start_time = std::time::Instant::now();
     let essential_members_1 = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: lazy loading cache should return essential members");
+        .await?;
     let first_duration = start_time.elapsed();
 
     // Verify essential members are correctly identified
@@ -143,8 +135,7 @@ async fn test_lazy_loading_performance_optimization() {
     let start_time = std::time::Instant::now();
     let essential_members_2 = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: lazy loading cache should return essential members on cache hit");
+        .await?;
     let second_duration = start_time.elapsed();
 
     // Verify cache hit performance improvement
@@ -158,11 +149,12 @@ async fn test_lazy_loading_performance_optimization() {
     // Verify performance targets from task specification
     assert!(first_duration < Duration::from_millis(100)); // Sub-100ms for first request
     assert!(second_duration < Duration::from_millis(10)); // Sub-10ms for cached request
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_database_level_optimization() {
-    let test_db = setup_test_database().await;
+async fn test_database_level_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let membership_repo = MembershipRepository::new(test_db.clone());
 
     let room_id = "!optimization_test:example.com";
@@ -172,17 +164,14 @@ async fn test_database_level_optimization() {
     for i in 0..100 {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
-            .await
-            .expect("Test setup: failed to create membership event");
+            .await?;
     }
 
     // Create power level hierarchy
     create_power_level_event(&test_db, room_id, "@admin1:example.com", 100)
-        .await
-        .expect("Test setup: failed to create power level event for admin");
+        .await?;
     create_power_level_event(&test_db, room_id, "@mod1:example.com", 50)
-        .await
-        .expect("Test setup: failed to create power level event for moderator");
+        .await?;
 
     let timeline_senders = vec![
         "@member5:example.com".to_string(),
@@ -193,8 +182,7 @@ async fn test_database_level_optimization() {
     let start_time = std::time::Instant::now();
     let essential_members = membership_repo
         .get_essential_members_optimized(room_id, user_id, &timeline_senders)
-        .await
-        .expect("Test execution: database query should return essential members");
+        .await?;
     let query_duration = start_time.elapsed();
 
     // Verify results
@@ -206,11 +194,12 @@ async fn test_database_level_optimization() {
 
     // Verify performance (should be fast even with complex query)
     assert!(query_duration < Duration::from_millis(50)); // Sub-50ms target from task spec
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_cache_invalidation_on_membership_changes() {
-    let test_db = setup_test_database().await;
+async fn test_cache_invalidation_on_membership_changes() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let lazy_cache = LazyLoadingCache::new();
 
     let room_id = "!invalidation_test:example.com";
@@ -222,8 +211,7 @@ async fn test_cache_invalidation_on_membership_changes() {
     let timeline_senders = vec!["@member1:example.com".to_string()];
     let _ = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: cache should return essential members for invalidation test");
+        .await?;
 
     // Verify cache has data
     let cache_stats_before = lazy_cache.get_cache_stats().await;
@@ -236,12 +224,13 @@ async fn test_cache_invalidation_on_membership_changes() {
     let _cache_stats_after = lazy_cache.get_cache_stats().await;
     // Note: entry count may not change immediately due to moka's lazy cleanup,
     // but the actual cached data should be invalidated
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_memory_usage_within_limits() {
+async fn test_memory_usage_within_limits() -> Result<(), Box<dyn std::error::Error>> {
     let lazy_cache = LazyLoadingCache::new();
-    let test_db = setup_test_database().await;
+    let test_db = setup_test_database().await?;
     let membership_repo = MembershipRepository::new(test_db.clone());
 
     // Create multiple rooms and cache data for each
@@ -253,8 +242,7 @@ async fn test_memory_usage_within_limits() {
         for i in 0..50 {
             let member_id = format!("@member{}:example.com", i);
             create_membership_event(&test_db, &room_id, &member_id, "join")
-                .await
-                .expect("Test setup: failed to create membership event for memory usage test");
+                .await?;
         }
 
         // Cache essential members for this room
@@ -274,12 +262,13 @@ async fn test_memory_usage_within_limits() {
         memory_usage / (1024 * 1024),
         MAX_MEMORY_BYTES / (1024 * 1024)
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_cache_hit_ratio_targets() {
+async fn test_cache_hit_ratio_targets() -> Result<(), Box<dyn std::error::Error>> {
     let lazy_cache = LazyLoadingCache::new();
-    let test_db = setup_test_database().await;
+    let test_db = setup_test_database().await?;
     let membership_repo = MembershipRepository::new(test_db.clone());
 
     let room_id = "!hit_ratio_test:example.com";
@@ -289,8 +278,7 @@ async fn test_cache_hit_ratio_targets() {
     for i in 0..100 {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
-            .await
-            .expect("Test setup: failed to create membership event");
+            .await?;
     }
 
     let timeline_senders = vec!["@member1:example.com".to_string()];
@@ -298,15 +286,13 @@ async fn test_cache_hit_ratio_targets() {
     // First request (cache miss)
     let _ = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: cache should return essential members on first request");
+        .await?;
 
     // Multiple subsequent requests (should be cache hits)
     for _ in 0..10 {
         let _ = lazy_cache
             .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-            .await
-            .expect("Test execution: cache should return essential members on subsequent requests");
+            .await?;
     }
 
     // Check cache hit ratio
@@ -319,11 +305,12 @@ async fn test_cache_hit_ratio_targets() {
         hit_ratio,
         MIN_HIT_RATIO
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_large_room_scalability() {
-    let test_db = setup_test_database().await;
+async fn test_large_room_scalability() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let lazy_cache = LazyLoadingCache::new();
     let membership_repo = MembershipRepository::new(test_db.clone());
 
@@ -334,15 +321,13 @@ async fn test_large_room_scalability() {
     for i in 0..10000 {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
-            .await
-            .expect("Test setup: failed to create membership event");
+            .await?;
     }
 
     // Add power users
     for i in 0..10 {
         let admin_id = format!("@admin{}:example.com", i);
-        create_power_level_event(&test_db, room_id, &admin_id, 100).await
-            .expect("Test setup: failed to create power level event for large room scalability test");
+        create_power_level_event(&test_db, room_id, &admin_id, 100).await?;
     }
 
     let timeline_senders = vec![
@@ -354,8 +339,7 @@ async fn test_large_room_scalability() {
     let start_time = std::time::Instant::now();
     let essential_members = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: cache should return essential members for large room scalability test");
+        .await?;
     let processing_time = start_time.elapsed();
 
     // Verify scalability targets
@@ -370,12 +354,13 @@ async fn test_large_room_scalability() {
     // Should include some admins (power users)
     let has_admin = essential_members.iter().any(|id| id.starts_with("@admin"));
     assert!(has_admin, "Essential members should include power users");
+    Ok(())
 }
 
 /// Integration test for complete lazy loading pipeline
 #[tokio::test]
-async fn test_complete_lazy_loading_pipeline() {
-    let test_db = setup_test_database().await;
+async fn test_complete_lazy_loading_pipeline() -> Result<(), Box<dyn std::error::Error>> {
+    let test_db = setup_test_database().await?;
     let lazy_cache = LazyLoadingCache::new();
     let membership_repo = MembershipRepository::new(test_db.clone());
 
@@ -386,8 +371,7 @@ async fn test_complete_lazy_loading_pipeline() {
     for i in 0..1000 {
         let member_id = format!("@member{}:example.com", i);
         create_membership_event(&test_db, room_id, &member_id, "join")
-            .await
-            .expect("Test setup: failed to create membership event");
+            .await?;
     }
 
     // Create test events including membership and message events
@@ -426,8 +410,7 @@ async fn test_complete_lazy_loading_pipeline() {
     // Simulate the enhanced lazy loading filter process
     let essential_members = lazy_cache
         .get_essential_members_cached(room_id, user_id, &timeline_senders, &membership_repo)
-        .await
-        .expect("Test execution: cache should return essential members for complete pipeline test");
+        .await?;
 
     // Filter events like the actual implementation would
     let filtered_events: Vec<Event> = all_events
@@ -468,4 +451,5 @@ async fn test_complete_lazy_loading_pipeline() {
     assert!(member_ids.contains(user_id));
     assert!(member_ids.contains("@member1:example.com"));
     assert!(member_ids.contains("@member50:example.com"));
+    Ok(())
 }

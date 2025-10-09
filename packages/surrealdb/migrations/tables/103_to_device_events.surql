@@ -11,9 +11,9 @@ DEFINE TABLE to_device_events SCHEMAFULL
         FOR create WHERE $auth.user_id != NONE
         FOR update, delete WHERE $auth.user_id = user_id OR $auth.admin = true;
 
-DEFINE FIELD user_id ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD user_id ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD device_id ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD sender ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD sender ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD message_type ON TABLE to_device_events TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD content ON TABLE to_device_events TYPE object DEFAULT {};
 DEFINE FIELD delivered ON TABLE to_device_events TYPE bool DEFAULT false;

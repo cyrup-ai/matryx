@@ -325,10 +325,27 @@ impl ClientApiService {
             // Convert initial sync to sync response format
             let initial_sync = self.sync_repo.get_initial_sync_data(user_id, filter).await?;
 
+            let mut join_rooms = HashMap::new();
+            for room in initial_sync.rooms {
+                let joined_room = crate::repository::sync::JoinedRoomSync {
+                    state: crate::repository::sync::StateSync {
+                        events: room.state,
+                    },
+                    timeline: room.timeline,
+                    ephemeral: room.ephemeral,
+                    account_data: crate::repository::sync::AccountDataSync {
+                        events: room.account_data,
+                    },
+                    unread_notifications: room.unread_notifications,
+                    summary: room.summary,
+                };
+                join_rooms.insert(room.room_id, joined_room);
+            }
+
             Ok(SyncResponse {
                 next_batch: initial_sync.next_batch,
                 rooms: crate::repository::sync::RoomsSyncData {
-                    join: HashMap::new(), // TODO: Convert initial_sync.rooms to proper format
+                    join: join_rooms,
                     invite: HashMap::new(),
                     leave: HashMap::new(),
                     knock: HashMap::new(),

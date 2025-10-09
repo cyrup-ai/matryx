@@ -247,7 +247,8 @@ impl EventSigner {
 
         // Generate Ed25519 key pair using cryptographically secure random number generator
         let mut secret_bytes = [0u8; 32];
-        getrandom::fill(&mut secret_bytes).expect("Failed to generate random bytes");
+        getrandom::fill(&mut secret_bytes)
+            .map_err(|e| EventSigningError::CryptoError(format!("Failed to generate random bytes for Ed25519 signing key: {}", e)))?;
         let signing_key = Ed25519SigningKey::from_bytes(&secret_bytes);
         let verifying_key: VerifyingKey = (&signing_key).into();
 

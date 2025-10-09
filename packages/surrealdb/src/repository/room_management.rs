@@ -9,7 +9,6 @@ use crate::repository::{
 };
 use matryx_entity::types::{Event, MembershipState, Room};
 use serde_json::Value;
-use surrealdb::Connection;
 
 pub struct RoomManagementService {
     room_repo: RoomRepository,
@@ -44,11 +43,23 @@ impl RoomManagementService {
         room.creator = creator.to_string();
 
         // Create room creation event
-        let creation_content = serde_json::json!({
+        // Build base creation content
+        let mut creation_content = serde_json::json!({
             "creator": creator,
             "room_version": "9",
             "m.federate": true
         });
+
+        // Merge custom creation_content from config if provided
+        if let Some(custom_content) = &config.creation_content {
+            if let Some(custom_obj) = custom_content.as_object() {
+                if let Some(content_obj) = creation_content.as_object_mut() {
+                    for (key, value) in custom_obj {
+                        content_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
 
         self.event_repo
             .create_room_event(

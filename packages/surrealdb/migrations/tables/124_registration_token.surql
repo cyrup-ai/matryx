@@ -22,6 +22,17 @@ DEFINE FIELD pending ON TABLE registration_token TYPE bool DEFAULT false;
 
 DEFINE FIELD completed ON TABLE registration_token TYPE bool DEFAULT false;
 
+-- Ensure uses_remaining never exceeds uses_allowed
+DEFINE FIELD uses_remaining ON TABLE registration_token TYPE option<int>
+    ASSERT 
+        $value IS NONE 
+        OR $parent.uses_allowed IS NONE 
+        OR $value <= $parent.uses_allowed;
+
+-- Clarify state machine: token cannot be both pending and completed
+-- Note: pending = registration in progress, completed = registration finished
+-- A token can be neither (unused), pending (in use), or completed (consumed)
+
 DEFINE FIELD expires_at ON TABLE registration_token TYPE option<datetime>;
 
 DEFINE FIELD created_by ON TABLE registration_token TYPE string 

@@ -1,4 +1,3 @@
-use std::fmt;
 use thiserror::Error;
 
 /// Errors that can occur during canonical JSON processing
@@ -36,10 +35,6 @@ mod tests {
         let invalid_json_error = CanonicalJsonError::InvalidJson("missing quotes".to_string());
         assert_eq!(invalid_json_error.to_string(), "Invalid JSON structure: missing quotes");
 
-        let serialization_error =
-            CanonicalJsonError::SerializationError("buffer overflow".to_string());
-        assert_eq!(serialization_error.to_string(), "JSON serialization failed: buffer overflow");
-
         let memory_error = CanonicalJsonError::MemoryExhausted;
         assert_eq!(
             memory_error.to_string(),
@@ -54,22 +49,70 @@ mod tests {
     }
 
     #[test]
-    fn test_error_clone_and_equality() {
-        let error1 = CanonicalJsonError::InvalidJson("test".to_string());
-        let error2 = error1.clone();
-        assert_eq!(error1, error2);
+    fn test_error_debug() {
+        let error = CanonicalJsonError::InvalidJson("test".to_string());
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("InvalidJson"));
+        assert!(debug_str.contains("test"));
     }
 
     #[test]
     fn test_from_serde_json_error() {
-        let serde_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+        let serde_result = serde_json::from_str::<serde_json::Value>("invalid json");
+        let serde_error = match serde_result {
+            Err(e) => e,
+            Ok(_) => panic!("Test error: Expected serde_json parse to fail for invalid JSON, but it succeeded"),
+        };
         let canonical_error = CanonicalJsonError::from(serde_error);
 
         match canonical_error {
-            CanonicalJsonError::SerializationError(msg) => {
-                assert!(msg.contains("expected") || msg.contains("invalid"));
+            CanonicalJsonError::SerializationError(_) => {
+                // Successfully converted from serde_json::Error
+                assert_eq!(canonical_error.to_string(), "JSON serialization failed");
             },
             _ => panic!("Expected SerializationError"),
         }
+    }
+
+    #[test]
+    fn test_error_source_chain() {
+        use std::error::Error;
+        
+        let serde_result = serde_json::from_str::<serde_json::Value>("invalid json");
+        let serde_error = match serde_result {
+            Err(e) => e,
+            Ok(_) => panic!("Test error: Expected serde_json parse to fail for invalid JSON, but it succeeded"),
+        };
+        let canonical_error = CanonicalJsonError::from(serde_error);
+
+        match canonical_error {
+            CanonicalJsonError::SerializationError(_) => {
+                let source = canonical_error.source();
+                assert!(source.is_some(), "Error source chain should be present");
+                
+                if let Some(underlying) = source {
+                    let error_string = underlying.to_string();
+                    assert!(
+                        error_string.contains("expected") || error_string.contains("invalid"),
+                        "Underlying error should contain parse error details"
+                    );
+                }
+            },
+            _ => panic!("Expected SerializationError"),
+        }
+    }
+
+    #[test]
+    fn test_error_source_none_for_other_variants() {
+        use std::error::Error;
+        
+        let invalid_json = CanonicalJsonError::InvalidJson("test".to_string());
+        assert!(invalid_json.source().is_none());
+        
+        let memory = CanonicalJsonError::MemoryExhausted;
+        assert!(memory.source().is_none());
+        
+        let recursive = CanonicalJsonError::RecursiveStructure;
+        assert!(recursive.source().is_none());
     }
 }

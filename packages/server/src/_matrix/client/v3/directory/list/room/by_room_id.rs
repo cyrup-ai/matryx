@@ -10,7 +10,7 @@ use crate::{
     AppState,
     auth::{MatrixAuth, extract_matrix_auth},
 };
-use matryx_surrealdb::repository::{PublicRoomsRepository, RoomDirectoryVisibility};
+use matryx_surrealdb::repository::{PublicRoomsRepository, RoomDirectoryVisibility, PowerLevelsRepository};
 
 /// GET /_matrix/client/v3/directory/list/room/{roomId}
 pub async fn get(
@@ -60,15 +60,33 @@ pub async fn put(
     // Parse visibility from payload
     let visibility_str = payload.get("visibility").and_then(|v| v.as_str()).unwrap_or("private");
 
-    // TODO: Implement proper authorization check
-    // According to Matrix spec, only room admins/moderators should be able to change directory visibility
-    // This requires checking user's power level in the room
-    // For now, we log the user_id for audit purposes
+    // Check user authorization to change directory visibility (requires moderator power level)
+    let power_levels_repo = PowerLevelsRepository::new(state.db.clone());
+    let user_power_level = match power_levels_repo.get_user_power_level(&room_id, &user_id).await {
+        Ok(level) => level,
+        Err(e) => {
+            error!("Failed to get user power level: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Directory visibility changes are room state changes requiring moderator power level
+    const REQUIRED_POWER_LEVEL: i32 = 50;
+    if user_power_level < REQUIRED_POWER_LEVEL {
+        tracing::warn!(
+            "User {} denied: power level {} < required {} for room {} directory visibility change",
+            user_id, user_power_level, REQUIRED_POWER_LEVEL, room_id
+        );
+        return Ok(Json(json!({
+            "errcode": "M_FORBIDDEN",
+            "error": "You don't have permission to change room directory visibility"
+        })));
+    }
+
+    // Authorization successful - log and proceed
     tracing::info!(
-        "User {} requesting to change room {} directory visibility to {}",
-        user_id,
-        room_id,
-        visibility_str
+        "User {} authorized to change room {} directory visibility to {} (power level: {})",
+        user_id, room_id, visibility_str, user_power_level
     );
 
     let visibility = match visibility_str {

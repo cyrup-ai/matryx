@@ -116,12 +116,14 @@ pub fn parse_x_matrix_header(auth_header: &str) -> Result<XMatrixAuth, XMatrixPa
         return Err(XMatrixParseError::InvalidParameterValue("key".to_string()));
     };
 
+    // Accept both "signature" (formal parameter name) and "sig" (shorthand used by older servers) per Matrix spec
     let signature = params
-        .get("sig")
-        .ok_or_else(|| XMatrixParseError::MissingRequiredParameter("sig".to_string()))?
+        .get("signature")
+        .or_else(|| params.get("sig"))
+        .ok_or_else(|| XMatrixParseError::MissingRequiredParameter("signature".to_string()))?
         .clone();
 
-    // Destination parameter is optional for backward compatibility
+    // Destination parameter is optional per Matrix spec
     let destination = params.get("destination").cloned();
 
     Ok(XMatrixAuth { origin, destination, key_id, signature })
@@ -273,6 +275,18 @@ mod tests {
 
     #[test]
     fn test_basic_x_matrix_parsing() {
+        let header = "X-Matrix origin=example.com,key=ed25519:abc123,signature=def456";
+        let auth = parse_x_matrix_header(header).unwrap();
+
+        assert_eq!(auth.origin, "example.com");
+        assert_eq!(auth.key_id, "abc123");
+        assert_eq!(auth.signature, "def456");
+        assert_eq!(auth.destination, None);
+    }
+
+    #[test]
+    fn test_sig_parameter_compatibility() {
+        // Test compatibility with "sig" parameter (shorthand accepted by Matrix spec)
         let header = "X-Matrix origin=example.com,key=ed25519:abc123,sig=def456";
         let auth = parse_x_matrix_header(header).unwrap();
 
@@ -284,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_quoted_values() {
-        let header = r#"X-Matrix origin="example.com",key="ed25519:abc123",sig="def,456""#;
+        let header = r#"X-Matrix origin="example.com",key="ed25519:abc123",signature="def,456""#;
         let auth = parse_x_matrix_header(header).unwrap();
 
         assert_eq!(auth.origin, "example.com");
@@ -294,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_escaped_quotes() {
-        let header = r#"X-Matrix origin=example.com,key=ed25519:abc123,sig="def\"456""#;
+        let header = r#"X-Matrix origin=example.com,key=ed25519:abc123,signature="def\"456""#;
         let auth = parse_x_matrix_header(header).unwrap();
 
         assert_eq!(auth.signature, "def\"456");
@@ -302,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_matrix_compatibility_colons() {
-        let header = "X-Matrix origin=matrix.example.com:8448,key=ed25519:abc123,sig=def456";
+        let header = "X-Matrix origin=matrix.example.com:8448,key=ed25519:abc123,signature=def456";
         let auth = parse_x_matrix_header(header).unwrap();
 
         assert_eq!(auth.origin, "matrix.example.com:8448");
@@ -311,7 +325,7 @@ mod tests {
     #[test]
     fn test_destination_parameter() {
         let header =
-            "X-Matrix origin=example.com,destination=target.com,key=ed25519:abc123,sig=def456";
+            "X-Matrix origin=example.com,destination=target.com,key=ed25519:abc123,signature=def456";
         let auth = parse_x_matrix_header(header).unwrap();
 
         assert_eq!(auth.destination, Some("target.com".to_string()));

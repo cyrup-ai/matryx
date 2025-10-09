@@ -13,8 +13,8 @@ DEFINE TABLE ephemeral_events SCHEMAFULL
 
 DEFINE FIELD event_type ON TABLE ephemeral_events TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD content ON TABLE ephemeral_events TYPE object DEFAULT {};
-DEFINE FIELD room_id ON TABLE ephemeral_events TYPE option<string>;
-DEFINE FIELD sender ON TABLE ephemeral_events TYPE string ASSERT string::is::not::empty($value);
+DEFINE FIELD room_id ON TABLE ephemeral_events TYPE option<string> ASSERT ($value IS NONE) OR (string::starts_with($value, '!') AND string::contains($value, ':'));
+DEFINE FIELD sender ON TABLE ephemeral_events TYPE string ASSERT string::is::not::empty($value) AND string::starts_with($value, '@') AND string::contains($value, ':');
 DEFINE FIELD timestamp ON TABLE ephemeral_events TYPE datetime DEFAULT time::now();
 
 DEFINE INDEX ephemeral_room_type_idx ON TABLE ephemeral_events COLUMNS room_id, event_type;
