@@ -138,7 +138,7 @@ async fn apply_lazy_loading_filter_enhanced(
     if let Some(metrics) = state.lazy_loading_metrics.as_ref() {
         let cache_hit = !essential_members.is_empty(); // Simplified cache hit detection
         let _ = metrics
-            .record_operation(processing_time, cache_hit, members_filtered_out as u64)
+            .record_operation(room_id, processing_time, cache_hit, members_filtered_out as u64)
             .await;
     }
 

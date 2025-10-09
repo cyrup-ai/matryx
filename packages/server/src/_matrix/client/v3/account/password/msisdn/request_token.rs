@@ -1,11 +1,10 @@
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -48,16 +47,10 @@ pub async fn post(
         phone_number, request.send_attempt
     );
     
-    // Validate phone number format (must start with +)
-    if !phone_number.starts_with('+') {
-        warn!("Phone number must be in international format: {}", phone_number);
-        return Err(MatrixError::InvalidParam.into_response());
-    }
-    
     // Check if SMS is enabled
     if !state.config.sms_config.enabled {
-        warn!("SMS verification disabled - cannot send password reset SMS");
-        return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        error!("SMS verification disabled - cannot send password reset SMS");
+        return Err(MatrixError::Unknown.into_response());
     }
     
     // Check if phone number is associated with an account (required for password reset)
@@ -121,7 +114,7 @@ pub async fn post(
 fn generate_verification_code() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
-    format!("{:06}", rng.gen_range(0..1000000))
+    format!("{:06}", rng.random_range(0..1000000))
 }
 
 /// Send password reset SMS
@@ -133,7 +126,8 @@ async fn send_password_reset_sms(
     let config = &state.config.sms_config;
     
     if !config.enabled {
-        return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
+        error!("SMS service unavailable - password reset cannot proceed");
+        return Err(MatrixError::Unknown.into_response());
     }
     
     let message = format!(

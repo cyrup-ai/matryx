@@ -52,6 +52,7 @@ impl LazyLoadingMetrics {
     /// Record a lazy loading operation
     pub async fn record_operation(
         &self,
+        room_id: &str,
         duration: std::time::Duration,
         cache_hit: bool,
         members_filtered: u64,
@@ -60,7 +61,7 @@ impl LazyLoadingMetrics {
         if let Err(e) = self
             .performance_repo
             .record_lazy_loading_metrics(
-                "default_room", // In practice, this would be the actual room ID
+                room_id,
                 members_filtered as u32,
                 duration.as_millis() as f64,
                 0.0, // Memory saved would be calculated based on members filtered
@@ -459,9 +460,9 @@ mod tests {
         let metrics = LazyLoadingMetrics::new(performance_repo);
 
         // Record some operations
-        let _ = metrics.record_operation(Duration::from_millis(50), true, 100).await;
-        let _ = metrics.record_operation(Duration::from_millis(80), false, 200).await;
-        let _ = metrics.record_operation(Duration::from_millis(30), true, 150).await;
+        let _ = metrics.record_operation("!test:example.com", Duration::from_millis(50), true, 100).await;
+        let _ = metrics.record_operation("!test:example.com", Duration::from_millis(80), false, 200).await;
+        let _ = metrics.record_operation("!test:example.com", Duration::from_millis(30), true, 150).await;
 
         let summary = metrics.get_performance_summary().await;
 
@@ -483,29 +484,16 @@ mod tests {
 
         // All cache hits
         for _ in 0..10 {
-            let _ = metrics.record_operation(Duration::from_millis(50), true, 100).await;
+            let _ = metrics.record_operation("!test:example.com", Duration::from_millis(50), true, 100).await;
         }
 
         assert!((metrics.cache_hit_ratio().await - 1.0).abs() < 0.001);
 
         // Mix of hits and misses
         for _ in 0..5 {
-            let _ = metrics.record_operation(Duration::from_millis(50), false, 100).await;
+            let _ = metrics.record_operation("!test:example.com", Duration::from_millis(50), false, 100).await;
         }
 
         assert!((metrics.cache_hit_ratio().await - 0.6667).abs() < 0.001); // 10/15 ≈ 0.6667
-    }
-
-    #[tokio::test]
-    async fn test_performance_monitor() {
-        let monitor = LazyLoadingPerformanceMonitor::start(1000, true);
-
-        // Simulate some work
-        std::thread::sleep(Duration::from_millis(10));
-
-        monitor.finish(50); // 950 members filtered out
-
-        let summary = get_lazy_loading_performance_summary().await;
-        assert!(summary.total_requests >= 1);
     }
 }

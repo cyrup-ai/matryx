@@ -1,6 +1,19 @@
-//! Matrix Media Upload Client (v1 - Legacy)
+//! Matrix Media Upload Client (v1 - Deprecated)
 //!
-//! Implements POST /_matrix/media/v1/upload for backward compatibility
+//! Implements POST /_matrix/media/v1/upload (deprecated Matrix spec endpoint)
+//!
+//! This endpoint implements the legacy Matrix media upload API that was deprecated
+//! in Matrix 1.11 (MSC3916) in favor of authenticated v3 endpoints.
+//!
+//! **For new code, use `MediaClient::upload_media()` from `v3::upload` instead.**
+//!
+//! This client function exists for interoperability with older Matrix homeservers
+//! that haven't migrated to v3 authenticated media endpoints. It should only be
+//! used when connecting to homeservers that don't support v3 media APIs.
+//!
+//! ## References
+//! - [MSC3916: Authenticated Media](https://github.com/matrix-org/matrix-spec-proposals/pull/3916)
+//! - [Matrix 1.11 Changelog](https://spec.matrix.org/v1.11/changelog/#deprecated-endpoints)
 
 use crate::http_client::{HttpClientError, MatrixHttpClient};
 use crate::_matrix::media::v3::upload::MediaUploadResponse;

@@ -4,6 +4,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use url::Url;
 use crate::error::matrix_errors::MatrixError;
 use crate::state::AppState;
 use matryx_surrealdb::repository::AuthRepository;
@@ -12,6 +13,38 @@ use matryx_surrealdb::repository::AuthRepository;
 pub struct RedirectQuery {
     #[serde(rename = "redirectUrl")]
     redirect_url: Option<String>,
+}
+
+/// Validates that a redirect URL is safe to use
+/// 
+/// Accepts:
+/// - Relative URLs starting with `/`
+/// - Absolute URLs pointing to the homeserver domain
+/// 
+/// Rejects all other URLs to prevent open redirect vulnerabilities
+fn validate_redirect_url(redirect_url: &str, homeserver_domain: &str) -> Result<(), MatrixError> {
+    // Allow relative URLs (most common case for Matrix clients)
+    if redirect_url.starts_with('/') {
+        return Ok(());
+    }
+    
+    // Parse and validate absolute URLs
+    if let Ok(parsed) = Url::parse(redirect_url) {
+        if let Some(host) = parsed.host_str() {
+            // Allow exact domain match or subdomain
+            if host == homeserver_domain || host.ends_with(&format!(".{}", homeserver_domain)) {
+                return Ok(());
+            }
+        }
+    }
+    
+    // Reject potentially malicious redirects
+    tracing::warn!(
+        "Rejected SSO redirectUrl '{}' - must be relative or match homeserver domain '{}'",
+        redirect_url,
+        homeserver_domain
+    );
+    Err(MatrixError::InvalidParam)
 }
 
 /// GET /_matrix/client/v3/login/sso/redirect/{idpId}
@@ -41,16 +74,20 @@ pub async fn get(
         })?;
     
     // Build redirect URL with client's callback
-    let mut sso_url = provider.redirect_url.clone();
-    
-    // Add redirectUrl as query parameter for SSO provider to use
+    let mut sso_url = Url::parse(&provider.redirect_url)
+        .map_err(|e| {
+            tracing::error!("Invalid SSO provider redirect_url for '{}': {}", provider.id, e);
+            MatrixError::Unknown
+        })?;
+
     if let Some(client_redirect) = params.redirect_url {
-        sso_url.push_str("?redirectUrl=");
-        sso_url.push_str(&urlencoding::encode(&client_redirect));
+        validate_redirect_url(&client_redirect, &state.homeserver_name)?;
+        sso_url.query_pairs_mut()
+            .append_pair("redirectUrl", &client_redirect);
     }
-    
+
     tracing::info!("Redirecting to SSO provider: {}", provider.id);
-    
+
     // Return HTTP 302 redirect
-    Ok(Redirect::temporary(&sso_url))
+    Ok(Redirect::temporary(sso_url.as_str()))
 }

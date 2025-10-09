@@ -251,6 +251,7 @@ impl DeviceRepository {
         
         #[derive(serde::Deserialize)]
         struct UserIdResult {
+            #[allow(dead_code)]
             user_id: String,
         }
         

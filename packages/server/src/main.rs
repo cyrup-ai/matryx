@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize server configuration
     ServerConfig::init().map_err(|e| {
         tracing::error!("Failed to initialize server configuration: {}", e);
-        std::process::exit(1);
+        format!("Failed to initialize server configuration: {}", e)
     })?;
 
     // Initialize SurrealDB connection

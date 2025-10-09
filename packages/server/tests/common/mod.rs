@@ -5,6 +5,8 @@ use surrealdb::{
     Surreal,
     engine::any::{self, Any},
 };
+use tokio::sync::mpsc;
+use matryx_server::federation::outbound_queue::OutboundEvent;
 
 pub mod integration;
 
@@ -92,6 +94,10 @@ pub async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
 
     // Create app state with all required fields
     let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
+    
+    // Create outbound channel for federation queue (tests don't spawn background task)
+    let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+    
     let state = AppState::new(
         db,
         session_service,
@@ -100,6 +106,7 @@ pub async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
         http_client,
         event_signer,
         dns_resolver,
+        outbound_tx,
     )?;
 
     // Create a simple test router
@@ -178,6 +185,9 @@ pub async fn create_test_app_with_db(db: Surreal<Any>) -> Result<Router, Box<dyn
     // We need to make config static for AppState - use Box::leak for tests
     let static_config: &'static ServerConfig = Box::leak(Box::new(config));
 
+    // Create outbound channel for federation queue (tests don't spawn background task)
+    let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+
     let state = AppState::new(
         db,
         session_service,
@@ -186,6 +196,7 @@ pub async fn create_test_app_with_db(db: Surreal<Any>) -> Result<Router, Box<dyn
         http_client,
         event_signer,
         dns_resolver,
+        outbound_tx,
     )?;
 
     // Create a simple test router

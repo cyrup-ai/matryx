@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use surrealdb::engine::any::{self};
 use wiremock::MockServer;
+use tokio::sync::mpsc;
+use matryx_server::federation::outbound_queue::OutboundEvent;
 
 pub mod client_compatibility;
 pub mod compliance;
@@ -104,6 +106,10 @@ impl MatrixTestServer {
         );
 
         let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
+        
+        // Create outbound channel for federation queue (tests don't spawn background task)
+        let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+        
         let app_state = AppState::new(
             db_any,
             session_service,
@@ -112,6 +118,7 @@ impl MatrixTestServer {
             http_client,
             event_signer,
             dns_resolver,
+            outbound_tx,
         )?;
 
         Ok(Self {
@@ -308,6 +315,10 @@ async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
     );
 
     let config_static: &'static ServerConfig = Box::leak(Box::new(config.clone()));
+    
+    // Create outbound channel for federation queue (tests don't spawn background task)
+    let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
+    
     let app_state = AppState::new(
         db_any,
         session_service,
@@ -316,6 +327,7 @@ async fn create_test_app() -> Result<Router, Box<dyn std::error::Error>> {
         http_client,
         event_signer,
         dns_resolver,
+        outbound_tx,
     )?;
 
     // Create a simple test router for now

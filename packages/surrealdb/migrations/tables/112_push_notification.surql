@@ -21,5 +21,5 @@ DEFINE FIELD notification_data.status ON TABLE push_notification TYPE string DEF
 DEFINE FIELD notification_data.created_at ON TABLE push_notification TYPE datetime DEFAULT time::now();
 DEFINE FIELD attempts ON TABLE push_notification TYPE int DEFAULT 0;
 
-DEFINE INDEX pn_user_idx ON TABLE push_notification COLUMNS user_id;
-DEFINE INDEX pn_status_idx ON TABLE push_notification COLUMNS status;
+DEFINE INDEX pn_user_idx ON TABLE push_notification COLUMNS notification_data.user_id;
+DEFINE INDEX pn_status_idx ON TABLE push_notification COLUMNS notification_data.status;
