@@ -1,74 +1,14 @@
-# SPEC_FEDERATION_08: Implement 3PID onbind Endpoint
+# SPEC_FEDERATION_08: Implement 3PID onbind Endpoint - REQUIRES FULL IMPLEMENTATION
 
 ## Status
-STUB EXISTS - Endpoint exists as stub, needs full implementation
+**STUB ONLY** - 0% implemented. Only infrastructure exists (route registered, types defined).
 
-## Core Objective
-Implement the PUT /_matrix/federation/v1/3pid/onbind endpoint to handle identity server callbacks when a third-party identifier (email/phone) gets bound to a Matrix ID. This endpoint processes pending room invites by forwarding them to the inviting servers for conversion into real Matrix invites.
+## Critical Issues
 
-## Architecture Context
+### 1. Handler Implementation Missing
+**File**: `/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`
 
-### Existing Infrastructure
-
-The endpoint stub **already exists** at:
-- **File**: [`/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`](../packages/server/src/_matrix/federation/v1/threepid/onbind.rs)
-- **Route**: Already registered in [`main.rs:585`](../packages/server/src/main.rs#L585) as `.route("/v1/3pid/onbind", put(_matrix::federation::v1::threepid::onbind::put))`
-- **Current Implementation**: Stub that accepts `Json<Value>` and returns empty object
-
-### Entity Types (All Exist)
-
-All required types are **already defined** in [`packages/entity/src/types/`](../packages/entity/src/types/):
-
-- **`ThirdPartyBindRequest`** ([`third_party_bind_request.rs`](../packages/entity/src/types/third_party_bind_request.rs)): Request structure with `address`, `invites`, `medium`, `mxid`
-- **`ThirdPartyInvite`** ([`third_party_invite.rs`](../packages/entity/src/types/third_party_invite.rs)): Individual invite with `address`, `medium`, `mxid`, `room_id`, `sender`, `signed`
-- **`SignedThirdPartyInvite`** ([`signed_third_party_invite.rs`](../packages/entity/src/types/signed_third_party_invite.rs)): Signature block with `mxid`, `signatures`, `token`
-- **`ExchangeThirdPartyInviteRequest`** ([`exchange_third_party_invite_request.rs`](../packages/entity/src/types/exchange_third_party_invite_request.rs)): Request for calling remote exchange endpoint
-- **`ThirdPartyInviteEventContent`** ([`third_party_invite_event_content.rs`](../packages/entity/src/types/third_party_invite_event_content.rs)): Event content structure
-- **`ThirdPartyInviteData`** ([`third_party_invite_data.rs`](../packages/entity/src/types/third_party_invite_data.rs)): Data for invite events
-
-### Related Code to Study
-
-Reference implementation patterns from:
-- **Exchange endpoint**: [`/packages/server/src/_matrix/federation/v1/exchange_third_party_invite/by_room_id.rs`](../packages/server/src/_matrix/federation/v1/exchange_third_party_invite/by_room_id.rs) - Extensive validation and signature verification logic
-- **Federation client**: [`/packages/server/src/federation/client.rs`](../packages/server/src/federation/client.rs) - Pattern for making signed federation requests
-- **Spec reference**: [`/spec/server/11-room-invites.md:272-295`](../spec/server/11-room-invites.md#L272-L295) - Complete specification
-
-## What the Endpoint Does
-
-### Identity Server Callback Flow
-
-```
-1. User binds email alice@example.com to @alice:our-server.org
-2. Identity server has pending invites for alice@example.com
-3. Identity server calls PUT /_matrix/federation/v1/3pid/onbind on our-server.org
-4. Our server receives: {
-     "address": "alice@example.com",
-     "medium": "email", 
-     "mxid": "@alice:our-server.org",
-     "invites": [
-       {
-         "room_id": "!room:inviting-server.org",
-         "sender": "@bob:inviting-server.org",
-         "signed": { identity server signature data }
-       }
-     ]
-   }
-5. For each invite, our server calls inviting-server.org:
-   PUT /_matrix/federation/v1/exchange_third_party_invite/!room:inviting-server.org
-6. Inviting server validates and creates real m.room.member invite event
-7. Our server returns {} to identity server
-```
-
-### Key Differences from exchange_third_party_invite
-
-- **onbind**: Called BY identity server TO invited user's homeserver (no auth required)
-- **exchange_third_party_invite**: Called BY invited homeserver TO inviting server (requires X-Matrix auth)
-
-## Implementation Requirements
-
-### 1. Update Handler in `/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`
-
-**Current code:**
+**Current Code** (stub):
 ```rust
 use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};
@@ -78,8 +18,7 @@ pub async fn put(Json(_payload): Json<Value>) -> Result<Json<Value>, StatusCode>
 }
 ```
 
-**Required changes:**
-
+**Required Implementation**:
 ```rust
 use axum::{extract::State, http::StatusCode, Json};
 use serde_json::json;
@@ -89,97 +28,91 @@ use matryx_entity::types::{
     ExchangeThirdPartyInviteRequest,
 };
 use crate::state::AppState;
+use crate::federation::client::FederationClient;
 
-/// PUT /_matrix/federation/v1/3pid/onbind
-///
-/// Called by identity servers to notify when a 3PID is bound to a Matrix ID.
-/// This endpoint has NO AUTHENTICATION because it's a callback from identity server.
-/// 
-/// Spec: /spec/server/11-room-invites.md:272-295
 pub async fn put(
     State(state): State<AppState>,
     Json(payload): Json<ThirdPartyBindRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Extract mxid domain to verify it belongs to our server
-    // Validate mxid format and belongs to our server
-    // For each invite in payload.invites:
-    //   - Extract sender domain from invite.sender
-    //   - Construct ThirdPartyInviteData from invite.signed
-    //   - Create ExchangeThirdPartyInviteRequest 
-    //   - Call FederationClient::exchange_third_party_invite(sender_domain, room_id, request)
-    //   - Log success/failure but continue processing other invites
-    // Return Ok(Json(json!({})))
+    // 1. Validate mxid belongs to our server
+    let user_domain = payload.mxid.split(':').nth(1).ok_or(StatusCode::BAD_REQUEST)?;
+    if user_domain != state.homeserver_name {
+        warn!("Rejecting onbind for user {} not on our server {}", 
+              payload.mxid, state.homeserver_name);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    info!("Processing 3PID onbind for {} with {} invites", 
+          payload.mxid, payload.invites.len());
+    
+    // 2. Create federation client
+    let federation_client = FederationClient::new(
+        state.http_client.clone(),
+        state.event_signer.clone(),
+        state.homeserver_name.clone(),
+        true, // use_https
+    );
+    
+    // 3. Process each invite
+    for invite in payload.invites {
+        // Extract inviting server domain
+        let sender_domain = match invite.sender.split(':').nth(1) {
+            Some(domain) => domain,
+            None => {
+                warn!("Invalid sender format: {}", invite.sender);
+                continue; // Skip but process others
+            }
+        };
+        
+        debug!("Processing invite from {} in room {}", invite.sender, invite.room_id);
+        
+        // Create ThirdPartyInviteData
+        let third_party_invite_data = ThirdPartyInviteData {
+            display_name: invite.address.clone(),
+            signed: invite.signed.clone(),
+        };
+        
+        // Create event content
+        let content = ThirdPartyInviteEventContent {
+            membership: "invite".to_string(),
+            third_party_invite: third_party_invite_data,
+        };
+        
+        // Create exchange request
+        let exchange_request = ExchangeThirdPartyInviteRequest {
+            content,
+            room_id: invite.room_id.clone(),
+            sender: invite.sender.clone(),
+            state_key: payload.mxid.clone(),
+            event_type: "m.room.member".to_string(),
+        };
+        
+        // Call exchange endpoint on inviting server
+        match federation_client.exchange_third_party_invite(
+            sender_domain,
+            &invite.room_id,
+            &exchange_request
+        ).await {
+            Ok(_) => {
+                info!("Successfully exchanged 3PID invite for {} in room {}", 
+                      payload.mxid, invite.room_id);
+            },
+            Err(e) => {
+                error!("Failed to exchange 3PID invite for room {}: {:?}", 
+                       invite.room_id, e);
+                // Continue processing other invites
+            }
+        }
+    }
+    
+    Ok(Json(json!({})))
 }
 ```
 
-**Step-by-step logic:**
-
-1. **Validate mxid belongs to our server**:
-   ```rust
-   let user_domain = payload.mxid.split(':').nth(1).ok_or(StatusCode::BAD_REQUEST)?;
-   if user_domain != state.homeserver_name {
-       warn!("Rejecting onbind for user {} not on our server {}", 
-             payload.mxid, state.homeserver_name);
-       return Err(StatusCode::BAD_REQUEST);
-   }
-   ```
-
-2. **Process each invite**:
-   ```rust
-   for invite in payload.invites {
-       // Extract inviting server domain from sender
-       let sender_domain = invite.sender.split(':').nth(1)
-           .ok_or_else(|| {
-               warn!("Invalid sender format: {}", invite.sender);
-               StatusCode::BAD_REQUEST
-           })?;
-       
-       // Create ThirdPartyInviteData from signed object
-       let third_party_invite_data = ThirdPartyInviteData {
-           display_name: invite.address.clone(), // Use address as display name
-           signed: invite.signed.clone(),
-       };
-       
-       // Create event content
-       let content = ThirdPartyInviteEventContent {
-           membership: "invite".to_string(),
-           third_party_invite: third_party_invite_data,
-       };
-       
-       // Create exchange request
-       let exchange_request = ExchangeThirdPartyInviteRequest {
-           content,
-           room_id: invite.room_id.clone(),
-           sender: invite.sender.clone(),
-           state_key: payload.mxid.clone(),
-           event_type: "m.room.member".to_string(),
-       };
-       
-       // Call exchange endpoint on inviting server
-       match federation_client.exchange_third_party_invite(
-           sender_domain,
-           &invite.room_id,
-           &exchange_request
-       ).await {
-           Ok(_) => {
-               info!("Successfully exchanged third-party invite for {} in room {}", 
-                     payload.mxid, invite.room_id);
-           },
-           Err(e) => {
-               // Log error but continue processing other invites
-               error!("Failed to exchange third-party invite: {:?}", e);
-           }
-       }
-   }
-   ```
-
-3. **Return success**: `Ok(Json(json!({})))`
-
-### 2. Add Method to FederationClient
-
+### 2. FederationClient Method Missing
 **File**: `/packages/server/src/federation/client.rs`
 
-**Add new method** (after `query_user_devices`):
+**Add after `query_user_devices` method**:
 
 ```rust
 /// Exchange third-party invite with inviting server
@@ -268,114 +201,52 @@ pub async fn exchange_third_party_invite(
 }
 ```
 
-### 3. Update Imports
-
-**In `/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`:**
-
-```rust
-use axum::{extract::State, http::StatusCode, Json};
-use serde_json::json;
-use std::sync::Arc;
-use tracing::{debug, error, info, warn};
-
-use crate::federation::client::FederationClient;
-use crate::state::AppState;
-use matryx_entity::types::{
-    ExchangeThirdPartyInviteRequest, ThirdPartyBindRequest, ThirdPartyInviteData,
-    ThirdPartyInviteEventContent,
-};
-```
-
-**In `/packages/server/src/federation/client.rs`:**
-
+**Also add import**:
 ```rust
 use matryx_entity::types::{
     Transaction, TransactionResponse, ExchangeThirdPartyInviteRequest
 };
 ```
 
-## Specification Reference
+## Requirements Checklist
 
-From [`/spec/server/11-room-invites.md`](../spec/server/11-room-invites.md):
+### onbind.rs Handler
+- [ ] Change signature to accept `State<AppState>`
+- [ ] Change payload type from `Json<Value>` to `Json<ThirdPartyBindRequest>`
+- [ ] Add all required imports (ThirdPartyBindRequest, ThirdPartyInviteData, ThirdPartyInviteEventContent, ExchangeThirdPartyInviteRequest)
+- [ ] Validate mxid domain matches our homeserver
+- [ ] Create FederationClient instance
+- [ ] Loop through all invites in payload
+- [ ] Extract sender domain from each invite.sender
+- [ ] Construct ThirdPartyInviteData from invite.signed
+- [ ] Construct ThirdPartyInviteEventContent with membership="invite"
+- [ ] Construct ExchangeThirdPartyInviteRequest with all required fields
+- [ ] Call federation_client.exchange_third_party_invite() for each invite
+- [ ] Add proper logging (info/warn/error)
+- [ ] Continue processing on individual failures
+- [ ] Return empty JSON object on success
 
-### Endpoint: PUT /_matrix/federation/v1/3pid/onbind
+### FederationClient
+- [ ] Add `exchange_third_party_invite()` method
+- [ ] Method constructs correct URL path
+- [ ] Method serializes request to JSON
+- [ ] Method creates signed PUT request with X-Matrix auth
+- [ ] Method handles HTTP errors properly
+- [ ] Method returns Result<(), FederationClientError>
+- [ ] Add ExchangeThirdPartyInviteRequest to imports
 
-**Authentication**: NONE (identity server callback)
-
-**Request Body** (`ThirdPartyBindRequest`):
-- `address` (string): Third-party identifier (e.g., "alice@example.com")
-- `medium` (string): Type of identifier ("email" or "msisdn")
-- `mxid` (string): Matrix ID now bound to the 3PID
-- `invites` (array of `ThirdPartyInvite`): Pending invites
-
-**Each invite contains**:
-- `address`, `medium`, `mxid`: Same as top level
-- `room_id`: Room the invite is for
-- `sender`: User who sent the original invite
-- `signed`: `SignedThirdPartyInvite` with identity server signature
-
-**Response**: `{}` (empty JSON object)
-
-### Related Endpoint: PUT /_matrix/federation/v1/exchange_third_party_invite/{roomId}
-
-This is what we CALL on the inviting server (already implemented in [`by_room_id.rs`](../packages/server/src/_matrix/federation/v1/exchange_third_party_invite/by_room_id.rs)).
-
-## Security Considerations
-
-### No Authentication Required
-- This endpoint **deliberately has NO X-Matrix authentication**
-- It's a callback from the identity server, not a federation request
-- Security comes from validating:
-  1. The mxid belongs to our server
-  2. The identity server signatures in the `signed` object (validated by receiving server)
-
-### Validation Steps
-1. **Verify mxid domain**: `payload.mxid.split(':').nth(1) == state.homeserver_name`
-2. **Extract sender domain**: For routing to correct inviting server
-3. **No need to verify signatures**: The inviting server (exchange_third_party_invite) does this
-
-### Error Handling
-- **Continue on individual failures**: If one invite exchange fails, still process others
-- **Log all failures**: For debugging and monitoring
-- **Return success if mxid valid**: Even if all exchanges fail, return 200 to identity server
-
-## Definition of Done
-
-- [ ] Handler in `onbind.rs` accepts `ThirdPartyBindRequest` instead of `Value`
-- [ ] Handler validates mxid belongs to our homeserver
-- [ ] Handler processes each invite in the array
-- [ ] For each invite, constructs proper `ExchangeThirdPartyInviteRequest`
-- [ ] For each invite, calls inviting server's exchange endpoint via FederationClient
-- [ ] New method `exchange_third_party_invite()` added to FederationClient
-- [ ] Method creates signed PUT request to exchange endpoint
-- [ ] Returns empty JSON object `{}` on success
-- [ ] Logs info/warn/error messages at appropriate points
+## Testing Requirements
+After implementation:
+1. Verify endpoint accepts ThirdPartyBindRequest
+2. Verify rejection when mxid doesn't belong to our server
+3. Verify federation client makes signed requests
+4. Verify error handling for individual invite failures
+5. Verify all invites are processed even if some fail
 
 ## Files to Modify
+1. `/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`
+2. `/packages/server/src/federation/client.rs`
 
-1. **`/packages/server/src/_matrix/federation/v1/threepid/onbind.rs`** - Update handler implementation
-2. **`/packages/server/src/federation/client.rs`** - Add `exchange_third_party_invite()` method
-
-## Files to Reference (DO NOT MODIFY)
-
-- [`/packages/entity/src/types/third_party_bind_request.rs`](../packages/entity/src/types/third_party_bind_request.rs) - Request structure
-- [`/packages/entity/src/types/third_party_invite.rs`](../packages/entity/src/types/third_party_invite.rs) - Invite structure  
-- [`/packages/entity/src/types/exchange_third_party_invite_request.rs`](../packages/entity/src/types/exchange_third_party_invite_request.rs) - Exchange request
-- [`/packages/server/src/_matrix/federation/v1/exchange_third_party_invite/by_room_id.rs`](../packages/server/src/_matrix/federation/v1/exchange_third_party_invite/by_room_id.rs) - Receiving end implementation
-- [`/spec/server/11-room-invites.md`](../spec/server/11-room-invites.md) - Complete specification
-
-## Implementation Pattern
-
-This implementation follows the **Federation Client Pattern**:
-
-1. Parse typed request body (not generic `Value`)
-2. Validate request against our server's identity
-3. For each item requiring federation call, extract destination domain
-4. Use FederationClient method to make signed outbound request
-5. Log results but don't fail on individual errors
-6. Return simple success response
-
-See [`send_transaction`](../packages/server/src/federation/client.rs#L170-L223) in FederationClient for similar pattern.
-
-## Priority
-MEDIUM - Required for email/phone invites to work correctly
+## Reference
+- Spec: `/spec/server/11-room-invites.md:272-295`
+- Similar pattern: `/packages/server/src/federation/client.rs` (send_transaction method)
