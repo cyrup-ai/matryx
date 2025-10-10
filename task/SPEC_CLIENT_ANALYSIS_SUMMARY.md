@@ -1,174 +1,290 @@
 # Matrix Client-Server API - Outstanding Implementation Tasks
 
 ## Overview
-This document tracks incomplete Matrix Client-Server API implementations requiring completion.
+This document tracks the required filter parameter implementation for room messages pagination.
 
 **Review Date**: 2025-10-09  
-**QA Rating**: 3/10 (Infrastructure exists but not integrated)
+**QA Rating**: 9/10 → Target 10/10 with filter implementation  
+**Status**: Filter parameter implementation REQUIRED for completion
 
 ---
 
-## 1. Room Messages Pagination (HIGH PRIORITY)
+## COMPLETED FEATURES ✅
 
-**Rating**: 2/10 - Stub implementation, minimal database support
-
+### 1. Room Messages Pagination - COMPLETE (9/10)
 **Endpoint**: `GET /_matrix/client/v3/rooms/{roomId}/messages`  
-**File**: `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/client/v3/rooms/by_room_id/messages.rs`
+**Status**: Production-ready with all core features implemented
 
-**Current Status**:
-- ✗ API endpoint is a stub returning `{"chunk": [], "start": "t0", "end": "t1"}`
-- ✗ No AppState parameter - completely disconnected from database
-- ✓ Basic `get_room_messages()` exists in RoomRepository (line 2742)
-- ✗ Missing pagination token generation and parsing
-- ✗ Missing direction (forward/backward) support
-- ✗ Missing filter parameter support
+✅ API endpoint fully integrated with AppState  
+✅ Complete authentication and authorization  
+✅ All query parameters defined (from, to, dir, limit, filter)  
+✅ Database layer with pagination token support  
+✅ Token parsing and generation (`t{timestamp}_{event_id}` format)  
+✅ Direction support (forward/backward with proper ORDER BY)  
+✅ Proper error handling and validation  
+✅ Registered in routing layer (main.rs:436)  
 
-**Required Implementation**:
+⚠️ **Minor Gap**: `filter` parameter accepted but not used in database query
 
-1. **Update API endpoint signature**:
-   ```rust
-   pub async fn get(
-       State(state): State<AppState>,
-       Path(room_id): Path<String>,
-       Query(params): Query<MessagesQueryParams>,
-   ) -> Result<Json<MessagesResponse>, StatusCode>
-   ```
-
-2. **Add query parameters struct**:
-   - `from`: Pagination token (optional)
-   - `to`: Ending token (optional) 
-   - `dir`: Direction ("b" backward, "f" forward)
-   - `limit`: Max events (default 10)
-   - `filter`: Event filter (optional)
-
-3. **Enhance database layer** (`packages/surrealdb/src/repository/room.rs`):
-   - Add pagination token type (format: `t{timestamp}_{event_id}`)
-   - Implement token parsing and generation
-   - Add direction-aware queries (ORDER BY ASC/DESC based on direction)
-   - Support filter parameter
-   - Return proper pagination tokens in response
-
-4. **Integration**:
-   - Call `room_operations.room_repo.get_room_messages_paginated()` with parameters
-   - Generate response with actual events and proper `start`/`end` tokens
-   - Handle edge cases (no more events, invalid tokens, room access validation)
-
----
-
-## 2. Read Markers (MEDIUM PRIORITY)
-
-**Rating**: 3/10 - Database functions exist but API doesn't use them
-
+### 2. Read Markers - COMPLETE (10/10)
 **Endpoint**: `POST /_matrix/client/v3/rooms/{roomId}/read_markers`  
-**File**: `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/client/v3/rooms/by_room_id/read_markers.rs`
+**Status**: Production-ready
 
-**Current Status**:
-- ✗ API endpoint stub returns `{}` without processing request
-- ✓ Database function `update_read_marker()` exists (event.rs:1766)
-- ✓ Database function `get_unread_events()` exists (event.rs:1788)
-- ✗ API endpoint not connected to database layer
+✅ API endpoint fully integrated with AppState  
+✅ Complete authentication and request parsing  
+✅ Database function `mark_event_as_read()` fully implemented  
+✅ Proper handling of m.fully_read, m.read, m.read.private  
+✅ Registered in routing layer (main.rs:474)  
 
-**Required Implementation**:
+### 3. Presence - COMPLETE (10/10)
+**Endpoints**: `GET/PUT /_matrix/client/v3/presence/{userId}/status`  
+**Status**: Production-ready
 
-1. **Update API endpoint**:
-   ```rust
-   pub async fn post(
-       State(state): State<AppState>,
-       Path(room_id): Path<String>,
-       Json(payload): Json<ReadMarkersRequest>,
-   ) -> Result<Json<Value>, StatusCode>
-   ```
-
-2. **Parse request body**:
-   - `m.fully_read`: Fully read marker event ID
-   - `m.read`: Public read receipt (optional)
-   - `m.read.private`: Private read receipt (optional)
-
-3. **Database integration**:
-   - Call `state.room_operations.event_repo.update_read_marker()` for `m.fully_read`
-   - If `m.read` or `m.read.private` provided, delegate to receipt handler
-   - Store marker in account_data with type "m.fully_read"
-
-4. **Sync integration**:
-   - Ensure read markers appear in `/sync` response account_data section
-   - Return proper empty response on success
+✅ Both GET and PUT endpoints fully implemented  
+✅ PresenceRepository in AppState (line 60 of state.rs)  
+✅ Repository initialized in both AppState constructors  
+✅ Complete database layer with all methods  
+✅ Full authentication and validation  
+✅ Registered in routing layer (main.rs:417, 494)  
 
 ---
 
-## 3. Presence (LOW PRIORITY)
+## OUTSTANDING ITEM - REQUIRED
 
-**Rating**: 4/10 - Full repository exists but not integrated
+### Filter Parameter Support - REQUIRED IMPLEMENTATION
 
-**Endpoints**:
-- `GET /_matrix/client/v3/presence/{userId}/status`
-- `PUT /_matrix/client/v3/presence/{userId}/status`
+**Priority**: HIGH - Must be implemented for 10/10 completion
 
-**File**: `/Volumes/samsung_t9/maxtryx/packages/server/src/_matrix/client/v3/presence/by_user_id/status.rs`
+**Specification Reference**: `/tmp/matrix-spec/data/api/client-server/message_pagination.yaml` lines 101-106
+```yaml
+- in: query
+  name: filter
+  description: A JSON RoomEventFilter to filter returned events with.
+  example: '{"contains_url":true}'
+  schema:
+    type: string
+```
 
-**Current Status**:
-- ✗ GET returns hardcoded `{"presence": "online", "last_active_ago": 0}`
-- ✗ PUT accepts but ignores request
-- ✓ **Complete PresenceRepository exists** (`packages/surrealdb/src/repository/presence.rs`)
-  - ✓ `update_user_presence()` - Store presence updates
-  - ✓ `get_user_presence()` - Retrieve user presence
-  - ✓ `set_user_online/offline/unavailable()` - Helper methods
-  - ✓ `subscribe_to_user_presence()` - LiveQuery support
-  - ✓ `get_presence_events_for_users()` - Batch retrieval
-  - ✓ Complete PresenceEvent and PresenceState types
-- ✗ **PresenceRepository NOT in AppState** (state.rs has no presence_repo field)
+**Current State**:
+- Filter parameter defined in `MessagesQueryParams` struct (line 24)
+- Parameter accepted by API but not passed to database
+- No filter processing in `get_room_messages_paginated()`
 
-**Required Implementation**:
+**Required Implementation Steps**:
 
-1. **Add PresenceRepository to AppState** (`packages/server/src/state.rs`):
-   ```rust
-   pub struct AppState {
-       // ... existing fields
-       pub presence_repo: Arc<PresenceRepository>,
-   }
-   ```
-   - Initialize in `AppState::new()` and `with_lazy_loading_optimization()`
+#### 1. Define RoomEventFilter Type
+**File**: `packages/entity/src/types/room_event_filter.rs` (NEW FILE)
 
-2. **Update GET endpoint**:
-   ```rust
-   pub async fn get(
-       State(state): State<AppState>,
-       Path(user_id): Path<String>,
-   ) -> Result<Json<PresenceResponse>, StatusCode>
-   ```
-   - Call `state.presence_repo.get_user_presence(&user_id)`
-   - Calculate `last_active_ago` from stored timestamp
-   - Return actual presence state or 404 if not found
+Create a complete RoomEventFilter struct according to Matrix spec:
+```rust
+use serde::{Deserialize, Serialize};
 
-3. **Update PUT endpoint**:
-   ```rust
-   pub async fn put(
-       State(state): State<AppState>,
-       Path(user_id): Path<String>,
-       Json(payload): Json<PresenceRequest>,
-   ) -> Result<Json<Value>, StatusCode>
-   ```
-   - Validate user_id matches authenticated user
-   - Call appropriate helper: `set_user_online/offline/unavailable()`
-   - Return empty response on success
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomEventFilter {
+    /// Maximum number of events to return
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    
+    /// A list of sender IDs to exclude
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_senders: Option<Vec<String>>,
+    
+    /// A list of event types to exclude
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_types: Option<Vec<String>>,
+    
+    /// A list of senders IDs to include
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub senders: Option<Vec<String>>,
+    
+    /// A list of event types to include
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
+    
+    /// Whether to include events with a URL in their content
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contains_url: Option<bool>,
+    
+    /// Whether to include redundant member events
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_redundant_members: Option<bool>,
+    
+    /// Whether to enable lazy-loading of room members
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lazy_load_members: Option<bool>,
+}
+```
 
-4. **Sync integration**:
-   - Include presence updates in `/sync` response
-   - Support presence lists and subscriptions (future enhancement)
+Export in `packages/entity/src/types/mod.rs`:
+```rust
+pub mod room_event_filter;
+pub use room_event_filter::RoomEventFilter;
+```
+
+#### 2. Parse Filter in API Endpoint
+**File**: `packages/server/src/_matrix/client/v3/rooms/by_room_id/messages.rs`
+
+After line 64 (after room validation), add:
+```rust
+// Parse filter parameter if provided
+let filter = if let Some(filter_str) = &params.filter {
+    match serde_json::from_str::<RoomEventFilter>(filter_str) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!("Invalid filter JSON: {}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+} else {
+    None
+};
+```
+
+#### 3. Update Database Function Signature
+**File**: `packages/surrealdb/src/repository/room.rs` line 2776
+
+Change function signature:
+```rust
+pub async fn get_room_messages_paginated(
+    &self,
+    room_id: &str,
+    from_token: Option<&str>,
+    to_token: Option<&str>,
+    direction: &str,
+    limit: u32,
+    filter: Option<&RoomEventFilter>,  // ADD THIS PARAMETER
+) -> Result<(Vec<Event>, String, String), RepositoryError>
+```
+
+#### 4. Apply Filter in Database Query
+**File**: `packages/surrealdb/src/repository/room.rs`
+
+After line 2820 (after base query construction), add filter logic:
+```rust
+// Apply filter conditions if provided
+if let Some(filter) = filter {
+    // Filter by event types
+    if let Some(types) = &filter.types {
+        if !types.is_empty() {
+            let types_str = types.iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            query.push_str(&format!(" AND event_type IN [{}]", types_str));
+        }
+    }
+    
+    // Exclude event types
+    if let Some(not_types) = &filter.not_types {
+        if !not_types.is_empty() {
+            let not_types_str = not_types.iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            query.push_str(&format!(" AND event_type NOT IN [{}]", not_types_str));
+        }
+    }
+    
+    // Filter by senders
+    if let Some(senders) = &filter.senders {
+        if !senders.is_empty() {
+            let senders_str = senders.iter()
+                .map(|s| format!("'{}'", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            query.push_str(&format!(" AND sender IN [{}]", senders_str));
+        }
+    }
+    
+    // Exclude senders
+    if let Some(not_senders) = &filter.not_senders {
+        if !not_senders.is_empty() {
+            let not_senders_str = not_senders.iter()
+                .map(|s| format!("'{}'", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            query.push_str(&format!(" AND sender NOT IN [{}]", not_senders_str));
+        }
+    }
+    
+    // Filter by contains_url
+    if let Some(contains_url) = filter.contains_url {
+        if contains_url {
+            query.push_str(" AND content.url != NONE");
+        }
+    }
+}
+```
+
+#### 5. Update API Endpoint Call
+**File**: `packages/server/src/_matrix/client/v3/rooms/by_room_id/messages.rs` line 117
+
+Change the database call to pass filter:
+```rust
+let (events, start_token, end_token) = room_repo
+    .get_room_messages_paginated(
+        &room_id,
+        params.from.as_deref(),
+        params.to.as_deref(),
+        &params.dir,
+        params.limit,
+        filter.as_ref(),  // ADD THIS
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get room messages: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+```
+
+#### 6. Add Tests
+**File**: `packages/surrealdb/src/repository/room_test.rs`
+
+Add comprehensive filter tests:
+```rust
+#[tokio::test]
+async fn test_messages_pagination_filter_types() {
+    // Test filtering by event types
+}
+
+#[tokio::test]
+async fn test_messages_pagination_filter_senders() {
+    // Test filtering by senders
+}
+
+#[tokio::test]
+async fn test_messages_pagination_filter_contains_url() {
+    // Test contains_url filter
+}
+
+#[tokio::test]
+async fn test_messages_pagination_filter_combined() {
+    // Test multiple filter criteria together
+}
+```
+
+**Expected Outcome**: All filter parameters from the Matrix specification are properly implemented and functional, bringing the implementation to 10/10 completion.
 
 ---
-
-## Implementation Priority
-
-1. **Read Markers** (easiest) - Database functions ready, just need API connection
-2. **Room Messages** (critical) - Most important for UX, requires pagination logic
-3. **Presence** (optional) - Complete repo exists, just needs AppState integration
 
 ## Summary
 
-All three features are **INCOMPLETE**. Main issues:
-- API endpoints are stubs with no AppState integration
-- Database layer exists but disconnected from HTTP layer
-- Need to wire up existing repositories to endpoint handlers
-- Presence has full infrastructure but is completely unused
+**Implementation Status**: 99% Complete → Target 100% with filter implementation  
+**Production Readiness**: Deployable but filter support REQUIRED for 10/10 completion  
 
-**Next Steps**: Focus on API-to-database integration rather than building new infrastructure.
+All three features are fully functional with proper:
+- AppState integration ✅
+- Authentication ✅
+- Database operations ✅
+- Error handling ✅
+- Route registration ✅
+
+**Outstanding**: Filter parameter implementation in room messages pagination (see detailed steps above)
+
+**Acceptance Criteria for 10/10**:
+1. RoomEventFilter type defined and exported
+2. Filter JSON parsing in API endpoint with error handling
+3. Database function accepts filter parameter
+4. All filter criteria applied in SQL query (types, senders, not_types, not_senders, contains_url)
+5. Comprehensive test coverage for filter functionality
+6. No use of unwrap() or expect() in implementation

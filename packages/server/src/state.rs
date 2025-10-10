@@ -26,8 +26,8 @@ use matryx_surrealdb::repository::{
     database_health::DatabaseHealthRepository, device::DeviceRepository, edu::EDURepository,
     event::EventRepository, membership::MembershipRepository, metrics::HealthStatus,
     monitoring::MonitoringRepository, oauth2::OAuth2Repository, performance::PerformanceRepository,
-    relations::RelationsRepository, room::RoomRepository, room_operations::RoomOperationsService,
-    threads::ThreadsRepository, uia::UiaRepository,
+    presence::PresenceRepository, relations::RelationsRepository, room::RoomRepository,
+    room_operations::RoomOperationsService, threads::ThreadsRepository, uia::UiaRepository,
 };
 use std::sync::Arc;
 use surrealdb::{Surreal, engine::any::Any};
@@ -56,6 +56,8 @@ pub struct AppState {
     pub mention_repository: Arc<MentionRepository>,
     #[allow(dead_code)]
     pub server_notice_repository: Arc<ServerNoticeRepository<Any>>,
+    /// Presence repository for managing user presence state
+    pub presence_repo: Arc<PresenceRepository>,
     /// Room operations service that coordinates between room-related repositories
     pub room_operations: Arc<RoomOperationsService<Any>>,
     /// Enhanced lazy loading cache with SurrealDB LiveQuery integration
@@ -111,6 +113,9 @@ impl AppState {
         let thread_repository = Arc::new(ThreadRepository::new(db.clone()));
         let mention_repository = Arc::new(MentionRepository::new(db.clone()));
         let server_notice_repository = Arc::new(ServerNoticeRepository::new(db.clone()));
+        
+        // Initialize presence repository
+        let presence_repo = Arc::new(PresenceRepository::new(db.clone()));
 
         // Initialize repositories for room operations service
         let room_repo = RoomRepository::new(db.clone());
@@ -206,6 +211,7 @@ impl AppState {
             thread_repository,
             mention_repository,
             server_notice_repository,
+            presence_repo,
             room_operations,
             lazy_loading_cache: None,
             lazy_loading_metrics: None,
@@ -277,6 +283,9 @@ impl AppState {
         let thread_repository = Arc::new(ThreadRepository::new(db.clone()));
         let mention_repository = Arc::new(MentionRepository::new(db.clone()));
         let server_notice_repository = Arc::new(ServerNoticeRepository::new(db.clone()));
+        
+        // Initialize presence repository
+        let presence_repo = Arc::new(PresenceRepository::new(db.clone()));
 
         // Initialize repositories for room operations service
         let room_repo = RoomRepository::new(db.clone());
@@ -369,6 +378,7 @@ impl AppState {
             thread_repository,
             mention_repository,
             server_notice_repository,
+            presence_repo,
             room_operations,
             lazy_loading_cache: Some(lazy_cache),
             lazy_loading_metrics: Some(metrics),
