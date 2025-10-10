@@ -462,7 +462,7 @@ impl LiveQuerySync {
                                     match Self::filter_truly_left_users(
                                         &repository_service,
                                         &user_id_clone,
-                                        preliminary_left_users
+                                        preliminary_left_users.clone()
                                     ).await {
                                         Ok(filtered_users) => {
                                             if !filtered_users.is_empty() {
