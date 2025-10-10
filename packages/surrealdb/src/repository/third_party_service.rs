@@ -46,7 +46,7 @@ impl<C: Connection> ThirdPartyService<C> {
         for field_name in fields.keys() {
             let field_exists = protocol_config.location_fields
                 .iter()
-                .any(|f| f.placeholder == *field_name);
+                .any(|f| f.name == *field_name);
             
             if !field_exists {
                 return Err(RepositoryError::ValidationError {
@@ -73,7 +73,7 @@ impl<C: Connection> ThirdPartyService<C> {
         for field_name in fields.keys() {
             let field_exists = protocol_config.user_fields
                 .iter()
-                .any(|f| f.placeholder == *field_name);
+                .any(|f| f.name == *field_name);
             
             if !field_exists {
                 return Err(RepositoryError::ValidationError {
@@ -270,28 +270,28 @@ impl<C: Connection> ThirdPartyService<C> {
 
         // Check all required fields are present
         for field_def in field_definitions {
-            if !fields.contains_key(&field_def.placeholder) {
+            if !fields.contains_key(&field_def.name) {
                 return Err(RepositoryError::ValidationError {
-                    field: field_def.placeholder.clone(),
-                    message: format!("Required field '{}' is missing", field_def.placeholder),
+                    field: field_def.name.clone(),
+                    message: format!("Required field '{}' is missing", field_def.name),
                 });
             }
 
             // Validate field value against regexp (simplified validation)
-            if let Some(field_value) = fields.get(&field_def.placeholder) {
+            if let Some(field_value) = fields.get(&field_def.name) {
                 // Basic validation - check if field value is not empty
                 if field_value.is_empty() {
                     return Err(RepositoryError::ValidationError {
-                        field: field_def.placeholder.clone(),
-                        message: format!("Field '{}' cannot be empty", field_def.placeholder),
+                        field: field_def.name.clone(),
+                        message: format!("Field '{}' cannot be empty", field_def.name),
                     });
                 }
 
                 // Additional basic format validation based on common patterns
                 if field_def.regexp.contains("@") && !field_value.contains('@') {
                     return Err(RepositoryError::ValidationError {
-                        field: field_def.placeholder.clone(),
-                        message: format!("Field '{}' appears to require an email format", field_def.placeholder),
+                        field: field_def.name.clone(),
+                        message: format!("Field '{}' appears to require an email format", field_def.name),
                     });
                 }
             }

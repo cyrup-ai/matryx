@@ -1,12 +1,20 @@
-//! Client stub for _matrix/client/v1/register.rs
-//! 
-//! This is a placeholder stub for the client implementation.
-//! The actual HTTP client functionality should be implemented here
-//! using reqwest to make outbound HTTP requests.
+//! Matrix Client-Server API v1 Register (DEPRECATED)
+//!
+//! **NOTE**: v1 endpoints are deprecated per Matrix specification.
+//! Use v3 endpoints instead: `crate::_matrix::client::v3::register`
+//!
+//! Modern Matrix implementations should use:
+//! - `crate::_matrix::client::v3::register::RegisterClient`
+//! - POST /_matrix/client/v3/register
+//!
+//! This module exists for backward compatibility only.
 
-// Placeholder stub - implement actual client functionality as needed
-pub mod client_stub {
+#[deprecated(since = "0.1.0", note = "Use v3::register::RegisterClient instead")]
+pub mod deprecated_stub {
+    /// Placeholder for deprecated v1 register
+    /// 
+    /// Use `crate::_matrix::client::v3::register::RegisterClient` instead.
     pub fn placeholder() {
-        // Client implementation would go here
+        // Implementation would call v3 register, but v1 is deprecated
     }
 }

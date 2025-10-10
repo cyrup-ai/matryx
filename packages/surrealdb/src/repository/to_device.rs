@@ -13,6 +13,7 @@ pub struct ToDeviceMessage {
     pub sender_id: String,
     pub recipient_id: String,
     pub device_id: String,
+    #[serde(rename = "message_type")]
     pub event_type: String,
     pub content: Value,
     pub txn_id: Option<String>,

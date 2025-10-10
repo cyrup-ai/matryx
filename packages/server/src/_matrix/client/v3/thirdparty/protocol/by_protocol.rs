@@ -27,8 +27,8 @@ pub struct ProtocolInstance {
 
 #[derive(Serialize)]
 pub struct ProtocolResponse {
-    pub user_fields: Vec<FieldType>,
-    pub location_fields: Vec<FieldType>,
+    pub user_fields: Vec<String>,
+    pub location_fields: Vec<String>,
     pub icon: Option<String>,
     pub field_types: HashMap<String, FieldType>,
     pub instances: Vec<ProtocolInstance>,
@@ -84,20 +84,25 @@ pub async fn get(
         },
     };
 
-    // Build field_types map
+    // Build field_types map per Matrix spec
+    // Keys are field names (e.g., "network", "nickname", "channel")
     let mut field_types: HashMap<String, FieldType> = HashMap::new();
+    
+    // Add user field definitions
     for field in &protocol_config.user_fields {
         field_types.insert(
-            format!("user.{}", field.placeholder),
+            field.name.clone(),
             FieldType {
                 regexp: field.regexp.clone(),
                 placeholder: field.placeholder.clone(),
             },
         );
     }
+    
+    // Add location field definitions
     for field in &protocol_config.location_fields {
         field_types.insert(
-            format!("location.{}", field.placeholder),
+            field.name.clone(),
             FieldType {
                 regexp: field.regexp.clone(),
                 placeholder: field.placeholder.clone(),
@@ -127,13 +132,13 @@ pub async fn get(
     let response = ProtocolResponse {
         user_fields: protocol_config
             .user_fields
-            .into_iter()
-            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .iter()
+            .map(|f| f.name.clone())
             .collect(),
         location_fields: protocol_config
             .location_fields
-            .into_iter()
-            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .iter()
+            .map(|f| f.name.clone())
             .collect(),
         icon: protocol_config.avatar_url,
         field_types,

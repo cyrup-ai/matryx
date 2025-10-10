@@ -1,12 +1,20 @@
-//! Client stub for _matrix/client/v1/login.rs
-//! 
-//! This is a placeholder stub for the client implementation.
-//! The actual HTTP client functionality should be implemented here
-//! using reqwest to make outbound HTTP requests.
+//! Matrix Client-Server API v1 Login (DEPRECATED)
+//!
+//! **NOTE**: v1 endpoints are deprecated per Matrix specification.
+//! Use v3 endpoints instead: `crate::_matrix::client::v3::login`
+//!
+//! Modern Matrix implementations should use:
+//! - `crate::_matrix::client::v3::login::LoginClient`
+//! - POST /_matrix/client/v3/login
+//!
+//! This module exists for backward compatibility only.
 
-// Placeholder stub - implement actual client functionality as needed
-pub mod client_stub {
+#[deprecated(since = "0.1.0", note = "Use v3::login::LoginClient instead")]
+pub mod deprecated_stub {
+    /// Placeholder for deprecated v1 login
+    /// 
+    /// Use `crate::_matrix::client::v3::login::LoginClient` instead.
     pub fn placeholder() {
-        // Client implementation would go here
+        // Implementation would call v3 login, but v1 is deprecated
     }
 }

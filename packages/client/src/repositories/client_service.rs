@@ -41,6 +41,7 @@ pub struct ClientRepositoryService {
     device_repo: DeviceRepository,
     to_device_repo: ToDeviceRepository,
     user_id: String,
+    device_id: String,
 }
 
 impl ClientRepositoryService {
@@ -51,6 +52,7 @@ impl ClientRepositoryService {
         device_repo: DeviceRepository,
         to_device_repo: ToDeviceRepository,
         user_id: String,
+        device_id: String,
     ) -> Self {
         Self {
             event_repo,
@@ -59,18 +61,19 @@ impl ClientRepositoryService {
             device_repo,
             to_device_repo,
             user_id,
+            device_id,
         }
     }
 
     /// Create service from database connection
-    pub fn from_db(db: Surreal<Any>, user_id: String) -> Self {
+    pub fn from_db(db: Surreal<Any>, user_id: String, device_id: String) -> Self {
         let event_repo = EventRepository::new(db.clone());
         let membership_repo = MembershipRepository::new(db.clone());
         let presence_repo = PresenceRepository::new(db.clone());
         let device_repo = DeviceRepository::new(db.clone());
         let to_device_repo = ToDeviceRepository::new(db);
 
-        Self::new(event_repo, membership_repo, presence_repo, device_repo, to_device_repo, user_id)
+        Self::new(event_repo, membership_repo, presence_repo, device_repo, to_device_repo, user_id, device_id)
     }
 
     /// Get room events using proper repository pattern
@@ -161,17 +164,58 @@ impl ClientRepositoryService {
     }
 
     /// Subscribe to to-device messages for the current user
-    /// TODO: Implement when ToDeviceRepository has subscription support
+    ///
+    /// Creates a SurrealDB LIVE query stream for real-time to-device message delivery.
+    /// Messages are delivered as they arrive and should be acknowledged after processing.
+    ///
+    /// # Returns
+    /// A stream of to-device messages or errors
+    ///
+    /// # Errors
+    /// Returns `ClientError` if the subscription cannot be created
     pub async fn subscribe_to_device_messages<'a>(
         &'a self,
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<ToDeviceMessage, ClientError>> + Send + 'a>>,
         ClientError,
     > {
-        use futures_util::stream;
-        // Return empty stream until ToDeviceRepository implements subscriptions
-        let stream = stream::empty();
+        tracing::debug!(
+            "Subscribing to to-device messages for user {} device {}",
+            self.user_id,
+            self.device_id
+        );
+
+        // Call the repository's subscription method
+        let stream = self
+            .to_device_repo
+            .subscribe_to_device_messages(&self.user_id, &self.device_id)
+            .await?
+            .map(|result| result.map_err(ClientError::Repository));
+
         Ok(Box::pin(stream))
+    }
+
+    /// Mark to-device messages as delivered
+    ///
+    /// Should be called after successfully processing to-device messages.
+    /// This allows the server to clean up delivered messages.
+    ///
+    /// # Arguments
+    /// * `message_ids` - List of message IDs to acknowledge
+    ///
+    /// # Errors
+    /// Returns `ClientError` if the acknowledgment fails
+    pub async fn acknowledge_to_device_messages(
+        &self,
+        message_ids: &[String],
+    ) -> Result<(), ClientError> {
+        tracing::debug!("Acknowledging {} to-device messages", message_ids.len());
+
+        self.to_device_repo
+            .mark_to_device_messages_delivered(&self.user_id, &self.device_id, message_ids)
+            .await?;
+
+        Ok(())
     }
 
     /// Subscribe to membership changes for the current user  

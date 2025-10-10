@@ -43,6 +43,31 @@ pub struct MessagesResponse {
     pub state: Option<Vec<Value>>,
 }
 
+/// Validates pagination token format without parsing
+/// Format: t{timestamp}_{event_id}
+fn is_valid_pagination_token(token: &str) -> bool {
+    if !token.starts_with('t') {
+        return false;
+    }
+    
+    let parts: Vec<&str> = token[1..].splitn(2, '_').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    
+    // Check timestamp is numeric
+    if parts[0].parse::<i64>().is_err() {
+        return false;
+    }
+    
+    // Check event_id starts with $
+    if !parts[1].starts_with('$') {
+        return false;
+    }
+    
+    true
+}
+
 /// GET /_matrix/client/v3/rooms/{roomId}/messages
 ///
 /// Get a list of message and state events for a room with pagination.
@@ -107,8 +132,50 @@ pub async fn get(
         None
     };
 
-    // TODO: Validate user has access to room
-    // For now, we'll proceed with the query
+    // Validate user has access to room
+    let is_member = state
+        .room_operations
+        .membership_repo()
+        .is_user_in_room(&room_id, &user_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to check room membership: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !is_member {
+        warn!(
+            "User {} attempted to access messages in room {} without membership",
+            user_id, room_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Pre-validate pagination tokens for faster rejection and better error messages
+    if let Some(from_str) = params.from.as_ref() {
+        if !is_valid_pagination_token(from_str) {
+            warn!("Invalid 'from' pagination token format: {}", from_str);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    if let Some(to_str) = params.to.as_ref() {
+        if !is_valid_pagination_token(to_str) {
+            warn!("Invalid 'to' pagination token format: {}", to_str);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    // Validate and enforce limit bounds
+    let limit = params.limit;
+    if limit == 0 {
+        warn!("Invalid limit parameter: 0");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if limit > 100 {
+        warn!("Limit {} exceeds maximum allowed (100)", limit);
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Get paginated messages from database
     match state.room_operations.room_repo().get_room_messages_paginated(

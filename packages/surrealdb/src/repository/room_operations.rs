@@ -166,6 +166,11 @@ impl<C: Connection> RoomOperationsService<C> {
         &self.event_repo
     }
 
+    /// Get reference to the membership repository
+    pub fn membership_repo(&self) -> &MembershipRepository {
+        &self.membership_repo
+    }
+
     /// Get event context with user permission validation
     pub async fn get_event_context(
         &self,

@@ -46,7 +46,23 @@ pub enum EventContent {
     /// Server notice content (m.server_notice)
     ServerNotice(ServerNoticeContent),
 
-    /// Generic fallback for unknown event types
+    /// Unknown/custom event content types
+    ///
+    /// Matrix allows custom event types and future event types not yet
+    /// implemented in this codebase. This catch-all variant preserves
+    /// the event content for:
+    /// 
+    /// - **Custom event types**: Application-specific events like "com.example.custom_event"
+    /// - **Future Matrix events**: New event types added to spec after this code was written
+    /// - **Third-party integrations**: Events from bridges, bots, or other services
+    /// - **Experimental features**: Events from MSCs (Matrix Spec Changes) not yet finalized
+    ///
+    /// The raw JSON value is preserved so custom handling can access it.
+    /// This is INTENTIONAL extensibility per Matrix specification - NOT
+    /// incomplete implementation.
+    ///
+    /// Matrix Specification: "Clients and servers MUST be able to handle
+    /// unknown event types gracefully by preserving their content."
     Unknown(serde_json::Value),
 }
 

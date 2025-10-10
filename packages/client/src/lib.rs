@@ -571,6 +571,12 @@ pub struct TimelineUpdates {
 // Re-export commonly used types from matryx_entity
 pub use matryx_entity::{Credentials, Event, MembershipState, Room, Session, User};
 
+// Re-export authentication clients
+pub mod auth {
+    pub use crate::_matrix::client::v3::login::{LoginClient, LoginRequest, LoginResponse, LoginFlowsResponse, LoginFlow};
+    pub use crate::_matrix::client::v3::register::{RegisterClient, RegisterRequest, RegisterResponse, RegistrationFlowsResponse, RegistrationFlow};
+}
+
 // Re-export static client module
 pub mod r#static {
     pub mod client {

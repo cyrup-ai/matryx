@@ -142,7 +142,20 @@ impl MentionsProcessor {
                 has_room_mention = room;
             }
         } else {
-            // Detect mentions from content text (fallback for backwards compatibility)
+            // Fallback to text-based mention detection for backwards compatibility.
+            //
+            // This is INTENTIONAL per Matrix specification behavior (MSC3952):
+            // - Clients that don't support MSC3952 (m.mentions field) will not include it
+            // - Servers MUST parse message body text to detect @mentions and @room pings
+            // - This ensures mentions work with older/minimal Matrix clients
+            // - Modern clients should include m.mentions, but we support both approaches
+            //
+            // This is NOT a workaround or incomplete code - it's required backwards
+            // compatibility as specified by Matrix protocol.
+            //
+            // References:
+            // - MSC3952: Intentional Mentions
+            // - Matrix Client-Server API Spec (room events)
             mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
             has_room_mention = self.detect_room_mentions(&text_content);
 

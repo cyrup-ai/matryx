@@ -27,6 +27,18 @@ pub enum HttpClientError {
         retry_after_ms: Option<u64>,
     },
 
+    /// Response parsing failed (not valid Matrix error format)
+    /// 
+    /// This indicates the server returned an error response that doesn't
+    /// follow Matrix error format. The body and parse error are preserved
+    /// for debugging.
+    #[error("Invalid response format (status {status}): {parse_error}")]
+    InvalidResponse {
+        status: u16,
+        body: String,
+        parse_error: String,
+    },
+
     #[error("JSON serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
@@ -38,6 +50,68 @@ pub enum HttpClientError {
 
     #[error("Max retries exceeded")]
     MaxRetriesExceeded,
+}
+
+impl HttpClientError {
+    /// Check if error is retryable (network issues, 5xx, rate limits)
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            HttpClientError::Matrix { status, errcode, .. } => {
+                // Rate limits are retryable, auth errors are not
+                *status >= 500 || errcode == "M_LIMIT_EXCEEDED"
+            }
+            HttpClientError::Network(_) => true,
+            HttpClientError::InvalidResponse { status, .. } => {
+                // 5xx server errors might be transient
+                *status >= 500
+            }
+            HttpClientError::AuthenticationRequired => false,
+            HttpClientError::MaxRetriesExceeded => false,
+            HttpClientError::Serialization(_) => false,
+            HttpClientError::InvalidUrl(_) => false,
+        }
+    }
+
+    /// Get retry delay if error is retryable
+    pub fn retry_delay(&self) -> Option<std::time::Duration> {
+        use std::time::Duration;
+        
+        match self {
+            HttpClientError::Matrix { retry_after_ms: Some(ms), .. } => {
+                Some(Duration::from_millis(*ms))
+            }
+            HttpClientError::Network(_) => Some(Duration::from_secs(1)),
+            HttpClientError::InvalidResponse { status, .. } if *status >= 500 => {
+                Some(Duration::from_secs(2))
+            }
+            _ => None,
+        }
+    }
+
+    /// Get HTTP status code if available
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            HttpClientError::Matrix { status, .. } => Some(*status),
+            HttpClientError::InvalidResponse { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// Check if error is a client error (4xx)
+    pub fn is_client_error(&self) -> bool {
+        match self.status_code() {
+            Some(status) => (400..500).contains(&status),
+            None => false,
+        }
+    }
+
+    /// Check if error is a server error (5xx)
+    pub fn is_server_error(&self) -> bool {
+        match self.status_code() {
+            Some(status) => status >= 500,
+            None => false,
+        }
+    }
 }
 
 /// Matrix error response format per specification
@@ -140,19 +214,32 @@ impl MatrixHttpClient {
     /// Parse Matrix error response per specification
     fn parse_matrix_error<T>(&self, status: u16, body: &str) -> Result<T, HttpClientError> {
         match serde_json::from_str::<MatrixErrorResponse>(body) {
-            Ok(matrix_err) => Err(HttpClientError::Matrix {
-                status,
-                errcode: matrix_err.errcode,
-                error: matrix_err.error,
-                retry_after_ms: matrix_err.retry_after_ms,
-            }),
-            Err(_) => {
-                // Fallback: non-JSON error response
+            Ok(matrix_err) => {
                 Err(HttpClientError::Matrix {
                     status,
-                    errcode: "M_UNKNOWN".to_string(),
-                    error: body.to_string(),
-                    retry_after_ms: None,
+                    errcode: matrix_err.errcode,
+                    error: matrix_err.error,
+                    retry_after_ms: matrix_err.retry_after_ms,
+                })
+            }
+            Err(parse_err) => {
+                // Log parse error with full details for debugging
+                tracing::warn!(
+                    "Failed to parse error response as Matrix error (status {}): {}",
+                    status,
+                    parse_err
+                );
+                tracing::debug!("Response body: {}", body);
+
+                // Return InvalidResponse error with preserved information
+                Err(HttpClientError::InvalidResponse {
+                    status,
+                    body: if body.len() > 200 {
+                        format!("{}... (truncated)", &body[..200])
+                    } else {
+                        body.to_string()
+                    },
+                    parse_error: parse_err.to_string(),
                 })
             }
         }
@@ -232,11 +319,18 @@ impl MatrixHttpClient {
                     };
 
                     if !should_retry || attempt >= max_retries {
-                        return Err(if attempt >= max_retries {
-                            HttpClientError::MaxRetriesExceeded
+                        if attempt >= max_retries {
+                            tracing::warn!(
+                                "Max retries ({}) exceeded for {} {} - last error: {}",
+                                max_retries,
+                                method,
+                                path,
+                                e
+                            );
+                            return Err(HttpClientError::MaxRetriesExceeded);
                         } else {
-                            e
-                        });
+                            return Err(e);
+                        }
                     }
 
                     // Exponential backoff: 100ms * 2^(attempt-1)
@@ -248,8 +342,25 @@ impl MatrixHttpClient {
                         ..
                     } = &e
                     {
+                        tracing::warn!(
+                            "Rate limited on {} {} (attempt {}/{}), retrying after {}ms",
+                            method,
+                            path,
+                            attempt,
+                            max_retries,
+                            ms
+                        );
                         Duration::from_millis(*ms)
                     } else {
+                        tracing::warn!(
+                            "Retrying {} {} (attempt {}/{}) after {}ms - error: {}",
+                            method,
+                            path,
+                            attempt,
+                            max_retries,
+                            delay_ms,
+                            e
+                        );
                         Duration::from_millis(delay_ms)
                     };
 

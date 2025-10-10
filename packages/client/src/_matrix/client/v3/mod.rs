@@ -21,6 +21,7 @@ pub mod public_rooms;
 pub mod pushers;
 pub mod pushrules;
 pub mod refresh;
+pub mod register;
 pub mod room_keys;
 pub mod rooms;
 pub mod search;

@@ -430,19 +430,35 @@ mod media_service_tests {
             .await
             .expect("Failed to create pending upload");
         
-        // Access the database directly to set expires_at to the past
-        // Note: This requires direct database manipulation
-        // For now, we'll test that a non-existent/expired media_id returns M_NOT_FOUND
+        // Create an upload that expired 1 hour ago using test helper
         let expired_media_id = "expired-media-id-12345";
         
-        let result = media_service
-            .upload_to_pending(expired_media_id, server_name, user_id, b"content", "text/plain")
-            .await;
+        media_service
+            .create_expired_upload(
+                expired_media_id,
+                server_name,
+                user_id,
+                3600 // Expired 1 hour ago
+            )
+            .await
+            .expect("Failed to create expired upload for testing");
         
-        assert!(result.is_err());
-        // Should return M_NOT_FOUND for expired/non-existent
-        let err = result.unwrap_err();
-        assert!(matches!(err, crate::repository::media_service::MediaError::NotFound));
+        // Now test that cleanup removes the expired upload
+        let cleanup_count = media_service
+            .cleanup_expired_uploads()
+            .await
+            .expect("Failed to cleanup expired uploads");
+        
+        assert_eq!(cleanup_count, 1, "Should have cleaned up 1 expired upload");
+        
+        // Verify the expired upload was actually deleted
+        let pending = media_service
+            .media_repo
+            .get_pending_upload(expired_media_id, server_name)
+            .await
+            .expect("Failed to query pending upload");
+        
+        assert!(pending.is_none(), "Expired upload should have been deleted");
     }
 
     #[tokio::test]
@@ -497,5 +513,117 @@ mod media_service_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("M_CANNOT_OVERWRITE_MEDIA"));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_multiple_expired_uploads() {
+        let media_service = create_media_service().await;
+        let server_name = "example.com";
+        let user_id = "@test:example.com";
+
+        // Create 5 expired uploads with staggered expiration times
+        for i in 0..5 {
+            media_service
+                .create_expired_upload(
+                    &format!("expired-{}", i),
+                    server_name,
+                    user_id,
+                    3600 + (i * 60) // 1 hour + i minutes ago
+                )
+                .await
+                .expect("Failed to create expired upload");
+        }
+
+        // Cleanup should remove all 5
+        let cleanup_count = media_service
+            .cleanup_expired_uploads()
+            .await
+            .expect("Cleanup failed");
+
+        assert_eq!(cleanup_count, 5, "Should cleanup all 5 expired uploads");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_preserves_active_uploads() {
+        let media_service = create_media_service().await;
+        let server_name = "example.com";
+        let user_id = "@test:example.com";
+
+        // Create 3 expired uploads
+        for i in 0..3 {
+            media_service
+                .create_expired_upload(
+                    &format!("expired-{}", i),
+                    server_name,
+                    user_id,
+                    3600 // Expired 1 hour ago
+                )
+                .await
+                .expect("Failed to create expired upload");
+        }
+
+        // Create 2 active uploads (normal way with future expiration)
+        for _ in 0..2 {
+            media_service
+                .create_pending_upload(user_id, server_name)
+                .await
+                .expect("Failed to create active upload");
+        }
+
+        // Cleanup should only remove expired ones
+        let cleanup_count = media_service
+            .cleanup_expired_uploads()
+            .await
+            .expect("Cleanup failed");
+
+        assert_eq!(cleanup_count, 3, "Should only cleanup expired uploads");
+
+        // Verify active uploads still exist by counting pending uploads
+        let active_count = media_service
+            .media_repo
+            .count_user_pending_uploads(user_id)
+            .await
+            .expect("Failed to count pending uploads");
+
+        assert_eq!(active_count, 2, "Active uploads should still exist");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_no_expired_uploads() {
+        let media_service = create_media_service().await;
+
+        // Run cleanup on empty database
+        let cleanup_count = media_service
+            .cleanup_expired_uploads()
+            .await
+            .expect("Cleanup failed");
+
+        assert_eq!(cleanup_count, 0, "Should cleanup nothing when no expired uploads");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_just_expired_upload() {
+        let media_service = create_media_service().await;
+        let server_name = "example.com";
+        let user_id = "@test:example.com";
+
+        // Create upload that expired 1 second ago
+        media_service
+            .create_expired_upload(
+                "just-expired",
+                server_name,
+                user_id,
+                1 // Expired 1 second ago
+            )
+            .await
+            .expect("Failed to create expired upload");
+
+        // Should still be cleaned up
+        let cleanup_count = media_service
+            .cleanup_expired_uploads()
+            .await
+            .expect("Cleanup failed");
+
+        assert_eq!(cleanup_count, 1, "Should cleanup upload expired 1 second ago");
     }
 }

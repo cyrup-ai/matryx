@@ -15,8 +15,8 @@ use matryx_surrealdb::repository::third_party_service::ThirdPartyService;
 
 #[derive(Serialize, Deserialize)]
 pub struct Protocol {
-    pub user_fields: Vec<FieldType>,
-    pub location_fields: Vec<FieldType>,
+    pub user_fields: Vec<String>,
+    pub location_fields: Vec<String>,
     pub icon: String,
     pub field_types: HashMap<String, FieldType>,
     pub instances: Vec<ProtocolInstance>,
@@ -73,17 +73,17 @@ pub async fn get(
     let mut response = HashMap::new();
 
     for (protocol_id, protocol_config) in protocols_map {
-        // Convert repository types to server types
-        let user_fields: Vec<FieldType> = protocol_config
+        // Extract field names for user_fields and location_fields
+        let user_fields: Vec<String> = protocol_config
             .user_fields
-            .into_iter()
-            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .iter()
+            .map(|f| f.name.clone())
             .collect();
 
-        let location_fields: Vec<FieldType> = protocol_config
+        let location_fields: Vec<String> = protocol_config
             .location_fields
-            .into_iter()
-            .map(|f| FieldType { regexp: f.regexp, placeholder: f.placeholder })
+            .iter()
+            .map(|f| f.name.clone())
             .collect();
 
         let instances: Vec<ProtocolInstance> = protocol_config
@@ -97,13 +97,27 @@ pub async fn get(
             })
             .collect();
 
-        // Build field_types map
+        // Build field_types HashMap with field names as keys
         let mut field_types: HashMap<String, FieldType> = HashMap::new();
-        for field in &user_fields {
-            field_types.insert(format!("user.{}", field.placeholder), field.clone());
+        
+        for field in &protocol_config.user_fields {
+            field_types.insert(
+                field.name.clone(),
+                FieldType {
+                    regexp: field.regexp.clone(),
+                    placeholder: field.placeholder.clone(),
+                },
+            );
         }
-        for field in &location_fields {
-            field_types.insert(format!("location.{}", field.placeholder), field.clone());
+        
+        for field in &protocol_config.location_fields {
+            field_types.insert(
+                field.name.clone(),
+                FieldType {
+                    regexp: field.regexp.clone(),
+                    placeholder: field.placeholder.clone(),
+                },
+            );
         }
 
         let protocol = Protocol {

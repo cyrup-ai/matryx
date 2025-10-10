@@ -18,7 +18,175 @@ use std::sync::Arc;
 use std::time::Instant;
 use surrealdb::{Connection, Surreal};
 use sysinfo::{Disks, Networks, System};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+
+/// Cached CPU reading with timestamp for time-based expiration
+#[derive(Clone)]
+struct CachedCpuReading {
+    /// CPU usage percentage (0.0 - 100.0)
+    value: f64,
+    
+    /// When this reading was captured
+    timestamp: Instant,
+}
+
+/// Thread-safe cache for CPU usage metrics
+/// 
+/// Uses RwLock to allow concurrent reads of cached values while
+/// serializing writes when the cache expires and needs updating.
+/// 
+/// Design rationale:
+/// - High read frequency (100s-1000s of monitoring calls per second)
+/// - Low write frequency (once every ~5 seconds when cache expires)
+/// - RwLock provides better performance than Mutex for this access pattern
+#[derive(Clone)]
+struct CpuMetricsCache {
+    /// Last CPU reading with timestamp
+    last_reading: Arc<RwLock<Option<CachedCpuReading>>>,
+    
+    /// How long cached values remain valid
+    cache_duration: std::time::Duration,
+}
+
+impl CpuMetricsCache {
+    /// Create a new cache with specified duration
+    fn new(cache_duration: std::time::Duration) -> Self {
+        Self {
+            last_reading: Arc::new(RwLock::new(None)),
+            cache_duration,
+        }
+    }
+    
+    /// Get cached value if still valid
+    /// 
+    /// Returns Some(value) if cache hit, None if cache miss or expired.
+    /// Uses read lock for concurrent access by multiple callers.
+    async fn get(&self) -> Option<f64> {
+        let cache = self.last_reading.read().await;
+        
+        if let Some(reading) = cache.as_ref() {
+            if reading.timestamp.elapsed() < self.cache_duration {
+                tracing::trace!(
+                    cpu_usage = reading.value,
+                    cache_age_ms = reading.timestamp.elapsed().as_millis(),
+                    "CPU cache hit"
+                );
+                return Some(reading.value);
+            } else {
+                tracing::trace!(
+                    cache_age_ms = reading.timestamp.elapsed().as_millis(),
+                    cache_duration_ms = self.cache_duration.as_millis(),
+                    "CPU cache expired"
+                );
+            }
+        }
+        
+        None
+    }
+    
+    /// Store a new reading in the cache
+    /// 
+    /// Uses write lock to update cache atomically.
+    /// Only one writer can update at a time.
+    async fn set(&self, value: f64) {
+        let mut cache = self.last_reading.write().await;
+        *cache = Some(CachedCpuReading {
+            value,
+            timestamp: Instant::now(),
+        });
+        
+        tracing::trace!(
+            cpu_usage = value,
+            "CPU cache updated with fresh measurement"
+        );
+    }
+}
+
+/// Cached memory metrics
+#[derive(Clone)]
+struct CachedMemoryReading {
+    value: f64,  // Memory in MB
+    timestamp: Instant,
+}
+
+/// Memory metrics cache (5 second duration - changes moderately)
+#[derive(Clone)]
+struct MemoryMetricsCache {
+    last_reading: Arc<RwLock<Option<CachedMemoryReading>>>,
+    cache_duration: std::time::Duration,
+}
+
+impl MemoryMetricsCache {
+    fn new(cache_duration: std::time::Duration) -> Self {
+        Self {
+            last_reading: Arc::new(RwLock::new(None)),
+            cache_duration,
+        }
+    }
+    
+    async fn get(&self) -> Option<f64> {
+        let cache = self.last_reading.read().await;
+        if let Some(reading) = cache.as_ref() {
+            if reading.timestamp.elapsed() < self.cache_duration {
+                tracing::trace!(memory_mb = reading.value, "Memory cache hit");
+                return Some(reading.value);
+            }
+        }
+        None
+    }
+    
+    async fn set(&self, value: f64) {
+        let mut cache = self.last_reading.write().await;
+        *cache = Some(CachedMemoryReading {
+            value,
+            timestamp: Instant::now(),
+        });
+        tracing::trace!(memory_mb = value, "Memory cache updated");
+    }
+}
+
+/// Cached disk metrics  
+#[derive(Clone)]
+struct CachedDiskReading {
+    value: f64,  // Disk usage in MB
+    timestamp: Instant,
+}
+
+/// Disk metrics cache (30 second duration - changes slowly)
+#[derive(Clone)]
+struct DiskMetricsCache {
+    last_reading: Arc<RwLock<Option<CachedDiskReading>>>,
+    cache_duration: std::time::Duration,
+}
+
+impl DiskMetricsCache {
+    fn new(cache_duration: std::time::Duration) -> Self {
+        Self {
+            last_reading: Arc::new(RwLock::new(None)),
+            cache_duration,
+        }
+    }
+    
+    async fn get(&self) -> Option<f64> {
+        let cache = self.last_reading.read().await;
+        if let Some(reading) = cache.as_ref() {
+            if reading.timestamp.elapsed() < self.cache_duration {
+                tracing::trace!(disk_mb = reading.value, "Disk cache hit");
+                return Some(reading.value);
+            }
+        }
+        None
+    }
+    
+    async fn set(&self, value: f64) {
+        let mut cache = self.last_reading.write().await;
+        *cache = Some(CachedDiskReading {
+            value,
+            timestamp: Instant::now(),
+        });
+        tracing::trace!(disk_mb = value, "Disk cache updated");
+    }
+}
 
 #[derive(Clone)]
 pub struct MonitoringService<C: Connection> {
@@ -26,6 +194,18 @@ pub struct MonitoringService<C: Connection> {
     performance_repo: PerformanceRepository<C>,
     monitoring_repo: MonitoringRepository<C>,
     last_network_stats: Arc<Mutex<Option<(Instant, u64, u64)>>>,
+    
+    /// Cache for CPU metrics to reduce spawn_blocking overhead
+    /// 
+    /// Caches CPU readings for 5 seconds to prevent thread pool exhaustion.
+    /// See CPUCACHE_1 task for rationale and implementation details.
+    cpu_cache: CpuMetricsCache,
+    
+    /// Cache for memory metrics to reduce spawn_blocking overhead
+    memory_cache: MemoryMetricsCache,
+    
+    /// Cache for disk metrics to reduce spawn_blocking overhead
+    disk_cache: DiskMetricsCache,
 }
 
 impl<C: Connection> MonitoringService<C> {
@@ -35,6 +215,29 @@ impl<C: Connection> MonitoringService<C> {
             performance_repo: PerformanceRepository::new(db.clone()),
             monitoring_repo: MonitoringRepository::new(db),
             last_network_stats: Arc::new(Mutex::new(None)),
+            cpu_cache: CpuMetricsCache::new(std::time::Duration::from_secs(5)),
+            memory_cache: MemoryMetricsCache::new(std::time::Duration::from_secs(5)),
+            disk_cache: DiskMetricsCache::new(std::time::Duration::from_secs(30)),
+        }
+    }
+    
+    /// Create monitoring service with custom CPU cache duration
+    /// 
+    /// Useful for different monitoring frequencies or testing scenarios.
+    /// Default duration is 5 seconds (see `new()`).
+    /// 
+    /// # Arguments
+    /// * `db` - SurrealDB connection
+    /// * `cpu_cache_duration` - How long CPU readings remain valid
+    pub fn with_cpu_cache_duration(db: Surreal<C>, cpu_cache_duration: std::time::Duration) -> Self {
+        Self {
+            metrics_repo: MetricsRepository::new(db.clone()),
+            performance_repo: PerformanceRepository::new(db.clone()),
+            monitoring_repo: MonitoringRepository::new(db),
+            last_network_stats: Arc::new(Mutex::new(None)),
+            cpu_cache: CpuMetricsCache::new(cpu_cache_duration),
+            memory_cache: MemoryMetricsCache::new(std::time::Duration::from_secs(5)),
+            disk_cache: DiskMetricsCache::new(std::time::Duration::from_secs(30)),
         }
     }
 
@@ -317,24 +520,121 @@ impl<C: Connection> MonitoringService<C> {
         })
     }
 
+    /// Invalidate the CPU metrics cache
+    ///
+    /// Forces the next call to `get_current_cpu_usage()` to fetch a fresh
+    /// measurement regardless of cache age. Useful for:
+    /// - Forcing immediate refresh after system changes
+    /// - Clearing stale data after long idle periods
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # async fn example(service: &MonitoringService) {
+    /// // Clear cache before critical measurement
+    /// service.invalidate_cpu_cache().await;
+    /// let fresh_cpu = service.get_current_cpu_usage().await?;
+    /// # }
+    /// ```
+    pub async fn invalidate_cpu_cache(&self) {
+        let mut cache = self.cpu_cache.last_reading.write().await;
+        *cache = None;
+        tracing::debug!("CPU cache manually invalidated");
+    }
+
+    /// Get the age of the current cached CPU value
+    ///
+    /// Returns `None` if no cached value exists, otherwise returns the
+    /// duration since the value was cached.
+    ///
+    /// Useful for monitoring and diagnostics.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # async fn example(service: &MonitoringService) {
+    /// if let Some(age) = service.cpu_cache_age().await {
+    ///     println!("CPU cache is {} seconds old", age.as_secs());
+    /// } else {
+    ///     println!("No CPU value cached");
+    /// }
+    /// # }
+    /// ```
+    pub async fn cpu_cache_age(&self) -> Option<std::time::Duration> {
+        let cache = self.cpu_cache.last_reading.read().await;
+        cache.as_ref().map(|reading| reading.timestamp.elapsed())
+    }
+    
+    /// Check if CPU cache is currently valid (not expired)
+    ///
+    /// Returns `true` if a cached value exists and is within the cache duration.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # async fn example(service: &MonitoringService) {
+    /// if service.is_cpu_cache_valid().await {
+    ///     // Next CPU read will use cache (fast)
+    /// } else {
+    ///     // Next CPU read will spawn blocking task (slow)
+    /// }
+    /// # }
+    /// ```
+    pub async fn is_cpu_cache_valid(&self) -> bool {
+        self.cpu_cache.get().await.is_some()
+    }
+
     // Private helper methods for system metrics collection
 
+    /// Get current CPU usage percentage
+    ///
+    /// Uses a 5-second cache to avoid excessive spawn_blocking calls.
+    /// CPU measurements require a 200ms delay between readings due to OS-level
+    /// requirements (see sysinfo::MINIMUM_CPU_UPDATE_INTERVAL). Without caching,
+    /// high-frequency monitoring would exhaust the tokio blocking thread pool.
+    ///
+    /// # Caching Behavior
+    /// - Cache hit (< 5s old): Returns immediately from cache (no blocking)
+    /// - Cache miss (≥ 5s old): Spawns blocking task, updates cache, returns fresh value
+    ///
+    /// # Returns
+    /// CPU usage as a percentage (0.0 - 100.0)
+    ///
+    /// # Errors
+    /// Returns `RepositoryError::SystemError` if the blocking task fails
     async fn get_current_cpu_usage(&self) -> Result<f64, RepositoryError> {
+        // Check cache first (fast path - uses read lock, allows concurrent access)
+        if let Some(cached_value) = self.cpu_cache.get().await {
+            return Ok(cached_value);
+        }
+
+        // Cache miss - need fresh measurement (slow path - 200ms blocking operation)
+        tracing::debug!("CPU cache miss, spawning blocking task for fresh measurement");
+
         let cpu_usage = tokio::task::spawn_blocking(|| {
             let mut system = System::new();
             system.refresh_cpu_all();
 
+            // Required delay for accurate CPU measurement (OS requirement)
+            // See: tmp/sysinfo/src/unix/apple/system.rs - MINIMUM_CPU_UPDATE_INTERVAL
             std::thread::sleep(std::time::Duration::from_millis(200));
             system.refresh_cpu_all();
 
             system.global_cpu_usage() as f64
-        }).await
+        })
+        .await
         .map_err(|e| RepositoryError::SystemError(format!("CPU metrics task failed: {}", e)))?;
+
+        // Update cache with fresh value (uses write lock, single writer)
+        self.cpu_cache.set(cpu_usage).await;
 
         Ok(cpu_usage)
     }
 
     async fn get_current_memory_usage(&self) -> Result<f64, RepositoryError> {
+        // Check cache first
+        if let Some(cached_value) = self.memory_cache.get().await {
+            return Ok(cached_value);
+        }
+
+        // Cache miss - fetch fresh data
         let memory_mb = tokio::task::spawn_blocking(|| {
             let mut system = System::new();
             system.refresh_memory();
@@ -343,10 +643,19 @@ impl<C: Connection> MonitoringService<C> {
         }).await
         .map_err(|e| RepositoryError::SystemError(format!("Memory metrics task failed: {}", e)))?;
 
+        // Update cache
+        self.memory_cache.set(memory_mb).await;
+
         Ok(memory_mb)
     }
 
     async fn get_current_disk_usage(&self) -> Result<f64, RepositoryError> {
+        // Check cache first
+        if let Some(cached_value) = self.disk_cache.get().await {
+            return Ok(cached_value);
+        }
+
+        // Cache miss - fetch fresh data
         let data_path = std::env::current_dir()
             .map_err(|e| RepositoryError::SystemError(format!("Failed to get current dir: {}", e)))?;
 
@@ -373,6 +682,9 @@ impl<C: Connection> MonitoringService<C> {
                 .sum()
         }).await
         .map_err(|e| RepositoryError::SystemError(format!("Disk metrics task failed: {}", e)))?;
+
+        // Update cache
+        self.disk_cache.set(disk_usage_mb).await;
 
         Ok(disk_usage_mb)
     }

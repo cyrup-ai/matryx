@@ -786,6 +786,67 @@ impl<C: Connection> MediaService<C> {
 
         Ok(())
     }
+
+    /// Clean up expired pending uploads
+    ///
+    /// Removes pending uploads where expires_at is in the past. Should be
+    /// called periodically to free storage and maintain database hygiene.
+    ///
+    /// # Returns
+    /// The number of uploads that were deleted
+    ///
+    /// # Example
+    /// ```ignore
+    /// let deleted = media_service.cleanup_expired_uploads().await?;
+    /// tracing::info!("Cleaned up {} expired uploads", deleted);
+    /// ```
+    pub async fn cleanup_expired_uploads(&self) -> Result<u64, MediaError> {
+        self.media_repo
+            .cleanup_expired_pending_uploads()
+            .await
+            .map_err(MediaError::from)
+    }
+
+    /// Create an expired upload for testing purposes
+    ///
+    /// This method is only available in test builds and allows creation
+    /// of uploads with past expiration times to test cleanup logic.
+    ///
+    /// # Arguments
+    /// * `media_id` - Unique identifier for the media
+    /// * `server_name` - Server hosting the media
+    /// * `user_id` - User who "uploaded" the media  
+    /// * `expired_seconds_ago` - How many seconds ago the upload expired
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Create upload that expired 1 hour ago
+    /// media_service.create_expired_upload(
+    ///     "test-media-id",
+    ///     "homeserver.com",
+    ///     "@user:homeserver.com",
+    ///     3600
+    /// ).await?;
+    /// ```
+    #[cfg(test)]
+    pub async fn create_expired_upload(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        user_id: &str,
+        expired_seconds_ago: i64,
+    ) -> Result<(), MediaError> {
+        use chrono::Duration;
+
+        let now = Utc::now();
+        let expired_at = now - Duration::seconds(expired_seconds_ago);
+
+        // Use existing repository method with past expiration time
+        self.media_repo
+            .create_pending_upload(media_id, server_name, user_id, expired_at)
+            .await
+            .map_err(MediaError::from)
+    }
 }
 
 #[cfg(test)]

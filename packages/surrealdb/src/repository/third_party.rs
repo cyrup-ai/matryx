@@ -70,9 +70,35 @@ pub struct BridgeStatistics {
     pub last_error: Option<String>,
 }
 
+/// Field type definition for third-party protocol fields per Matrix spec.
+///
+/// Defines validation and UI hints for protocol field identifiers.
+///
+/// **Matrix Specification**: Application Service API - Third Party Protocol Metadata
+/// See: tmp/matrix-spec/data/api/application-service/definitions/protocol_base.yaml
+///
+/// # Example
+///
+/// For an IRC bridge, a "network" field might be defined as:
+/// ```rust
+/// FieldType {
+///     name: "network".to_string(),              // Field identifier
+///     regexp: "([a-z0-9]+\\.)*[a-z0-9]+".to_string(),  // Validation pattern
+///     placeholder: "irc.example.org".to_string() // UI example text
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldType {
+    /// Unique identifier for this field (e.g., "network", "nickname", "channel")
+    /// This is used as the key in field_types HashMap and referenced in user_fields/location_fields arrays
+    pub name: String,
+    
+    /// Regular expression for validating field values
+    /// Example: "^#[a-z0-9_-]+$" for IRC channels
     pub regexp: String,
+    
+    /// Placeholder text shown to users in client UI
+    /// Example: "#channel" for IRC channel field, "irc.example.org" for network field
     pub placeholder: String,
 }
 
