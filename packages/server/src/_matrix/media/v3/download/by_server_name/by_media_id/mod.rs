@@ -29,6 +29,11 @@ pub async fn get(
     Path((server_name, media_id)): Path<(String, String)>,
     Query(query): Query<DownloadQuery>,
 ) -> Result<Response, MatrixError> {
+    warn!(
+        endpoint = "GET /_matrix/media/v3/download/{serverName}/{mediaId}",
+        "Deprecated endpoint accessed - clients should migrate to /_matrix/client/v1/media/*"
+    );
+
     debug!("Client media download request for media_id: {} from server: {}", media_id, server_name);
 
     // Validate media_id format
@@ -46,6 +51,25 @@ pub async fn get(
     // Add timeout validation and application
     let timeout_ms = query.timeout_ms.unwrap_or(20000).min(120000); // Max 2 minutes
     let timeout_duration = Duration::from_millis(timeout_ms);
+
+    // Check freeze status
+    if state.config.media_config.freeze_enabled {
+        let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
+
+        if let Ok(Some(media_info)) = media_repo.get_media_info(&media_id, &server_name).await {
+            let is_idp_icon = media_info.is_idp_icon.unwrap_or(false);
+
+            if !is_idp_icon && state.config.media_config.is_frozen(media_info.created_at) {
+                warn!(
+                    media_id = media_id,
+                    uploaded_at = %media_info.created_at,
+                    "Blocking post-freeze media on deprecated endpoint"
+                );
+
+                return Err(MatrixError::NotFound);
+            }
+        }
+    }
 
     // Create MediaService instance with federation support
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
@@ -85,10 +109,17 @@ pub async fn get(
         },
     };
 
-    let response = build_multipart_media_response(multipart_response).map_err(|e| {
+    let mut response = build_multipart_media_response(multipart_response).map_err(|e| {
         debug!("Failed to build multipart response: {}", e);
         MatrixError::Unknown
     })?;
+
+    // Add deprecation headers
+    let headers = response.headers_mut();
+    headers.insert("Deprecation", "true".parse().unwrap());
+    headers.insert("Sunset", "Wed, 01 Sep 2024 00:00:00 GMT".parse().unwrap());
+    headers.insert("Link", r#"<https://spec.matrix.org/v1.11/client-server-api/#content-repository>; rel="deprecation""#.parse().unwrap());
+    headers.insert("X-Matrix-Deprecated-Endpoint", "Use /_matrix/client/v1/media/* instead".parse().unwrap());
 
     debug!("Successfully serving media: {}", media_id);
     Ok(response)

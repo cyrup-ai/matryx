@@ -1,4 +1,5 @@
 use crate::auth::authenticated_user::AuthenticatedUser;
+use crate::utils::response_helpers::calculate_content_disposition;
 use crate::AppState;
 use axum::{
     body::Body,
@@ -39,16 +40,16 @@ pub async fn get(
     let body = Body::from(download_result.content);
 
     // Build response with appropriate headers (v1 compatible)
-    let mut response = Response::builder()
+    let content_disposition = calculate_content_disposition(
+        &download_result.content_type,
+        download_result.filename.as_deref(),
+    );
+
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, download_result.content_type)
-        .header(header::CONTENT_LENGTH, download_result.content_length.to_string());
-
-    // Add Content-Disposition header if filename is available
-    if let Some(filename) = download_result.filename {
-        response = response
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename));
-    }
+        .header(header::CONTENT_LENGTH, download_result.content_length.to_string())
+        .header(header::CONTENT_DISPOSITION, content_disposition);
 
     response.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

@@ -100,7 +100,10 @@ pub async fn put(
     );
 
     // Validate server signature
-    let request_body = serde_json::to_string(&payload).unwrap_or_default();
+    let request_body = serde_json::to_string(&payload).map_err(|e| {
+        error!("Failed to serialize payload for signature validation: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
     let _server_validation = state
         .session_service
         .validate_server_signature(
@@ -345,7 +348,7 @@ async fn sign_leave_event(
 
     // Create canonical JSON for signing
     let mut event_for_signing = event.clone();
-    event_for_signing.signatures = serde_json::from_value(serde_json::Value::Null).ok();
+    event_for_signing.signatures = None;
     event_for_signing.unsigned = None;
 
     let canonical_json = serde_json::to_string(&event_for_signing)?;
@@ -362,15 +365,14 @@ async fn sign_leave_event(
         event.signatures = serde_json::from_value(json!({})).ok();
     }
 
-    let signatures_value = event
-        .signatures
-        .as_ref()
-        .map(|s| serde_json::to_value(s).unwrap_or_default())
-        .unwrap_or_default();
+    let signatures_value = match event.signatures.as_ref() {
+        Some(sigs) => serde_json::to_value(sigs)?,
+        None => json!({}),
+    };
     let mut signatures_map: std::collections::HashMap<
         String,
         std::collections::HashMap<String, String>,
-    > = serde_json::from_value(signatures_value).unwrap_or_default();
+    > = serde_json::from_value(signatures_value)?;
 
     signatures_map.insert(
         state.homeserver_name.clone(),

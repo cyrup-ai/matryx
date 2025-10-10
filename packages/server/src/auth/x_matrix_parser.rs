@@ -116,7 +116,7 @@ pub fn parse_x_matrix_header(auth_header: &str) -> Result<XMatrixAuth, XMatrixPa
         return Err(XMatrixParseError::InvalidParameterValue("key".to_string()));
     };
 
-    // Accept both "signature" (formal parameter name) and "sig" (shorthand used by older servers) per Matrix spec
+    // Accept both "signature" (formal parameter name) and "sig" (shorthand form per Matrix spec)
     let signature = params
         .get("signature")
         .or_else(|| params.get("sig"))

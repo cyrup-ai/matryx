@@ -21,7 +21,7 @@ use crate::federation::client::FederationClient;
 use crate::federation::dns_resolver::{DnsResolutionError, MatrixDnsResolver};
 use crate::federation::event_signing::{EventSigningEngine, EventSigningError};
 use crate::state::AppState;
-use matryx_entity::types::Event;
+use matryx_entity::types::{Event, EventContent};
 use matryx_surrealdb::repository::error::RepositoryError;
 use matryx_surrealdb::repository::{
     EventRepository, FederationRepository, KeyServerRepository, MembershipRepository,
@@ -93,6 +93,15 @@ enum DeduplicationResult {
     New,
     /// Event already exists (returns existing event)
     Duplicate(Box<Event>),
+}
+
+/// Result of hash validation indicating whether event should be redacted
+#[derive(Debug)]
+enum HashValidationResult {
+    /// Hashes are valid, use original event
+    Valid,
+    /// Hashes failed, use redacted event
+    Redacted(Event),
 }
 
 /// Parameters for creating a new PduValidator
@@ -236,30 +245,32 @@ impl PduValidator {
             },
         }
 
-        // Step 2: Hash Verification with SHA-256 computation
-        self.validate_event_hashes(&event, pdu).await?;
-        debug!("Step 2 passed: Hash verification for event {}", event.event_id);
-
-        // Step 3a: EventSigningEngine verification
+        // Step 2: Signature Verification (MUST BE BEFORE HASHES per Matrix spec)
         let expected_servers = vec![origin_server.to_string()];
         self.event_signing_engine
             .validate_event_crypto(&event, &expected_servers)
             .await
             .map_err(|e| PduValidationError::SignatureError(format!("{:?}", e)))?;
-        debug!("Step 3a passed: EventSigningEngine verification for event {}", event.event_id);
+        debug!("Step 2a passed: EventSigningEngine verification for event {}", event.event_id);
 
-        // Step 3b: Additional event signature verification using PduValidator methods
         if let Err(e) = self.verify_event_signatures(&event, origin_server).await {
-            warn!(
-                "Step 3b failed - event signature verification for event {}: {}",
-                event.event_id, e
-            );
+            warn!("Step 2b failed - signature verification for event {}: {}", event.event_id, e);
             return Ok(ValidationResult::Rejected {
                 event_id: event.event_id.clone(),
-                reason: format!("Event signature verification failed: {}", e),
+                reason: format!("Signature verification failed: {}", e),
             });
         }
-        debug!("Step 3b passed: Event signature verification for event {}", event.event_id);
+        debug!("Step 2 passed: Signature verification for event {}", event.event_id);
+
+        // Step 3: Hash Verification with Redaction Support (AFTER SIGNATURES per Matrix spec)
+        let event = match self.validate_event_hashes_with_redaction(&event, pdu).await? {
+            HashValidationResult::Valid => event,
+            HashValidationResult::Redacted(redacted_event) => {
+                warn!("Event {} failed hash check - continuing with redacted version", event.event_id);
+                redacted_event
+            }
+        };
+        debug!("Step 3 passed: Hash verification for event {}", event.event_id);
 
         // Step 4: Auth Events and DAG Validation
         self.validate_auth_events(&event).await?;
@@ -1185,38 +1196,57 @@ impl PduValidator {
         Ok(())
     }
 
-    /// Step 2: Comprehensive hash verification with SHA-256 computation
+    /// Step 3: Comprehensive hash verification with SHA-256 computation and redaction support
     ///
     /// Validates event hashes according to Matrix specification:
     /// - Verifies content hash if present in the event
     /// - Validates event ID hash for room version 4+
     /// - Ensures hash integrity for signature verification
     /// - Supports multiple hash algorithms (primarily SHA-256)
-    async fn validate_event_hashes(
+    /// - Returns redacted event if hash validation fails (per Matrix spec)
+    async fn validate_event_hashes_with_redaction(
         &self,
         event: &Event,
         pdu: &Value,
-    ) -> Result<(), PduValidationError> {
+    ) -> Result<HashValidationResult, PduValidationError> {
         let room_version = self
             .get_room_version(&event.room_id)
             .await
             .unwrap_or_else(|_| "1".to_string());
 
-        // Validate content hash if present
+        // Validate content hash if present - redact on failure instead of rejecting
         if let Some(hashes) = pdu.get("hashes") {
-            self.validate_content_hashes(pdu, hashes, &room_version).await?;
+            match self.validate_content_hashes(pdu, hashes, &room_version).await {
+                Ok(_) => {}, // Hashes valid, continue
+                Err(hash_error) => {
+                    warn!("Hash validation failed for event {}: {}", event.event_id, hash_error);
+                    // REDACT instead of rejecting per Matrix specification
+                    let redacted_event = self.redact_event(event, &room_version, 
+                        Some(format!("Hash validation failed: {}", hash_error)));
+                    return Ok(HashValidationResult::Redacted(redacted_event));
+                }
+            }
         }
 
         // For room version 4+, validate event ID is correctly computed from content hash
         if matches!(room_version.as_str(), "4" | "5" | "6" | "7" | "8" | "9" | "10") {
-            self.validate_event_id_hash(&event.event_id, pdu).await?;
+            match self.validate_event_id_hash(&event.event_id, pdu).await {
+                Ok(_) => {}, // Event ID hash valid
+                Err(hash_error) => {
+                    warn!("Event ID hash validation failed for event {}: {}", event.event_id, hash_error);
+                    // REDACT instead of rejecting per Matrix specification
+                    let redacted_event = self.redact_event(event, &room_version, 
+                        Some(format!("Event ID hash validation failed: {}", hash_error)));
+                    return Ok(HashValidationResult::Redacted(redacted_event));
+                }
+            }
         }
 
         // Validate reference hash consistency for prev_events and auth_events
         self.validate_reference_hashes(event).await?;
 
         debug!("Hash verification completed for event {}", event.event_id);
-        Ok(())
+        Ok(HashValidationResult::Valid)
     }
 
     /// Validate content hashes in the hashes field
@@ -1975,5 +2005,81 @@ impl PduValidator {
                 Ok(format!("{{{}}}", pairs?.join(",")))
             },
         }
+    }
+
+    /// Redact an event according to Matrix specification redaction rules
+    /// 
+    /// Strips event content according to room version while preserving:
+    /// - event_id, room_id, sender, type, state_key (for state events)
+    /// - origin_server_ts, hashes, signatures, depth, prev_events, auth_events
+    /// 
+    /// Content preservation varies by event type per Matrix spec redaction rules
+    fn redact_event(&self, event: &Event, _room_version: &str, reason: Option<String>) -> Event {
+        let mut redacted = event.clone();
+        
+        // Strip content based on Matrix redaction rules for each event type
+        redacted.content = match event.event_type.as_str() {
+            "m.room.member" => {
+                // Preserve only membership field
+                let mut preserved = serde_json::Map::new();
+                if let Some(membership) = event.content.get("membership") {
+                    preserved.insert("membership".to_string(), membership.clone());
+                }
+                EventContent::Unknown(serde_json::Value::Object(preserved))
+            },
+            "m.room.create" => {
+                // Preserve creator field
+                let mut preserved = serde_json::Map::new();
+                if let Some(creator) = event.content.get("creator") {
+                    preserved.insert("creator".to_string(), creator.clone());
+                }
+                EventContent::Unknown(serde_json::Value::Object(preserved))
+            },
+            "m.room.join_rules" => {
+                // Preserve join_rule field
+                let mut preserved = serde_json::Map::new();
+                if let Some(join_rule) = event.content.get("join_rule") {
+                    preserved.insert("join_rule".to_string(), join_rule.clone());
+                }
+                EventContent::Unknown(serde_json::Value::Object(preserved))
+            },
+            "m.room.power_levels" => {
+                // For power_levels, preserve all fields per spec
+                event.content.clone()
+            },
+            "m.room.history_visibility" => {
+                // Preserve history_visibility field
+                let mut preserved = serde_json::Map::new();
+                if let Some(visibility) = event.content.get("history_visibility") {
+                    preserved.insert("history_visibility".to_string(), visibility.clone());
+                }
+                EventContent::Unknown(serde_json::Value::Object(preserved))
+            },
+            _ => {
+                // For other events, strip all content
+                EventContent::Unknown(serde_json::Value::Object(serde_json::Map::new()))
+            }
+        };
+        
+        // Add redaction information to unsigned field
+        let mut unsigned = redacted.unsigned
+            .and_then(|u| {
+                if let serde_json::Value::Object(obj) = u {
+                    Some(obj)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(serde_json::Map::new);
+        
+        unsigned.insert("redacted_because".to_string(), serde_json::json!({
+            "type": "m.room.redaction",
+            "reason": reason.unwrap_or_else(|| "Hash validation failed".to_string())
+        }));
+        
+        redacted.unsigned = Some(serde_json::Value::Object(unsigned));
+        
+        debug!("Redacted event {} due to hash failure", event.event_id);
+        redacted
     }
 }

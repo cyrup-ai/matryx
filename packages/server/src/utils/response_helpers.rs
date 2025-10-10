@@ -32,21 +32,20 @@ pub fn media_response(
     filename: Option<&str>,
     body: Body,
 ) -> Result<Response<Body>, StatusCode> {
-    let mut response = Response::builder()
+    // Calculate Content-Disposition based on content type
+    let content_disposition = calculate_content_disposition(content_type, filename);
+
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, content_length.to_string())
+        .header(header::CONTENT_DISPOSITION, content_disposition)
         .header(header::CONTENT_SECURITY_POLICY,
             "sandbox; default-src 'none'; script-src 'none'; plugin-types application/pdf; style-src 'unsafe-inline'; object-src 'self';")
         .header("Cross-Origin-Resource-Policy", "cross-origin")
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         .header("Access-Control-Allow-Headers", "X-Requested-With, Content-Type, Authorization");
-
-    if let Some(name) = filename {
-        response =
-            response.header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", name));
-    }
 
     response.body(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -83,6 +82,44 @@ pub fn is_safe_inline_content_type(content_type: &str) -> bool {
             | "audio/flac"
             | "audio/x-flac"
     )
+}
+
+/// Calculate Content-Disposition header value based on content type and filename
+///
+/// Returns "inline" for safe content types (images, videos, audio, etc.)
+/// Returns "attachment" for potentially dangerous types (HTML, JS, etc.)
+/// Sanitizes filename per RFC 6266 (removes quotes, backslashes, path separators, percent signs)
+pub fn calculate_content_disposition(
+    content_type: &str,
+    filename: Option<&str>,
+) -> String {
+    // Determine disposition based on content type safety
+    let disposition = if is_safe_inline_content_type(content_type) {
+        "inline"
+    } else {
+        "attachment"
+    };
+
+    // If no filename provided, return disposition without filename parameter
+    let Some(name) = filename else {
+        return disposition.to_string();
+    };
+
+    // Sanitize filename per RFC 6266 - remove dangerous characters
+    let sanitized_name: String = name
+        .chars()
+        .filter(|c| {
+            // Remove quotes, backslashes, path separators, and percent signs
+            *c != '"' && *c != '\\' && *c != '/' && *c != '%' && *c != '\0'
+        })
+        .collect();
+
+    // Return empty disposition if filename becomes empty after sanitization
+    if sanitized_name.is_empty() {
+        return disposition.to_string();
+    }
+
+    format!("{}; filename=\"{}\"", disposition, sanitized_name)
 }
 
 /// Multipart media response containing metadata and content

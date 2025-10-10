@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use surrealdb::{Surreal, engine::any::Any};
 
@@ -1106,9 +1106,51 @@ impl SyncRepository {
 
     /// Get room ephemeral events with optional since token
     pub async fn get_room_ephemeral_events(&self, room_id: &str, since: Option<&str>) -> Result<Vec<EphemeralEvent>, RepositoryError> {
+        let mut ephemeral_events = Vec::new();
+
+        // Get active typing users from typing_notification table
+        let typing_query = "
+            SELECT user_id FROM typing_notification
+            WHERE room_id = $room_id
+            AND expires_at > time::now()
+            AND typing = true
+            ORDER BY started_at DESC
+        ";
+
+        let mut response = self.db
+            .query(typing_query)
+            .bind(("room_id", room_id.to_string()))
+            .await
+            .map_err(|e| RepositoryError::DatabaseError {
+                message: e.to_string(),
+                operation: "get_room_ephemeral_events_typing".to_string(),
+            })?;
+
+        let typing_users: Vec<String> = response.take(0).map_err(|e| RepositoryError::DatabaseError {
+            message: e.to_string(),
+            operation: "get_room_ephemeral_events_typing_parse".to_string(),
+        })?;
+
+        // Construct m.typing event if there are active typers
+        if !typing_users.is_empty() {
+            let typing_content = json!({
+                "user_ids": typing_users
+            });
+
+            let typing_event = EphemeralEvent {
+                event_id: format!("typing_{}", room_id),
+                event_type: "m.typing".to_string(),
+                content: typing_content,
+                sender: room_id.to_string(), // sender is room for typing events
+            };
+
+            ephemeral_events.push(typing_event);
+        }
+
+        // Query other ephemeral events from event table (receipts, etc.)
         let mut query_parts = vec![
             "SELECT event_id, event_type, content, sender FROM event",
-            "WHERE room_id = $room_id AND (event_type LIKE 'm.typing%' OR event_type LIKE 'm.receipt%')"
+            "WHERE room_id = $room_id AND event_type LIKE 'm.receipt%'"
         ];
 
         let mut bindings = vec![("room_id", room_id.to_string())];
@@ -1122,12 +1164,12 @@ impl SyncRepository {
 
         query_parts.push("ORDER BY origin_server_ts DESC LIMIT 10");
         let final_query = query_parts.join(" ");
-        
+
         let mut query_builder = self.db.query(final_query);
         for (key, value) in bindings {
             query_builder = query_builder.bind((key, value));
         }
-        
+
         let mut response = query_builder.await.map_err(|e| RepositoryError::DatabaseError {
             message: e.to_string(),
             operation: "get_room_ephemeral_events".to_string(),
@@ -1138,14 +1180,15 @@ impl SyncRepository {
             operation: "get_room_ephemeral_events_parse".to_string(),
         })?;
 
-        let ephemeral_events = events.into_iter().map(|(event_id, event_type, content, sender)| {
+        // Add receipt events to ephemeral_events
+        ephemeral_events.extend(events.into_iter().map(|(event_id, event_type, content, sender)| {
             EphemeralEvent {
                 event_id,
                 event_type,
                 content,
                 sender,
             }
-        }).collect();
+        }));
 
         Ok(ephemeral_events)
     }

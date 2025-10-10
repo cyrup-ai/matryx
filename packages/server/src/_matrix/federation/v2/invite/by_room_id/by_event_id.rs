@@ -79,6 +79,232 @@ fn parse_x_matrix_auth(headers: &HeaderMap) -> Result<XMatrixAuth, StatusCode> {
     Ok(XMatrixAuth { origin, key_id, signature })
 }
 
+/// Validate invite_room_state parameter according to Matrix 1.16+ specification
+///
+/// Performs comprehensive validation of the invite_room_state parameter:
+/// 1. Validates invite_room_state is an array
+/// 2. Checks for presence of required m.room.create event
+/// 3. Validates each event format per room version specification
+/// 4. Validates all event signatures
+/// 5. Ensures all events belong to the same room as the invite
+///
+/// Returns M_MISSING_PARAM error if validation fails
+async fn validate_invite_room_state(
+    invite_room_state: &Value,
+    room_id: &str,
+    room_version: &str,
+    origin_server: &str,
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    // 1. Validate invite_room_state is an array
+    let events = invite_room_state.as_array().ok_or_else(|| {
+        warn!("invite_room_state must be an array");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_MISSING_PARAM",
+                "error": "invite_room_state must be an array"
+            })),
+        )
+    })?;
+
+    // 2. Check for presence of m.room.create event (required by Matrix 1.16+ spec)
+    let has_create = events.iter().any(|e| {
+        e.get("type").and_then(|t| t.as_str()) == Some("m.room.create")
+    });
+
+    if !has_create {
+        warn!("invite_room_state missing required m.room.create event");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_MISSING_PARAM",
+                "error": "invite_room_state must contain m.room.create event"
+            })),
+        ));
+    }
+
+    debug!("Found m.room.create event in invite_room_state");
+
+    // Create EventSigningEngine for signature validation
+    use crate::federation::event_signing::EventSigningEngine;
+    let event_signing_engine = EventSigningEngine::new(
+        state.session_service.clone(),
+        state.db.clone(),
+        state.dns_resolver.clone(),
+        state.homeserver_name.clone(),
+    )
+    .map_err(|e| {
+        error!("Failed to create EventSigningEngine: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "errcode": "M_UNKNOWN",
+                "error": "Internal server error during validation"
+            })),
+        )
+    })?;
+
+    // 3, 4, 5. Validate each event in invite_room_state
+    for (idx, event_value) in events.iter().enumerate() {
+        // Validate event has required fields per room version
+        validate_event_format(event_value, room_version).map_err(|(status, json_err)| {
+            warn!("Event {} in invite_room_state failed format validation", idx);
+            (status, json_err)
+        })?;
+
+        // Validate event belongs to the same room
+        if let Some(event_room_id) = event_value.get("room_id").and_then(|r| r.as_str()) {
+            if event_room_id != room_id {
+                warn!(
+                    "Event {} in invite_room_state belongs to different room: {} vs {}",
+                    idx, event_room_id, room_id
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "errcode": "M_MISSING_PARAM",
+                        "error": "invite_room_state event belongs to different room"
+                    })),
+                ));
+            }
+        }
+
+        // Validate event signatures
+        // Parse event to Event struct for signature validation
+        let event: Event = serde_json::from_value(event_value.clone()).map_err(|e| {
+            warn!("Failed to parse event {} in invite_room_state: {}", idx, e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "errcode": "M_MISSING_PARAM",
+                    "error": format!("Invalid event format in invite_room_state at index {}", idx)
+                })),
+            )
+        })?;
+
+        // Validate event cryptography (signatures and hashes)
+        let expected_servers = vec![origin_server.to_string()];
+        event_signing_engine
+            .validate_event_crypto(&event, &expected_servers)
+            .await
+            .map_err(|e| {
+                warn!("Event {} in invite_room_state failed signature validation: {}", idx, e);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "errcode": "M_MISSING_PARAM",
+                        "error": format!("Event signature validation failed in invite_room_state: {}", e)
+                    })),
+                )
+            })?;
+
+        debug!("Event {} in invite_room_state validated successfully", idx);
+    }
+
+    info!(
+        "Successfully validated invite_room_state with {} events for room {}",
+        events.len(),
+        room_id
+    );
+
+    Ok(())
+}
+
+/// Validate event format per room version specification
+///
+/// Performs basic format validation according to Matrix room version requirements
+fn validate_event_format(
+    event: &Value,
+    room_version: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    // Validate required fields exist
+    let event_type = event.get("type").and_then(|t| t.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_MISSING_PARAM",
+                "error": "Event in invite_room_state missing 'type' field"
+            })),
+        )
+    })?;
+
+    let _sender = event.get("sender").and_then(|s| s.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_MISSING_PARAM",
+                "error": "Event in invite_room_state missing 'sender' field"
+            })),
+        )
+    })?;
+
+    let _content = event.get("content").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "errcode": "M_MISSING_PARAM",
+                "error": "Event in invite_room_state missing 'content' field"
+            })),
+        )
+    })?;
+
+    // Room version specific validation
+    match room_version {
+        "1" | "2" | "3" => {
+            // Room v1-v3: event_id is optional in some contexts
+        },
+        "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" | _ => {
+            // Room v4+: Stricter validation
+            let _event_id = event.get("event_id").and_then(|e| e.as_str()).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "errcode": "M_MISSING_PARAM",
+                        "error": format!("Event in invite_room_state missing 'event_id' field (required for room version {})", room_version)
+                    })),
+                )
+            })?;
+        },
+    }
+
+    // State events must have state_key
+    if event.get("state_key").is_some() || is_state_event_type(event_type) {
+        let _state_key = event.get("state_key").ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "errcode": "M_MISSING_PARAM",
+                    "error": format!("State event '{}' in invite_room_state missing 'state_key' field", event_type)
+                })),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Check if an event type is a state event
+fn is_state_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "m.room.create"
+            | "m.room.member"
+            | "m.room.power_levels"
+            | "m.room.join_rules"
+            | "m.room.history_visibility"
+            | "m.room.name"
+            | "m.room.topic"
+            | "m.room.avatar"
+            | "m.room.canonical_alias"
+            | "m.room.aliases"
+            | "m.room.encryption"
+            | "m.room.guest_access"
+            | "m.room.server_acl"
+            | "m.room.tombstone"
+    )
+}
+
 /// PUT /_matrix/federation/v2/invite/{roomId}/{eventId}
 ///
 /// Invites a remote user to a room. This is the v2 API with improved request format.
@@ -210,6 +436,27 @@ pub async fn put(
             "error": format!("Room version {} not supported", room_version),
             "room_version": room.room_version
         })));
+    }
+
+    // Validate invite_room_state parameter (Matrix 1.16+ spec requirement)
+    if let Some(room_state) = invite_room_state {
+        if let Err((status, json_error)) = validate_invite_room_state(
+            room_state,
+            &room_id,
+            room_version,
+            &x_matrix_auth.origin,
+            &state,
+        )
+        .await
+        {
+            // M_MISSING_PARAM errors are business logic errors, return as Ok(Json(...))
+            // Other status codes are HTTP errors, return as Err(StatusCode)
+            return if status == StatusCode::BAD_REQUEST {
+                Ok(json_error)
+            } else {
+                Err(status)
+            };
+        }
     }
 
     // Check if user is already in the room

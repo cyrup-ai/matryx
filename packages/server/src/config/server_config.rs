@@ -3,6 +3,7 @@
 
 use crate::auth::captcha::CaptchaConfig;
 use crate::middleware::TransactionConfig;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::OnceLock;
@@ -133,6 +134,50 @@ impl RateLimitConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaConfig {
+    /// Enable the freeze mechanism for deprecated media endpoints
+    pub freeze_enabled: bool,
+    /// Timestamp when the freeze takes effect
+    pub freeze_date: Option<DateTime<Utc>>,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            freeze_enabled: false,
+            freeze_date: None,
+        }
+    }
+}
+
+impl MediaConfig {
+    pub fn from_env() -> Self {
+        Self {
+            freeze_enabled: env::var("MEDIA_FREEZE_ENABLED")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(false),
+            freeze_date: env::var("MEDIA_FREEZE_DATE")
+                .ok()
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&Utc)),
+        }
+    }
+
+    pub fn is_frozen(&self, upload_date: DateTime<Utc>) -> bool {
+        if !self.freeze_enabled {
+            return false;
+        }
+
+        if let Some(freeze) = self.freeze_date {
+            upload_date >= freeze
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub homeserver_name: String,
     pub federation_port: u16,
@@ -149,6 +194,7 @@ pub struct ServerConfig {
     pub tls_config: TlsConfig,
     pub rate_limiting: RateLimitConfig,
     pub captcha: CaptchaConfig,
+    pub media_config: MediaConfig,
 }
 
 impl ServerConfig {
@@ -261,6 +307,7 @@ impl ServerConfig {
                 tls_config,
                 rate_limiting: RateLimitConfig::from_env(),
                 captcha: CaptchaConfig::from_env(),
+                media_config: MediaConfig::from_env(),
             };
 
             // Enhanced validation - secure by default

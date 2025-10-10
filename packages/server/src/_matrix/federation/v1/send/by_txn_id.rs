@@ -830,13 +830,18 @@ async fn process_receipt_edu(
         for (receipt_type, receipt_data) in room_receipts_obj {
             // Only process supported receipt types
             let is_private = match receipt_type.as_str() {
-                "m.read" => false,        // Public read receipt
-                "m.read.private" => true, // Private read receipt - MUST NOT be federated
-                _ => {
-                    debug!(
-                        "Unknown receipt type '{}' - skipping per Matrix specification",
-                        receipt_type
+                "m.read" => false,
+                "m.read.private" => {
+                    // Matrix 1.4 spec: m.read.private MUST NEVER be sent via federation
+                    // If we receive one, the remote server is violating the spec
+                    warn!(
+                        "Rejecting m.read.private receipt from {}: private receipts must not be federated (spec violation by remote server)",
+                        origin_server
                     );
+                    continue; // Skip processing this receipt type entirely
+                },
+                _ => {
+                    debug!("Unknown receipt type '{}' - skipping per Matrix specification", receipt_type);
                     continue;
                 },
             };

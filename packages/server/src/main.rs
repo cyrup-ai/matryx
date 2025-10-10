@@ -36,6 +36,7 @@ mod room;
 mod security;
 mod server_notices;
 mod state;
+mod tasks;
 mod threading;
 mod utils;
 
@@ -300,6 +301,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crate::federation::key_management::KeyManagementService::new(app_state.clone());
     key_management_service.start();
     tracing::info!("Started key management background service");
+
+    // Start typing cleanup background task
+    tokio::spawn(tasks::typing_cleanup::start_typing_cleanup_task((*app_state).clone()));
+    tracing::info!("Started typing cleanup background task");
 
     // Build our application with routes
     let app = create_router((*app_state).clone(), rate_limit_service, transaction_service);
@@ -566,7 +571,6 @@ fn create_federation_routes() -> Router<AppState> {
         )
         .route("/v1/openid/userinfo", get(_matrix::federation::v1::openid::userinfo::get))
         .route("/v1/publicRooms", get(_matrix::federation::v1::public_rooms::get))
-        .route("/v1/query/directory", get(_matrix::federation::v1::query::directory::get))
         .route("/v1/query/{query_type}", get(_matrix::federation::v1::query::by_query_type::get))
         .route("/v1/state/{room_id}", get(_matrix::federation::v1::state::by_room_id::get))
         .route("/v1/state_ids/{room_id}", get(_matrix::federation::v1::state_ids::by_room_id::get))

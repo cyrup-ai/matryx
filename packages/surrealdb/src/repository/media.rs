@@ -22,6 +22,26 @@ pub struct MediaInfo {
     pub quarantine_reason: Option<String>,
     #[serde(default)]
     pub quarantined_at: Option<DateTime<Utc>>,
+    /// Whether this media is an IdP icon for SSO (exempt from freeze)
+    #[serde(default)]
+    pub is_idp_icon: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingUpload {
+    pub media_id: String,
+    pub server_name: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: PendingUploadStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PendingUploadStatus {
+    Pending,
+    Completed,
+    Expired,
 }
 
 pub struct MediaRepository<C: Connection> {
@@ -267,6 +287,7 @@ impl<C: Connection> MediaRepository<C> {
             quarantined_by: None,
             quarantine_reason: None,
             quarantined_at: None,
+            is_idp_icon: None,
         };
 
         self.store_media_info(media_id, server_name, &media_info).await?;
@@ -503,5 +524,127 @@ impl<C: Connection> MediaRepository<C> {
 
         let stats: Vec<serde_json::Value> = result.take(0)?;
         Ok(stats.into_iter().next().unwrap_or(serde_json::json!({})))
+    }
+
+    /// Create a pending upload reservation
+    pub async fn create_pending_upload(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        created_by: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), RepositoryError> {
+        let pending_upload = PendingUpload {
+            media_id: media_id.to_string(),
+            server_name: server_name.to_string(),
+            created_by: created_by.to_string(),
+            created_at: Utc::now(),
+            expires_at,
+            status: PendingUploadStatus::Pending,
+        };
+
+        let pending_key = format!("{}:{}", server_name, media_id);
+        let _: Option<PendingUpload> = self
+            .db
+            .create(("pending_uploads", pending_key))
+            .content(pending_upload)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get a pending upload by media_id and server_name
+    pub async fn get_pending_upload(
+        &self,
+        media_id: &str,
+        server_name: &str,
+    ) -> Result<Option<PendingUpload>, RepositoryError> {
+        let query = "
+            SELECT * FROM pending_uploads
+            WHERE media_id = $media_id AND server_name = $server_name
+            LIMIT 1
+        ";
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("media_id", media_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+        let pending_uploads: Vec<PendingUpload> = result.take(0)?;
+        Ok(pending_uploads.into_iter().next())
+    }
+
+    /// Count pending uploads for a user (for rate limiting)
+    pub async fn count_user_pending_uploads(
+        &self,
+        user_id: &str,
+    ) -> Result<u64, RepositoryError> {
+        let query = "
+            SELECT VALUE count() FROM pending_uploads
+            WHERE created_by = $user_id AND status = 'Pending'
+            GROUP ALL
+        ";
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("user_id", user_id.to_string()))
+            .await?;
+        let counts: Vec<Option<u64>> = result.take(0)?;
+        Ok(counts.into_iter().next().and_then(|v| v).unwrap_or(0))
+    }
+
+    /// Mark a pending upload as completed
+    pub async fn mark_pending_upload_completed(
+        &self,
+        media_id: &str,
+        server_name: &str,
+    ) -> Result<(), RepositoryError> {
+        let query = "
+            UPDATE pending_uploads SET
+                status = 'Completed'
+            WHERE media_id = $media_id AND server_name = $server_name
+        ";
+        self.db
+            .query(query)
+            .bind(("media_id", media_id.to_string()))
+            .bind(("server_name", server_name.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    /// Cleanup expired pending uploads
+    pub async fn cleanup_expired_pending_uploads(&self) -> Result<u64, RepositoryError> {
+        let now = Utc::now();
+        let query = "
+            SELECT media_id, server_name FROM pending_uploads
+            WHERE expires_at < $now AND status = 'Pending'
+        ";
+        let mut result = self.db.query(query).bind(("now", now)).await?;
+        let expired_uploads: Vec<serde_json::Value> = result.take(0)?;
+
+        let mut deleted_count = 0;
+        for upload in expired_uploads {
+            if let (Some(media_id), Some(server_name)) = (
+                upload.get("media_id").and_then(|v| v.as_str()),
+                upload.get("server_name").and_then(|v| v.as_str()),
+            ) {
+                let delete_query = "
+                    DELETE pending_uploads
+                    WHERE media_id = $media_id AND server_name = $server_name
+                ";
+                if self
+                    .db
+                    .query(delete_query)
+                    .bind(("media_id", media_id.to_string()))
+                    .bind(("server_name", server_name.to_string()))
+                    .await
+                    .is_ok()
+                {
+                    deleted_count += 1;
+                }
+            }
+        }
+
+        Ok(deleted_count)
     }
 }

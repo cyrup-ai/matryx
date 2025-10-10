@@ -15,4 +15,11 @@ DEFINE TABLE typing_notification SCHEMAFULL
 DEFINE FIELD room_id ON TABLE typing_notification TYPE string ASSERT string::is::not::empty($value);
 DEFINE FIELD typing ON TABLE typing_notification TYPE bool DEFAULT false;
 DEFINE FIELD user_id ON TABLE typing_notification TYPE string ASSERT string::is::not::empty($value);
-DEFINE FIELD timestamp ON TABLE typing_notification TYPE datetime DEFAULT time::now();
+DEFINE FIELD server_name ON TABLE typing_notification TYPE string;
+DEFINE FIELD started_at ON TABLE typing_notification TYPE datetime DEFAULT time::now();
+DEFINE FIELD expires_at ON TABLE typing_notification TYPE datetime;
+DEFINE FIELD updated_at ON TABLE typing_notification TYPE datetime DEFAULT time::now();
+
+-- Indexes for efficient cleanup and queries
+DEFINE INDEX idx_typing_expires ON TABLE typing_notification FIELDS expires_at;
+DEFINE INDEX idx_typing_room ON TABLE typing_notification FIELDS room_id, expires_at;

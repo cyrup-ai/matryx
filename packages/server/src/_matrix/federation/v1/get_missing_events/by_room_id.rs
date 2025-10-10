@@ -324,7 +324,15 @@ pub async fn post(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let response = MissingEventsResponse::new(missing_events);
+    // Apply event visibility filtering for security
+    let filtered_events = filter_events_for_server(
+        &room,
+        &x_matrix_auth.origin,
+        missing_events,
+        has_users,
+    );
+
+    let response = MissingEventsResponse::new(filtered_events);
 
     info!("Retrieved {} missing events for room {}", response.events.len(), room_id);
 
@@ -341,32 +349,50 @@ async fn get_missing_events_traversal(
     min_depth: i64,
 ) -> Result<Vec<PDU>, Box<dyn std::error::Error + Send + Sync>> {
     let mut visited: HashSet<String> = HashSet::new();
-    let mut to_visit: Vec<String> = latest_events.to_vec();
+    let mut to_visit: Vec<String> = Vec::new();
     let mut result_events = Vec::new();
     let earliest_set: HashSet<String> = earliest_events.iter().cloned().collect();
 
-    // Add latest events to visited set (they are starting points, not results)
+    // Mark latest_events as visited (they are starting points only, NOT results)
     for event_id in latest_events {
         visited.insert(event_id.clone());
     }
 
+    // STEP 1: Fetch latest_events to get their prev_events (don't add to results)
+    let event_repo = EventRepository::new(state.db.clone());
+    let start_events = event_repo
+        .get_events_by_ids_with_min_depth(latest_events, room_id, min_depth)
+        .await?;
+
+    // Extract prev_events from latest_events as the true starting point for BFS
+    for event in start_events {
+        if let Some(prev_events) = &event.prev_events {
+            for prev_event_id in prev_events {
+                if !visited.contains(prev_event_id) && !earliest_set.contains(prev_event_id) {
+                    visited.insert(prev_event_id.to_string());
+                    to_visit.push(prev_event_id.to_string());
+                }
+            }
+        }
+    }
+
+    // STEP 2: BFS traversal starting from prev_events (these DO get added to results)
     while !to_visit.is_empty() && result_events.len() < limit {
         let current_batch: Vec<String> = std::mem::take(&mut to_visit);
 
         // Fetch current batch of events
-        let event_repo = EventRepository::new(state.db.clone());
         let events = event_repo
             .get_events_by_ids_with_min_depth(&current_batch, room_id, min_depth)
             .await?;
 
         // Process events and add their prev_events to next batch
         for event in events {
-            // Skip if this event is in earliest_events
+            // Skip if this event is in earliest_events boundary
             if earliest_set.contains(&event.event_id) {
                 continue;
             }
 
-            // Add prev_events to the next batch if not visited and not in earliest_events
+            // Queue this event's prev_events for next iteration
             if let Some(prev_events) = &event.prev_events {
                 for prev_event_id in prev_events {
                     if !visited.contains(prev_event_id) && !earliest_set.contains(prev_event_id) {
@@ -376,7 +402,7 @@ async fn get_missing_events_traversal(
                 }
             }
 
-            // Add event to results if we haven't reached limit
+            // Add event to results (NOW this is correct - latest_events are excluded)
             if result_events.len() < limit {
                 // Validate required fields exist
                 let depth = event.depth.ok_or("Event missing required depth field")?;
@@ -411,4 +437,76 @@ async fn get_missing_events_traversal(
     });
 
     Ok(result_events)
+}
+
+/// Filter events based on room history visibility settings for security
+///
+/// This function implements server-side event visibility filtering to ensure
+/// requesting servers only receive events they have permission to see based on
+/// room history visibility settings.
+///
+/// # Arguments
+/// * `room` - The room containing the events
+/// * `requesting_server` - The origin server making the request
+/// * `events` - The list of events to filter
+/// * `server_has_users` - Whether the requesting server has users in the room
+///
+/// # Returns
+/// Filtered list of events the requesting server is authorized to see
+fn filter_events_for_server(
+    room: &Room,
+    requesting_server: &str,
+    events: Vec<PDU>,
+    server_has_users: bool,
+) -> Vec<PDU> {
+    // Check room history visibility setting
+    let history_visibility = room.history_visibility.as_deref().unwrap_or("shared");
+
+    match history_visibility {
+        "world_readable" => {
+            // World-readable rooms: all events visible to everyone
+            debug!(
+                "Room {} is world_readable, allowing all {} events for server {}",
+                room.room_id,
+                events.len(),
+                requesting_server
+            );
+            events
+        },
+        "shared" | "invited" | "joined" => {
+            // Non-world-readable rooms: only servers with users can see events
+            if server_has_users {
+                debug!(
+                    "Server {} has users in room {} (history_visibility: {}), allowing all {} events",
+                    requesting_server,
+                    room.room_id,
+                    history_visibility,
+                    events.len()
+                );
+                events
+            } else {
+                // Server has no users in room, deny all events
+                warn!(
+                    "Server {} has no users in room {} (history_visibility: {}), filtering all events",
+                    requesting_server,
+                    room.room_id,
+                    history_visibility
+                );
+                Vec::new()
+            }
+        },
+        _ => {
+            // Unknown history_visibility setting, default to restrictive behavior
+            warn!(
+                "Unknown history_visibility '{}' for room {}, applying restrictive filtering",
+                history_visibility,
+                room.room_id
+            );
+            if server_has_users {
+                events
+            } else {
+                Vec::new()
+            }
+        },
+    }
 }

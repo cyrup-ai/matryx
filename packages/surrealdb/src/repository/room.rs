@@ -2393,7 +2393,7 @@ impl RoomRepository {
         match join_rules {
             Some(rules) => {
                 let join_rule = rules.join_rule.unwrap_or_else(|| "invite".to_string());
-                Ok(join_rule == "knock")
+                Ok(matches!(join_rule.as_str(), "knock" | "knock_restricted"))
             },
             None => {
                 // No join rules event found, default is "invite" which doesn't allow knocking

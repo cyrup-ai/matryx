@@ -1341,13 +1341,15 @@ impl FederationRepository {
 
             let query = "
                 BEGIN;
-                DELETE typing_events WHERE room_id = $room_id AND user_id = $user_id;
-                CREATE typing_events SET
+                DELETE typing_notification WHERE room_id = $room_id AND user_id = $user_id;
+                CREATE typing_notification SET
                     room_id = $room_id,
                     user_id = $user_id,
+                    typing = true,
                     server_name = $server_name,
                     started_at = $started_at,
-                    expires_at = $expires_at;
+                    expires_at = $expires_at,
+                    updated_at = time::now();
                 COMMIT;
             ";
 
@@ -1362,7 +1364,7 @@ impl FederationRepository {
         } else {
             // User stopped typing - remove typing event
             let query = "
-                DELETE typing_events 
+                DELETE typing_notification
                 WHERE room_id = $room_id AND user_id = $user_id
             ";
 

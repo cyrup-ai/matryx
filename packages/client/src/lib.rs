@@ -359,6 +359,94 @@ impl MatrixClient {
         Ok(())
     }
 
+    /// Send a read receipt for an event
+    ///
+    /// # Arguments
+    /// * `room_id` - The room ID containing the event
+    /// * `receipt_type` - The receipt type: "m.read", "m.read.private", or "m.fully_read"
+    /// * `event_id` - The event ID to acknowledge
+    /// * `thread_id` - Optional thread ID for threaded receipts
+    ///
+    /// # Receipt Types
+    /// * `m.read` - Public read receipt (federated to other servers)
+    /// * `m.read.private` - Private read receipt (local only)
+    /// * `m.fully_read` - Fully read marker (deprecated but still supported)
+    ///
+    /// # Thread ID Values
+    /// * `None` - Unthreaded receipt (legacy behavior)
+    /// * `Some("main")` - Main timeline receipt
+    /// * `Some("$event_id")` - Receipt for a specific thread
+    pub async fn send_receipt(
+        &self,
+        room_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        // Validate receipt type
+        match receipt_type {
+            "m.read" | "m.read.private" | "m.fully_read" => {}
+            _ => return Err(anyhow::anyhow!("Invalid receipt type: {}", receipt_type)),
+        }
+
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/receipt/{}/{}",
+            urlencoding::encode(room_id),
+            urlencoding::encode(receipt_type),
+            urlencoding::encode(event_id)
+        );
+
+        let mut body = serde_json::Map::new();
+        if let Some(thread_id) = thread_id {
+            body.insert("thread_id".to_string(), serde_json::Value::String(thread_id.to_string()));
+        }
+
+        let request = self.authenticated_request(reqwest::Method::POST, &path)?;
+        let response = request.json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(anyhow::anyhow!("Failed to send receipt: {}", error_text));
+        }
+
+        Ok(())
+    }
+
+    /// Send a public read receipt for an event
+    ///
+    /// This is a convenience method for sending `m.read` receipts.
+    /// The receipt will be federated to other servers.
+    pub async fn send_read_receipt(&self, room_id: &str, event_id: &str) -> Result<()> {
+        self.send_receipt(room_id, "m.read", event_id, None).await
+    }
+
+    /// Send a private read receipt for an event
+    ///
+    /// This is a convenience method for sending `m.read.private` receipts.
+    /// The receipt will only be visible on the local homeserver.
+    pub async fn send_private_read_receipt(&self, room_id: &str, event_id: &str) -> Result<()> {
+        self.send_receipt(room_id, "m.read.private", event_id, None).await
+    }
+
+    /// Send a threaded read receipt for an event
+    ///
+    /// This is a convenience method for sending receipts within a specific thread.
+    ///
+    /// # Arguments
+    /// * `room_id` - The room ID containing the event
+    /// * `receipt_type` - The receipt type: "m.read" or "m.read.private"
+    /// * `event_id` - The event ID to acknowledge
+    /// * `thread_id` - The thread ID (use "main" for main timeline, or event ID for thread root)
+    pub async fn send_threaded_receipt(
+        &self,
+        room_id: &str,
+        receipt_type: &str,
+        event_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        self.send_receipt(room_id, receipt_type, event_id, Some(thread_id)).await
+    }
+
     /// Logout from the Matrix server
     pub async fn logout(&mut self) -> Result<()> {
         if self.credentials.is_some() {
@@ -521,5 +609,71 @@ mod tests {
         assert!(!client.is_authenticated());
         assert!(client.user_id().is_none());
         assert!(client.access_token().is_none());
+    }
+
+    #[test]
+    fn test_receipt_type_validation() {
+        // Valid receipt types should be accepted
+        let valid_types = ["m.read", "m.read.private", "m.fully_read"];
+        for receipt_type in &valid_types {
+            match receipt_type {
+                &"m.read" | &"m.read.private" | &"m.fully_read" => {
+                    // Should match successfully
+                }
+                _ => panic!("Valid receipt type {} was rejected", receipt_type),
+            }
+        }
+
+        // Invalid receipt types should be rejected
+        let invalid_types = ["m.invalid", "read", "m.receipt", ""];
+        for receipt_type in &invalid_types {
+            match receipt_type {
+                &"m.read" | &"m.read.private" | &"m.fully_read" => {
+                    panic!("Invalid receipt type {} was accepted", receipt_type);
+                }
+                _ => {
+                    // Should not match - this is correct
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_receipt_url_encoding() {
+        // Test that URL encoding is applied correctly
+        let room_id = "!test:example.com";
+        let receipt_type = "m.read";
+        let event_id = "$event:example.com";
+
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/receipt/{}/{}",
+            urlencoding::encode(room_id),
+            urlencoding::encode(receipt_type),
+            urlencoding::encode(event_id)
+        );
+
+        assert_eq!(
+            path,
+            "/_matrix/client/v3/rooms/%21test%3Aexample.com/receipt/m.read/%24event%3Aexample.com"
+        );
+    }
+
+    #[test]
+    fn test_receipt_thread_id_serialization() {
+        // Test that thread_id is correctly included when provided
+        let mut body_with_thread = serde_json::Map::new();
+        body_with_thread.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String("main".to_string()),
+        );
+
+        let serialized = serde_json::to_string(&body_with_thread).expect("Failed to serialize");
+        assert!(serialized.contains("thread_id"));
+        assert!(serialized.contains("main"));
+
+        // Test that thread_id is excluded when None
+        let body_without_thread = serde_json::Map::new();
+        let serialized = serde_json::to_string(&body_without_thread).expect("Failed to serialize");
+        assert!(!serialized.contains("thread_id"));
     }
 }

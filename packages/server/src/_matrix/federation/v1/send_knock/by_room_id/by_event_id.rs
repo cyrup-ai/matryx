@@ -432,7 +432,7 @@ pub async fn put(
     })?;
 
     let response = json!({
-        "knock_state_events": knock_state_events
+        "knock_room_state": knock_state_events
     });
 
     info!("Successfully processed knock from user {} for room {}", sender, room_id);

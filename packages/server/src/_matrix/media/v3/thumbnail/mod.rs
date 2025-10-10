@@ -12,6 +12,7 @@ pub struct ThumbnailQuery {
     #[serde(default = "default_method")]
     pub method: String,
     pub timeout_ms: Option<u64>,
+    pub animated: Option<bool>,
 }
 
 #[allow(dead_code)] // Used by serde default

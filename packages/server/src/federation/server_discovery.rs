@@ -67,7 +67,7 @@ pub struct FederationConnection {
 /// 1. IP literal handling
 /// 2. Explicit port handling  
 /// 3. Well-known delegation lookup
-/// 4. SRV record resolution (modern and legacy)
+/// 4. SRV record resolution (_matrix-fed._tcp per Matrix v1.8, fallback to deprecated _matrix._tcp)
 /// 5. Fallback to hostname:8448
 pub struct ServerDiscoveryOrchestrator {
     dns_resolver: Arc<MatrixDnsResolver>,

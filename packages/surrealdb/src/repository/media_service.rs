@@ -662,6 +662,130 @@ impl<C: Connection> MediaService<C> {
     ) -> Result<Option<MediaInfo>, RepositoryError> {
         self.media_repo.get_media_info(media_id, server_name).await
     }
+
+    /// Create a pending upload reservation (async upload flow)
+    pub async fn create_pending_upload(
+        &self,
+        user_id: &str,
+        server_name: &str,
+    ) -> Result<(String, DateTime<Utc>), MediaError> {
+        // Rate limiting: Check if user has too many pending uploads
+        let pending_count = self.media_repo
+            .count_user_pending_uploads(user_id)
+            .await
+            .map_err(MediaError::from)?;
+
+        if pending_count >= 10 {
+            return Err(MediaError::InvalidOperation(
+                "M_LIMIT_EXCEEDED: Too many pending uploads".to_string()
+            ));
+        }
+
+        // Generate unique media ID
+        let media_id = Uuid::new_v4().to_string();
+
+        // Set expiration (24 hours from now)
+        let expires_at = Utc::now() + chrono::Duration::hours(24);
+
+        // Create pending upload record
+        self.media_repo
+            .create_pending_upload(&media_id, server_name, user_id, expires_at)
+            .await
+            .map_err(MediaError::from)?;
+
+        Ok((media_id, expires_at))
+    }
+
+    /// Validate a pending upload before allowing upload
+    pub async fn validate_pending_upload(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        user_id: &str,
+    ) -> Result<(), MediaError> {
+        // Get pending upload record
+        let pending = self.media_repo
+            .get_pending_upload(media_id, server_name)
+            .await
+            .map_err(MediaError::from)?
+            .ok_or_else(|| MediaError::NotFound)?;
+
+        // Check if expired
+        if pending.expires_at < Utc::now() {
+            return Err(MediaError::NotFound); // M_NOT_FOUND for expired
+        }
+
+        // Check ownership
+        if pending.created_by != user_id {
+            return Err(MediaError::AccessDenied(
+                "M_FORBIDDEN: Wrong user trying to upload".to_string()
+            ));
+        }
+
+        // Check if already completed
+        use crate::repository::media::PendingUploadStatus;
+        if pending.status == PendingUploadStatus::Completed {
+            return Err(MediaError::InvalidOperation(
+                "M_CANNOT_OVERWRITE_MEDIA: Already uploaded".to_string()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Upload content to a pending upload reservation
+    pub async fn upload_to_pending(
+        &self,
+        media_id: &str,
+        server_name: &str,
+        user_id: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<(), MediaError> {
+        // Validate pending upload first
+        self.validate_pending_upload(media_id, server_name, user_id).await?;
+
+        // Validate content size
+        if content.len() as u64 > MAX_MEDIA_SIZE {
+            return Err(MediaError::TooLarge);
+        }
+
+        // Store media content
+        self.media_repo
+            .store_media_content(media_id, server_name, content, content_type)
+            .await
+            .map_err(MediaError::from)?;
+
+        // Store media info
+        let media_info = MediaInfo {
+            media_id: media_id.to_string(),
+            server_name: server_name.to_string(),
+            content_type: content_type.to_string(),
+            content_length: content.len() as u64,
+            upload_name: None,
+            uploaded_by: user_id.to_string(),
+            created_at: Utc::now(),
+            expires_at: None,
+            quarantined: None,
+            quarantined_by: None,
+            quarantine_reason: None,
+            quarantined_at: None,
+            is_idp_icon: None,
+        };
+
+        self.media_repo
+            .store_media_info(media_id, server_name, &media_info)
+            .await
+            .map_err(MediaError::from)?;
+
+        // Mark pending upload as completed
+        self.media_repo
+            .mark_pending_upload_completed(media_id, server_name)
+            .await
+            .map_err(MediaError::from)?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

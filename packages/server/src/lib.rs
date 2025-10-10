@@ -26,6 +26,7 @@ pub mod room;
 pub mod security;
 pub mod server_notices;
 pub mod state;
+pub mod tasks;
 pub mod threading;
 pub mod utils;
 

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::federation::event_signer::EventSigner;
-use matryx_entity::types::{Transaction, TransactionResponse};
+use matryx_entity::types::{Transaction, TransactionResponse, ExchangeThirdPartyInviteRequest};
 
 /// Errors that can occur during federation client operations
 #[derive(Debug, thiserror::Error)]
@@ -322,6 +322,91 @@ impl FederationClient {
         );
 
         Ok(devices_response)
+    }
+
+    /// Exchange third-party invite with inviting server
+    ///
+    /// Implements: PUT /_matrix/federation/v1/exchange_third_party_invite/{roomId}
+    /// Spec: /spec/server/11-room-invites.md:348-415
+    pub async fn exchange_third_party_invite(
+        &self,
+        destination: &str,
+        room_id: &str,
+        request: &ExchangeThirdPartyInviteRequest,
+    ) -> Result<(), FederationClientError> {
+        debug!(
+            "Exchanging third-party invite with {} for room {}",
+            destination, room_id
+        );
+
+        // Prevent federation requests to ourselves
+        if destination == self.homeserver_name {
+            return Err(FederationClientError::InvalidResponse);
+        }
+
+        // Construct federation API URL
+        let protocol = if self.use_https { "https" } else { "http" };
+        let url = format!(
+            "{}://{}/_matrix/federation/v1/exchange_third_party_invite/{}",
+            protocol,
+            destination,
+            urlencoding::encode(room_id)
+        );
+
+        // Serialize request to JSON
+        let request_json = serde_json::to_value(request)
+            .map_err(FederationClientError::JsonError)?;
+
+        // Create HTTP PUT request
+        let request_builder = self
+            .http_client
+            .put(&url)
+            .json(request)
+            .timeout(self.request_timeout);
+
+        // Sign request with X-Matrix authentication
+        let uri = format!(
+            "/_matrix/federation/v1/exchange_third_party_invite/{}",
+            urlencoding::encode(room_id)
+        );
+        let signed_request = self
+            .event_signer
+            .sign_federation_request(
+                request_builder,
+                "PUT",
+                &uri,
+                destination,
+                Some(request_json),
+            )
+            .await
+            .map_err(|_| FederationClientError::InvalidResponse)?;
+
+        // Execute HTTP request
+        let response = signed_request.send().await?;
+
+        // Handle HTTP errors
+        if !response.status().is_success() {
+            warn!(
+                "Exchange third-party invite failed: {} - {}",
+                response.status(),
+                response.status().canonical_reason().unwrap_or("Unknown error")
+            );
+            return Err(FederationClientError::ServerError {
+                status_code: response.status().as_u16(),
+                message: response
+                    .status()
+                    .canonical_reason()
+                    .unwrap_or("Unknown")
+                    .to_string(),
+            });
+        }
+
+        info!(
+            "Successfully exchanged third-party invite with {} for room {}",
+            destination, room_id
+        );
+
+        Ok(())
     }
 }
 

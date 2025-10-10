@@ -1,7 +1,7 @@
 use crate::{AppState, auth::AuthenticatedUser, federation::outbound_queue::OutboundEvent};
 use axum::{Extension, Json, extract::Path, http::StatusCode};
 use matryx_entity::types::{EDU, EphemeralEvent, EventContent};
-use matryx_surrealdb::repository::MembershipRepository;
+use matryx_surrealdb::repository::{FederationRepository, MembershipRepository};
 use serde_json::{Value, json};
 use tracing::{debug, error};
 
@@ -19,6 +19,18 @@ pub async fn put(
 
     // Extract typing state and timeout
     let typing = payload.get("typing").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Store typing state locally first
+    let federation_repo = FederationRepository::new(state.db.clone());
+    let server_name = state.homeserver_name.as_str();
+
+    if let Err(e) = federation_repo
+        .process_typing_edu(&room_id, &user_id, server_name, typing)
+        .await
+    {
+        error!("Failed to store local typing state: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // Get remote servers in the room for federation
     let membership_repo = MembershipRepository::new(state.db.clone());

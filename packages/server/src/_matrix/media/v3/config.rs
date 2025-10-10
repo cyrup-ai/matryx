@@ -1,4 +1,5 @@
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{extract::State, http::StatusCode, response::{IntoResponse, Json, Response}};
+use tracing::warn;
 use matryx_surrealdb::repository::{
     media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
     room::RoomRepository,
@@ -16,7 +17,11 @@ pub struct MediaConfigResponse {
 
 pub async fn get_media_config(
     State(state): State<AppState>,
-) -> Result<Json<MediaConfigResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
+    warn!(
+        endpoint = "GET /_matrix/media/v3/config",
+        "Deprecated endpoint accessed - clients should migrate to /_matrix/client/v1/media/*"
+    );
     // Create MediaService instance
     let media_repo = Arc::new(MediaRepository::new(state.db.clone()));
     let room_repo = Arc::new(RoomRepository::new(state.db.clone()));
@@ -42,7 +47,16 @@ pub async fn get_media_config(
         base_limit
     };
 
-    Ok(Json(MediaConfigResponse { upload_size }))
+    let mut response = Json(MediaConfigResponse { upload_size }).into_response();
+
+    // Add deprecation headers
+    let headers = response.headers_mut();
+    headers.insert("Deprecation", "true".parse().unwrap());
+    headers.insert("Sunset", "Wed, 01 Sep 2024 00:00:00 GMT".parse().unwrap());
+    headers.insert("Link", r#"<https://spec.matrix.org/v1.11/client-server-api/#content-repository>; rel="deprecation""#.parse().unwrap());
+    headers.insert("X-Matrix-Deprecated-Endpoint", "Use /_matrix/client/v1/media/* instead".parse().unwrap());
+
+    Ok(response)
 }
 
 // HTTP method handler for main.rs routing
