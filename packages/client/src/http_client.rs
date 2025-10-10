@@ -306,17 +306,8 @@ impl MatrixHttpClient {
                 Err(e) => {
                     attempt += 1;
 
-                    // Check if we should retry
-                    let should_retry = match &e {
-                        // Retry on network errors
-                        HttpClientError::Network(_) => true,
-                        // Retry on 5xx server errors or rate limit
-                        HttpClientError::Matrix { status, errcode, .. } => {
-                            *status >= 500 || errcode == "M_LIMIT_EXCEEDED"
-                        }
-                        // Don't retry on 4xx client errors (except rate limit)
-                        _ => false,
-                    };
+                    // Use helper method for consistent retry logic
+                    let should_retry = e.is_retryable();
 
                     if !should_retry || attempt >= max_retries {
                         if attempt >= max_retries {
