@@ -1,9 +1,9 @@
 # ERRFIX_1: Improve Error Handling and Remove Generic Fallbacks
 
-**Status**: Ready for Implementation
-**Priority**: MEDIUM
-**Estimated Effort**: 2-3 days
-**Package**: packages/client, packages/server
+**Status**: Ready for Implementation  
+**Priority**: MEDIUM  
+**Estimated Effort**: 2-3 days  
+**Package**: packages/client, packages/server, packages/entity
 
 ---
 
@@ -13,12 +13,42 @@ Replace generic fallback error handling with proper error types and logging to i
 
 ---
 
+## CODEBASE CONTEXT
+
+### Current State Analysis
+
+After examining the codebase, here's what currently exists:
+
+**1. HTTP Client Error Handling** ([`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs))
+- HttpClientError enum is defined at **lines 18-40** in http_client.rs itself (NOT in a separate error.rs file)
+- The problematic fallback is in `parse_matrix_error()` method at **lines 149-158**
+- Current variants: Network, Matrix, Serialization, InvalidUrl, AuthenticationRequired, MaxRetriesExceeded
+- Missing: InvalidResponse variant for parse errors
+
+**2. Mentions Fallback** ([`packages/server/src/mentions.rs`](../../packages/server/src/mentions.rs))
+- The fallback logic is at **lines 145-156** 
+- Currently has minimal comment: "Detect mentions from content text (fallback for backwards compatibility)"
+- This code is CORRECT and working - just needs better documentation
+- Related to Matrix Spec MSC3952 (m.mentions field)
+
+**3. Event Content Unknown Variant** ([`packages/entity/src/types/event_content.rs`](../../packages/entity/src/types/event_content.rs))
+- Unknown variant at **line 49**
+- Current comment: "Generic fallback for unknown event types"
+- This is intentional Matrix extensibility - needs clarification in documentation
+
+**4. Logging Infrastructure**
+- Tracing crate v0.1.41 already in dependencies
+- Codebase uses simple macro forms: `info!("message")`, `warn!("message with {}", value)`
+- NO target specification used in most places (keep it simple)
+
+---
+
 ## PROBLEM DESCRIPTION
 
 Several locations use generic fallback error handling that masks real errors:
 
-1. **HTTP Client** (`packages/client/src/http_client.rs:150`): Non-Matrix errors converted to generic Matrix errors
-2. **Mentions Fallback** (`packages/server/src/mentions.rs:145`): Actually GOOD - needs documentation only
+1. **HTTP Client** (`packages/client/src/http_client.rs:149-158`): Non-Matrix errors converted to generic Matrix errors
+2. **Mentions Fallback** (`packages/server/src/mentions.rs:145-156`): Actually GOOD - needs documentation only
 3. **Event Content Fallback** (`packages/entity/src/types/event_content.rs:49`): Legitimate catch-all for unknown types
 
 **Impact of Poor Error Handling**:
@@ -41,40 +71,94 @@ Several locations use generic fallback error handling that masks real errors:
 - **Bad**: Hiding errors (http_client.rs) - loses debugging information
 - **Acceptable**: Unknown variants (event_content.rs) - catch-all for extensibility
 
+**Matrix Specification References**:
+- MSC3952: Intentional mentions (m.mentions field) - newer clients include this
+- Backwards compatibility: Older clients don't send m.mentions, servers must parse text
+- Event types: Matrix allows custom event types (com.example.custom_event)
+
 ---
 
 ## SUBTASK 1: Improve HTTP Client Error Handling
 
 **Objective**: Replace generic M_UNKNOWN fallback with proper error types.
 
-**Location**: `packages/client/src/http_client.rs` (around line 145-156)
+**Location**: [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
 
-**Current Code**:
+### CURRENT CODE STATE
+
+**Lines 18-40: HttpClientError enum definition**
 ```rust
-Err(_) => {
-    // Fallback: non-Matrix error format
-    Err(HttpClientError::Matrix {
-        status,
-        errcode: "M_UNKNOWN".to_string(),
-        error: body.to_string(),
-        retry_after_ms: None,
-    })
+/// HTTP client errors with Matrix-spec error handling
+#[derive(Debug, thiserror::Error)]
+pub enum HttpClientError {
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+
+    #[error("Matrix error {errcode}: {error} (HTTP {status})")]
+    Matrix {
+        status: u16,
+        errcode: String,
+        error: String,
+        retry_after_ms: Option<u64>,
+    },
+
+    #[error("JSON serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] url::ParseError),
+
+    #[error("Authentication required")]
+    AuthenticationRequired,
+
+    #[error("Max retries exceeded")]
+    MaxRetriesExceeded,
 }
 ```
 
-**Problems**:
-- Parse error information is discarded
-- Body content might not be suitable error message
-- No indication this is a parse failure vs real M_UNKNOWN
-
-**Required Changes**:
-
-1. Add new error variant to HttpClientError enum:
+**Lines 149-158: Problematic parse_matrix_error method**
 ```rust
-pub enum HttpClientError {
-    // ... existing variants ...
+fn parse_matrix_error<T>(&self, status: u16, body: &str) -> Result<T, HttpClientError> {
+    match serde_json::from_str::<MatrixErrorResponse>(body) {
+        Ok(matrix_err) => Err(HttpClientError::Matrix {
+            status,
+            errcode: matrix_err.errcode,
+            error: matrix_err.error,
+            retry_after_ms: matrix_err.retry_after_ms,
+        }),
+        Err(_) => {
+            // Fallback: non-JSON error response
+            Err(HttpClientError::Matrix {
+                status,
+                errcode: "M_UNKNOWN".to_string(),
+                error: body.to_string(),
+                retry_after_ms: None,
+            })
+        }
+    }
+}
+```
 
-    /// Matrix error with proper error code
+### PROBLEMS
+
+- Parse error information is discarded (`Err(_)` throws away details)
+- Body content might not be suitable error message (could be HTML, plain text, etc.)
+- No indication this is a parse failure vs real M_UNKNOWN from server
+- Creates fake Matrix error when response isn't Matrix format
+
+### REQUIRED CHANGES
+
+**Step 1: Add InvalidResponse variant to HttpClientError enum (lines 18-40)**
+
+Insert this NEW variant after the Matrix variant:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum HttpClientError {
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+
+    #[error("Matrix error {errcode}: {error} (HTTP {status})")]
     Matrix {
         status: u16,
         errcode: String,
@@ -83,81 +167,78 @@ pub enum HttpClientError {
     },
 
     /// Response parsing failed (not valid Matrix error format)
+    /// 
+    /// This indicates the server returned an error response that doesn't
+    /// follow Matrix error format. The body and parse error are preserved
+    /// for debugging.
+    #[error("Invalid response format (status {status}): {parse_error}")]
     InvalidResponse {
         status: u16,
         body: String,
         parse_error: String,
     },
 
-    // ... other variants
+    #[error("JSON serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    // ... rest of variants
 }
 ```
 
-2. Update error handling logic:
-```rust
-match serde_json::from_str::<MatrixError>(&body) {
-    Ok(matrix_err) => {
-        Err(HttpClientError::Matrix {
-            status,
-            errcode: matrix_err.errcode,
-            error: matrix_err.error,
-            retry_after_ms: matrix_err.retry_after_ms,
-        })
-    }
-    Err(parse_err) => {
-        // Log the parse error for debugging
-        tracing::warn!(
-            "Failed to parse error response as Matrix error (status {}): {}",
-            status,
-            parse_err
-        );
-        tracing::debug!("Response body: {}", body);
+**Step 2: Update parse_matrix_error method (lines 149-158)**
 
-        // Return InvalidResponse error
-        Err(HttpClientError::InvalidResponse {
-            status,
-            body: if body.len() > 200 {
-                format!("{}... (truncated)", &body[..200])
-            } else {
-                body.to_string()
-            },
-            parse_error: parse_err.to_string(),
-        })
-    }
-}
-```
+Replace the current method with this improved version:
 
-3. Update Display impl for HttpClientError:
 ```rust
-impl std::fmt::Display for HttpClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HttpClientError::Matrix { status, errcode, error, .. } => {
-                write!(f, "Matrix error ({}): {} - {}", status, errcode, error)
-            }
-            HttpClientError::InvalidResponse { status, body, parse_error } => {
-                write!(
-                    f,
-                    "Invalid response format (status {}): parse error: {}, body: {}",
-                    status, parse_error, body
-                )
-            }
-            // ... other variants
+fn parse_matrix_error<T>(&self, status: u16, body: &str) -> Result<T, HttpClientError> {
+    match serde_json::from_str::<MatrixErrorResponse>(body) {
+        Ok(matrix_err) => {
+            Err(HttpClientError::Matrix {
+                status,
+                errcode: matrix_err.errcode,
+                error: matrix_err.error,
+                retry_after_ms: matrix_err.retry_after_ms,
+            })
+        }
+        Err(parse_err) => {
+            // Log parse error with full details for debugging
+            tracing::warn!(
+                "Failed to parse error response as Matrix error (status {}): {}",
+                status,
+                parse_err
+            );
+            tracing::debug!("Response body: {}", body);
+
+            // Return InvalidResponse error with preserved information
+            Err(HttpClientError::InvalidResponse {
+                status,
+                body: if body.len() > 200 {
+                    format!("{}... (truncated)", &body[..200])
+                } else {
+                    body.to_string()
+                },
+                parse_error: parse_err.to_string(),
+            })
         }
     }
 }
 ```
 
-**Files to Modify**:
-- `packages/client/src/http_client.rs` (lines 145-156)
-- `packages/client/src/error.rs` (or wherever HttpClientError is defined)
+### FILES TO MODIFY
 
-**Definition of Done**:
-- InvalidResponse error variant added
-- Parse errors logged with details
-- Response body included in error (truncated if long)
-- No information loss from original error
-- Display impl updated for new variant
+- [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
+  - Lines 18-40: Add InvalidResponse variant to enum
+  - Lines 149-158: Update parse_matrix_error method
+  - Note: HttpClientError is defined HERE, not in a separate error.rs file
+
+### DEFINITION OF DONE
+
+- InvalidResponse error variant added to HttpClientError enum
+- Parse errors logged with `warn!` level and details
+- Response body included in error (truncated if > 200 chars)
+- Response body logged at `debug!` level (full content)
+- No information loss from original parse error
+- Code compiles without errors
 
 ---
 
@@ -165,60 +246,81 @@ impl std::fmt::Display for HttpClientError {
 
 **Objective**: Add documentation to legitimate fallback cases explaining they're intentional.
 
-**Location 1**: `packages/server/src/mentions.rs:145`
+### Location 1: Mentions Fallback
 
-**Current Code**:
+**File**: [`packages/server/src/mentions.rs`](../../packages/server/src/mentions.rs)  
+**Lines**: 145-156
+
+#### CURRENT CODE STATE
+
 ```rust
 } else {
-    // Fallback to text-based detection if m.mentions not present
+    // Detect mentions from content text (fallback for backwards compatibility)
     mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
     has_room_mention = self.detect_room_mentions(&text_content);
 
     // Detect room alias mentions for cross-room context
-    mentioned_room_aliases.extend(self.detect_room_alias_mentions(&text_content).await?);
+    room_alias_mentions = self.detect_and_resolve_room_alias_mentions(&text_content, state).await;
+    if !room_alias_mentions.is_empty() {
+        info!("Detected and resolved room alias mentions in room {}: {:?}", room_id, room_alias_mentions);
+        // Note: Room aliases are stored in custom metadata field, not m.mentions
+        // This is intentional - m.mentions is spec-defined for user/@room only
+    }
 }
 ```
 
-**Required Documentation**:
+#### REQUIRED CHANGE
+
+Replace the minimal comment with comprehensive documentation:
+
 ```rust
 } else {
     // Fallback to text-based mention detection for backwards compatibility.
     //
-    // This is INTENTIONAL per Matrix specification behavior:
+    // This is INTENTIONAL per Matrix specification behavior (MSC3952):
     // - Clients that don't support MSC3952 (m.mentions field) will not include it
-    // - Servers must parse message body text to detect @mentions and room pings
+    // - Servers MUST parse message body text to detect @mentions and @room pings
     // - This ensures mentions work with older/minimal Matrix clients
+    // - Modern clients should include m.mentions, but we support both approaches
     //
-    // This is NOT a workaround - it's required backwards compatibility.
+    // This is NOT a workaround or incomplete code - it's required backwards
+    // compatibility as specified by Matrix protocol.
+    //
+    // References:
+    // - MSC3952: Intentional Mentions
+    // - Matrix Client-Server API Spec (room events)
     mentioned_users.extend(self.detect_user_mentions(&text_content, room_id, state).await?);
     has_room_mention = self.detect_room_mentions(&text_content);
-    mentioned_room_aliases.extend(self.detect_room_alias_mentions(&text_content).await?);
+
+    // Detect room alias mentions for cross-room context
+    room_alias_mentions = self.detect_and_resolve_room_alias_mentions(&text_content, state).await;
+    if !room_alias_mentions.is_empty() {
+        info!("Detected and resolved room alias mentions in room {}: {:?}", room_id, room_alias_mentions);
+        // Note: Room aliases are stored in custom metadata field, not m.mentions
+        // This is intentional - m.mentions is spec-defined for user/@room only
+    }
 }
 ```
 
-**Files to Modify**:
-- `packages/server/src/mentions.rs` (line 145)
+### Location 2: Event Content Unknown Variant
 
-**Definition of Done**:
-- Comment clearly explains this is intentional
-- References Matrix specification behavior
-- Clarifies this is backwards compatibility, not a bug
-- Future maintainers won't mistake this for incomplete code
+**File**: [`packages/entity/src/types/event_content.rs`](../../packages/entity/src/types/event_content.rs)  
+**Lines**: 49
 
----
+#### CURRENT CODE STATE
 
-**Location 2**: `packages/entity/src/types/event_content.rs:49`
-
-**Current Code**:
 ```rust
 /// Server notice content (m.server_notice)
 ServerNotice(ServerNoticeContent),
 
-// Fallback for unknown event types
+/// Generic fallback for unknown event types
 Unknown(serde_json::Value),
 ```
 
-**Required Documentation**:
+#### REQUIRED CHANGE
+
+Replace with comprehensive documentation:
+
 ```rust
 /// Server notice content (m.server_notice)
 ServerNotice(ServerNoticeContent),
@@ -228,215 +330,278 @@ ServerNotice(ServerNoticeContent),
 /// Matrix allows custom event types and future event types not yet
 /// implemented in this codebase. This catch-all variant preserves
 /// the event content for:
-/// - Custom event types (e.g., "com.example.custom_event")
-/// - Future Matrix specification event types
-/// - Events from newer servers/clients
+/// 
+/// - **Custom event types**: Application-specific events like "com.example.custom_event"
+/// - **Future Matrix events**: New event types added to spec after this code was written
+/// - **Third-party integrations**: Events from bridges, bots, or other services
+/// - **Experimental features**: Events from MSCs (Matrix Spec Changes) not yet finalized
 ///
 /// The raw JSON value is preserved so custom handling can access it.
-/// This is INTENTIONAL extensibility per Matrix specification.
+/// This is INTENTIONAL extensibility per Matrix specification - NOT
+/// incomplete implementation.
+///
+/// Matrix Specification: "Clients and servers MUST be able to handle
+/// unknown event types gracefully by preserving their content."
 Unknown(serde_json::Value),
 ```
 
-**Files to Modify**:
-- `packages/entity/src/types/event_content.rs` (line 49)
+### FILES TO MODIFY
 
-**Definition of Done**:
-- Comment explains Unknown variant purpose
-- Clarifies this enables Matrix extensibility
-- Documents when this variant is used
-- Not marked as incomplete or TODO
+- [`packages/server/src/mentions.rs`](../../packages/server/src/mentions.rs) - Line 145
+- [`packages/entity/src/types/event_content.rs`](../../packages/entity/src/types/event_content.rs) - Line 49
+
+### DEFINITION OF DONE
+
+- Mentions fallback has comprehensive comment explaining intentionality
+- References Matrix spec (MSC3952) and backwards compatibility requirement
+- Event content Unknown variant has detailed documentation
+- Future maintainers won't mistake these for incomplete code
+- Comments clearly distinguish intentional design from bugs/workarounds
 
 ---
 
 ## SUBTASK 3: Add Structured Logging for Error Paths
 
-**Objective**: Ensure all error paths have adequate logging for debugging.
+**Objective**: Ensure all error paths in http_client.rs have adequate logging for debugging.
 
-**Location**: Anywhere InvalidResponse errors are created
+**Location**: [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
 
-**Implementation Pattern**:
+### IMPLEMENTATION PATTERN
 
-For network errors:
+The codebase uses simple tracing macros without target specification. Follow these patterns:
+
+**For parse errors** (already shown in SUBTASK 1):
+```rust
+Err(parse_err) => {
+    tracing::warn!(
+        "Failed to parse error response as Matrix error (status {}): {}",
+        status,
+        parse_err
+    );
+    tracing::debug!("Response body: {}", body);
+    // ... create InvalidResponse error
+}
+```
+
+**For network errors** (add to request() method if not present):
 ```rust
 Err(e) => {
     tracing::error!(
-        target: "matryx_client::http",
-        error = %e,
-        method = %request.method(),
-        url = %request.url(),
-        "HTTP request failed"
+        "HTTP request failed: {} {} - {}",
+        method,
+        url,
+        e
     );
     return Err(HttpClientError::Network(e));
 }
 ```
 
-For parse errors:
-```rust
-Err(parse_err) => {
-    tracing::warn!(
-        target: "matryx_client::http",
-        status = status,
-        parse_error = %parse_err,
-        body_len = body.len(),
-        "Failed to parse response as Matrix error"
-    );
-    tracing::debug!(
-        target: "matryx_client::http",
-        body = %body,
-        "Full response body"
-    );
-    // ... create InvalidResponse error
-}
-```
-
-For timeout errors:
+**For timeout errors** (if timeout handling is added):
 ```rust
 if elapsed > timeout {
     tracing::warn!(
-        target: "matryx_client::http",
-        elapsed_ms = elapsed.as_millis(),
-        timeout_ms = timeout.as_millis(),
-        url = %request.url(),
-        "Request timeout"
+        "Request timeout after {}ms: {} {}",
+        elapsed.as_millis(),
+        method,
+        url
     );
     return Err(HttpClientError::Timeout);
 }
 ```
 
-**Files to Modify**:
-- `packages/client/src/http_client.rs` (all error paths)
+### LOGGING GUIDELINES
 
-**Definition of Done**:
-- All error paths have structured logging
+**Log Levels**:
+- `error!`: Request failures, critical errors
+- `warn!`: Parse failures, retryable errors, timeouts
+- `debug!`: Response bodies, detailed context (can be verbose)
+
+**Security**:
+- NEVER log: access_token, passwords, sensitive headers
+- Truncate large bodies (> 200 chars) at warn/error level
+- Full bodies only at debug level
+
+**Context**:
+- Include: HTTP method, URL, status code, error type
+- For retries: Include attempt number, delay
+- For rate limits: Include retry_after_ms if available
+
+### FILES TO MODIFY
+
+- [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs) - All error paths
+
+### DEFINITION OF DONE
+
+- All error paths in http_client.rs have structured logging
 - Log levels appropriate (error for failures, warn for recoverable, debug for details)
 - Sensitive data (tokens, passwords) not logged
-- Enough context to debug issues in production
-- Body content logged at debug level only (can be large)
+- Response bodies truncated at warn/error, full at debug
+- Enough context to debug production issues
 
 ---
 
 ## SUBTASK 4: Add Error Context Helpers
 
-**Objective**: Create helper functions to add context to errors.
+**Objective**: Create helper methods to check error properties and add context.
 
-**Location**: `packages/client/src/http_client.rs` or `packages/client/src/error.rs`
+**Location**: [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
 
-**Implementation**:
+### IMPLEMENTATION
 
-Add context methods to HttpClientError:
+Add these methods to the HttpClientError impl block (create one if it doesn't exist):
+
 ```rust
 impl HttpClientError {
-    /// Add context about the request that failed
-    pub fn with_request_context(self, method: &str, url: &str) -> Self {
-        match self {
-            HttpClientError::InvalidResponse { status, body, parse_error } => {
-                HttpClientError::InvalidResponse {
-                    status,
-                    body: format!(
-                        "{} (request: {} {})",
-                        body, method, url
-                    ),
-                    parse_error,
-                }
-            }
-            // Pass through other variants unchanged
-            other => other,
-        }
-    }
-
-    /// Check if error is retryable
+    /// Check if error is retryable (network issues, 5xx, rate limits)
     pub fn is_retryable(&self) -> bool {
         match self {
-            HttpClientError::Matrix { errcode, .. } => {
+            HttpClientError::Matrix { status, errcode, .. } => {
                 // Rate limits are retryable, auth errors are not
-                errcode == "M_LIMIT_EXCEEDED"
+                *status >= 500 || errcode == "M_LIMIT_EXCEEDED"
             }
             HttpClientError::Network(_) => true,
-            HttpClientError::Timeout => true,
-            HttpClientError::InvalidResponse { .. } => false,
-            _ => false,
+            HttpClientError::InvalidResponse { status, .. } => {
+                // 5xx server errors might be transient
+                *status >= 500
+            }
+            HttpClientError::AuthenticationRequired => false,
+            HttpClientError::MaxRetriesExceeded => false,
+            HttpClientError::Serialization(_) => false,
+            HttpClientError::InvalidUrl(_) => false,
         }
     }
 
-    /// Get retry delay if applicable
-    pub fn retry_delay(&self) -> Option<Duration> {
+    /// Get retry delay if error is retryable
+    pub fn retry_delay(&self) -> Option<std::time::Duration> {
+        use std::time::Duration;
+        
         match self {
             HttpClientError::Matrix { retry_after_ms: Some(ms), .. } => {
                 Some(Duration::from_millis(*ms))
             }
             HttpClientError::Network(_) => Some(Duration::from_secs(1)),
-            HttpClientError::Timeout => Some(Duration::from_secs(5)),
+            HttpClientError::InvalidResponse { status, .. } if *status >= 500 => {
+                Some(Duration::from_secs(2))
+            }
             _ => None,
+        }
+    }
+
+    /// Get HTTP status code if available
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            HttpClientError::Matrix { status, .. } => Some(*status),
+            HttpClientError::InvalidResponse { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// Check if error is a client error (4xx)
+    pub fn is_client_error(&self) -> bool {
+        match self.status_code() {
+            Some(status) => (400..500).contains(&status),
+            None => false,
+        }
+    }
+
+    /// Check if error is a server error (5xx)
+    pub fn is_server_error(&self) -> bool {
+        match self.status_code() {
+            Some(status) => status >= 500,
+            None => false,
         }
     }
 }
 ```
 
-**Files to Modify**:
-- `packages/client/src/error.rs` (or wherever HttpClientError is defined)
+### FILES TO MODIFY
 
-**Definition of Done**:
-- Helper methods for adding request context
-- Methods to check if error is retryable
-- Methods to get retry delay
-- Documentation on each method
+- [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
+
+### DEFINITION OF DONE
+
+- `is_retryable()` method correctly identifies retryable errors
+- `retry_delay()` returns appropriate delay for retryable errors
+- `status_code()` extracts HTTP status when available
+- `is_client_error()` and `is_server_error()` categorize errors
+- All methods have clear documentation
+- Code compiles without errors
 
 ---
 
 ## CONSTRAINTS
 
-⚠️ **NO TESTS**: Do not write unit tests, integration tests, or test fixtures. Test team handles all testing.
-
-⚠️ **NO BENCHMARKS**: Do not write benchmark code. Performance team handles benchmarking.
-
-⚠️ **FOCUS ON FUNCTIONALITY**: Only modify production code in ./src directories.
+- Do NOT write unit tests, integration tests, or test fixtures
+- Do NOT write benchmark code
+- Do NOT create documentation files (README, etc.)
+- FOCUS ON: Production code changes only
 
 ---
 
 ## DEPENDENCIES
 
-**Rust Crates** (likely already in dependencies):
-- tracing (for structured logging)
-- serde_json (for error parsing)
+**Rust Crates** (already in Cargo.toml):
+- `tracing = "0.1.41"` - Structured logging (already present)
+- `serde_json = "1.0.145"` - JSON parsing (already present)
+- `thiserror = "2.0.17"` - Error derive macros (already present)
 
-**Error Handling Best Practices**:
-- Preserve all error information
-- Add context without losing original error
-- Use appropriate log levels
-- Don't log sensitive data
+**No new dependencies needed** - everything is already available.
 
 ---
 
 ## DEFINITION OF DONE
 
-- [ ] InvalidResponse error variant added to HttpClientError
-- [ ] HTTP client error fallback improved with proper logging
-- [ ] Parse errors logged with full details
-- [ ] Intentional fallbacks (mentions, event content) documented
-- [ ] All error paths have structured logging
-- [ ] Helper methods added for error context and retryability
+- [ ] InvalidResponse error variant added to HttpClientError (http_client.rs lines 18-40)
+- [ ] HTTP client parse_matrix_error improved with proper logging (lines 149-158)
+- [ ] Parse errors logged with full details (warn + debug levels)
+- [ ] Intentional fallback in mentions.rs documented (line 145)
+- [ ] Event content Unknown variant documented (event_content.rs line 49)
+- [ ] All error paths in http_client.rs have structured logging
+- [ ] Helper methods added: is_retryable(), retry_delay(), status_code(), etc.
 - [ ] No information loss from original errors
 - [ ] No compilation errors
-- [ ] No test code written
-- [ ] No benchmark code written
+- [ ] Logging follows codebase style (simple macros, no targets)
 
 ---
 
 ## FILES TO MODIFY
 
-1. `packages/client/src/http_client.rs` (lines 145-156 + error handling throughout)
-2. `packages/client/src/error.rs` (add InvalidResponse variant + helpers)
-3. `packages/server/src/mentions.rs` (line 145 - documentation only)
-4. `packages/entity/src/types/event_content.rs` (line 49 - documentation only)
+1. [`packages/client/src/http_client.rs`](../../packages/client/src/http_client.rs)
+   - Lines 18-40: Add InvalidResponse variant to HttpClientError enum
+   - Lines 149-158: Update parse_matrix_error with logging
+   - Add impl HttpClientError block with helper methods
+   - Add logging to error paths throughout
+
+2. [`packages/server/src/mentions.rs`](../../packages/server/src/mentions.rs)
+   - Line 145: Enhance documentation (comment only, no code changes)
+
+3. [`packages/entity/src/types/event_content.rs`](../../packages/entity/src/types/event_content.rs)
+   - Line 49: Enhance documentation (comment only, no code changes)
 
 ---
 
 ## NOTES
 
-- Error handling is critical for debugging production issues
-- Logging should be structured (key-value pairs) for easy parsing
-- Balance between too much logging (noise) and too little (no debug info)
-- Use tracing crate's structured logging features
-- Response bodies can be large - truncate or log at debug level only
-- This task improves maintainability and debuggability
+**Error Handling Best Practices**:
+- Preserve all error information - never discard parse errors
+- Add context without losing original error
+- Use appropriate log levels (error/warn/debug)
+- Don't log sensitive data (tokens, passwords, etc.)
+- Truncate large bodies in logs to prevent overwhelming output
+
+**Matrix Specification References**:
+- MSC3952: Intentional Mentions - explains m.mentions field behavior
+- Matrix Client-Server API: Defines error response format
+- Extensibility: Matrix allows custom event types and unknown fields
+
+**Implementation Strategy**:
+1. Start with SUBTASK 1 (HTTP client errors) - most impactful
+2. Then SUBTASK 4 (helper methods) - builds on SUBTASK 1
+3. Then SUBTASK 3 (logging) - uses patterns from SUBTASK 1
+4. Finally SUBTASK 2 (documentation) - simple comment updates
+
+**Why This Matters**:
 - Good error messages save hours of debugging time
+- Structured logging enables quick production issue diagnosis
+- Clear documentation prevents future "fixes" to intentional behavior
+- Proper error types enable better error handling in calling code

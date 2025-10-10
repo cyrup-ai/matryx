@@ -1,156 +1,173 @@
 # DEVMSG_1: Implement To-Device Message Subscription
 
-**Status**: Ready for Implementation
-**Priority**: HIGH
-**Estimated Effort**: 1 week
+**Status**: Ready for Implementation  
+**Priority**: HIGH  
+**Estimated Effort**: 2-4 hours (drastically reduced from initial estimate)  
 **Package**: packages/client
 
 ---
 
-## OBJECTIVE
+## EXECUTIVE SUMMARY
 
-Implement to-device message subscription using SurrealDB LIVE queries to enable end-to-end encryption device messaging, key verification, and device-to-device communication.
+**90% OF THIS FEATURE IS ALREADY IMPLEMENTED.** This is a **wiring task**, not a build-from-scratch task.
+
+The ToDeviceRepository has full LIVE query subscription support, database schema exists, and all necessary infrastructure is in place. The work required is:
+1. Add `device_id` field to `ClientRepositoryService`
+2. Wire up the existing repository's `subscribe_to_device_messages()` method
+3. Fix a critical field name mismatch bug
 
 ---
 
-## PROBLEM DESCRIPTION
+## WHAT'S ALREADY DONE
 
-The client service has a TODO marker for to-device message subscription:
+### ✅ ToDeviceRepository Implementation (COMPLETE)
+**Location**: [`packages/surrealdb/src/repository/to_device.rs`](../../packages/surrealdb/src/repository/to_device.rs)
 
-File: `packages/client/src/repositories/client_service.rs:163-168`
+The repository has everything needed:
+- `ToDeviceMessage` struct with all required fields (lines 10-20)
+- `subscribe_to_device_messages()` with LIVE query implementation (lines 412-443)
+- `mark_to_device_messages_delivered()` for acknowledgment (lines 221-247)
+- `get_to_device_messages()` for polling fallback (lines 165-218)
+- Full permission validation logic
+- Error handling and stream processing
+
+### ✅ Database Schema (COMPLETE)
+**Location**: [`packages/surrealdb/migrations/matryx.surql`](../../packages/surrealdb/migrations/matryx.surql) (lines 1655-1673)
+
+Table `to_device_messages` is fully defined with:
+- All required fields (message_id, sender_id, recipient_id, device_id, event_type, content, etc.)
+- Proper permissions (recipient-based access control)
+- Auto-populated timestamps
+- Database event triggers for sync (lines 2294-2307)
+
+### ✅ Service Integration (PARTIAL)
+**Location**: [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
+
+- `ToDeviceRepository` already injected (line 44)
+- Constructor accepts repository (line 75)
+- `subscribe_to_device_messages()` exists but returns empty stream (line 178)
+- TODO comment indicates awaiting repository support (BUT SUPPORT ALREADY EXISTS)
+
+---
+
+## CRITICAL BUG DISCOVERED
+
+### Field Name Mismatch: `event_type` vs `message_type`
+
+**Issue**: The ToDeviceMessage struct uses `event_type` but the database schema defines `message_type`.
+
+**Evidence**:
+- **Struct field** ([`to_device.rs:15`](../../packages/surrealdb/src/repository/to_device.rs#L15)): `pub event_type: String`
+- **Database field** ([`matryx.surql:1669`](../../packages/surrealdb/migrations/matryx.surql#L1669)): `DEFINE FIELD message_type`
+- **Query usage** ([`to_device.rs:135`](../../packages/surrealdb/src/repository/to_device.rs#L135)): Uses `message_type` in INSERT
+
+**Impact**: This mismatch will cause deserialization errors when LIVE queries return data.
+
+**Fix Required**: Standardize on `event_type` (Matrix spec compliant) or add serde rename.
+
+---
+
+## ACTUAL WORK REQUIRED
+
+### TASK 1: Add device_id Field to ClientRepositoryService
+
+**Objective**: Store the device context in the service struct
+
+**File**: [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
+
+**Current Struct** (line 39):
+```rust
+#[derive(Clone)]
+pub struct ClientRepositoryService {
+    event_repo: EventRepository,
+    membership_repo: MembershipRepository,
+    presence_repo: PresenceRepository,
+    device_repo: DeviceRepository,
+    to_device_repo: ToDeviceRepository,
+    user_id: String,
+}
+```
+
+**Required Change**:
+```rust
+#[derive(Clone)]
+pub struct ClientRepositoryService {
+    event_repo: EventRepository,
+    membership_repo: MembershipRepository,
+    presence_repo: PresenceRepository,
+    device_repo: DeviceRepository,
+    to_device_repo: ToDeviceRepository,
+    user_id: String,
+    device_id: String,  // ← ADD THIS
+}
+```
+
+**Update Constructor** (line 48):
+```rust
+pub fn new(
+    event_repo: EventRepository,
+    membership_repo: MembershipRepository,
+    presence_repo: PresenceRepository,
+    device_repo: DeviceRepository,
+    to_device_repo: ToDeviceRepository,
+    user_id: String,
+    device_id: String,  // ← ADD THIS PARAMETER
+) -> Self {
+    Self {
+        event_repo,
+        membership_repo,
+        presence_repo,
+        device_repo,
+        to_device_repo,
+        user_id,
+        device_id,  // ← ADD THIS FIELD
+    }
+}
+```
+
+**Update from_db** (line 66):
+```rust
+pub fn from_db(db: Surreal<Any>, user_id: String, device_id: String) -> Self {
+    let event_repo = EventRepository::new(db.clone());
+    let membership_repo = MembershipRepository::new(db.clone());
+    let presence_repo = PresenceRepository::new(db.clone());
+    let device_repo = DeviceRepository::new(db.clone());
+    let to_device_repo = ToDeviceRepository::new(db);
+
+    Self::new(
+        event_repo, 
+        membership_repo, 
+        presence_repo, 
+        device_repo, 
+        to_device_repo, 
+        user_id, 
+        device_id  // ← ADD THIS ARGUMENT
+    )
+}
+```
+
+---
+
+### TASK 2: Wire Up subscribe_to_device_messages
+
+**Objective**: Replace empty stream with actual repository call
+
+**File**: [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
+
+**Current Implementation** (lines 178-190):
 ```rust
 /// Subscribe to to-device messages for the current user
-// TODO: Implement to-device message subscription
+/// TODO: Implement when ToDeviceRepository has subscription support
 pub async fn subscribe_to_device_messages<'a>(
     &'a self,
 ) -> Result<
     Pin<Box<dyn Stream<Item = Result<ToDeviceMessage, ClientError>> + Send + 'a>>,
-    ClientError
+    ClientError,
 > {
-```
-
-Without this implementation:
-- End-to-end encryption device messaging is non-functional
-- Key verification messages cannot be received
-- Device-to-device communication is broken
-- Cross-device encryption setup fails
-
----
-
-## RESEARCH NOTES
-
-**Matrix Specification**:
-- To-device messages are ephemeral messages sent directly to specific devices
-- Used for E2EE key exchange (m.room_key, m.room_key_request)
-- Used for device verification (m.key.verification.*)
-- Must be delivered exactly once per device
-- Should be deleted after delivery to client
-
-**SurrealDB LIVE Queries**:
-- Real-time subscription to table changes
-- Syntax: `LIVE SELECT * FROM table WHERE condition`
-- Returns a stream of changes
-- Ideal for push-based message delivery
-
-**To-Device Message Flow**:
-1. Server receives to-device message via sync or dedicated endpoint
-2. Server stores in to_device_messages table
-3. Client subscribes to LIVE query filtered by recipient device
-4. Client receives messages in real-time
-5. Client acknowledges delivery, server deletes message
-
----
-
-## SUBTASK 1: Define To-Device Message Schema
-
-**Objective**: Create the database schema and Rust types for to-device messages.
-
-**Location**: `packages/entity/src/types/` (create new file if needed)
-
-**Implementation**:
-
-1. Create `ToDeviceMessage` struct if it doesn't exist:
-```rust
-/// To-device message for device-to-device communication
-///
-/// Used for E2EE key exchange, device verification, and other
-/// device-specific communication per Matrix specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToDeviceMessage {
-    /// Unique message identifier
-    pub message_id: String,
-
-    /// Message sender (user ID)
-    pub sender: String,
-
-    /// Sender's device ID
-    pub sender_device_id: String,
-
-    /// Recipient user ID
-    pub recipient: String,
-
-    /// Recipient device ID
-    pub recipient_device_id: String,
-
-    /// Message type (e.g., "m.room_key", "m.key.verification.request")
-    #[serde(rename = "type")]
-    pub msg_type: String,
-
-    /// Message content (encrypted or plaintext depending on type)
-    pub content: serde_json::Value,
-
-    /// Timestamp when message was created (Unix millis)
-    pub created_at: i64,
-}
-```
-
-2. Add error types to `ClientError` enum if needed:
-```rust
-pub enum ClientError {
-    // ... existing variants ...
-
-    /// Not authenticated (no access token)
-    NotAuthenticated,
-
-    /// Database error during operation
-    DatabaseError(String),
-
-    /// Stream error
-    StreamError(String),
-}
-```
-
-**Files to Create/Modify**:
-- `packages/entity/src/types/to_device.rs` (create if doesn't exist)
-- `packages/entity/src/types/mod.rs` (add module declaration)
-- `packages/client/src/error.rs` (add error variants if needed)
-
-**Definition of Done**:
-- ToDeviceMessage struct defined with all required fields
-- Proper serde annotations for Matrix compatibility
-- ClientError has appropriate variants for this feature
-- Documentation explains the purpose and Matrix spec compliance
-
----
-
-## SUBTASK 2: Implement LIVE Query Subscription
-
-**Objective**: Create the subscription method using SurrealDB LIVE SELECT.
-
-**Location**: `packages/client/src/repositories/client_service.rs`
-
-**Current Stub** (lines 163-175):
-```rust
-/// Subscribe to to-device messages for the current user
-// TODO: Implement to-device message subscription
-pub async fn subscribe_to_device_messages<'a>(
-    &'a self,
-) -> Result<
-    Pin<Box<dyn Stream<Item = Result<ToDeviceMessage, ClientError>> + Send + 'a>>,
-    ClientError
-> {
-    // Placeholder - need LIVE query implementation
-    Err(ClientError::NotImplemented)
+    use futures_util::stream;
+    // Return empty stream until ToDeviceRepository implements subscriptions
+    let stream = stream::empty();
+    Ok(Box::pin(stream))
 }
 ```
 
@@ -158,328 +175,276 @@ pub async fn subscribe_to_device_messages<'a>(
 ```rust
 /// Subscribe to to-device messages for the current user
 ///
-/// Creates a SurrealDB LIVE query that streams new to-device messages
-/// in real-time as they arrive. Messages should be acknowledged and
-/// deleted after successful delivery.
+/// Creates a SurrealDB LIVE query stream for real-time to-device message delivery.
+/// Messages are delivered as they arrive and should be acknowledged after processing.
 ///
 /// # Returns
 /// A stream of to-device messages or errors
 ///
 /// # Errors
-/// - `NotAuthenticated` if no user is logged in
-/// - `DatabaseError` if subscription setup fails
+/// Returns `ClientError` if the subscription cannot be created
 pub async fn subscribe_to_device_messages<'a>(
     &'a self,
 ) -> Result<
     Pin<Box<dyn Stream<Item = Result<ToDeviceMessage, ClientError>> + Send + 'a>>,
-    ClientError
+    ClientError,
 > {
-    // Verify user is authenticated
-    let user_id = self.user_id
-        .as_ref()
-        .ok_or(ClientError::NotAuthenticated)?
-        .clone();
-
-    // Get device ID for this client instance
-    let device_id = self.device_id
-        .as_ref()
-        .ok_or(ClientError::NotAuthenticated)?
-        .clone();
-
     tracing::debug!(
         "Subscribing to to-device messages for user {} device {}",
-        user_id,
-        device_id
+        self.user_id,
+        self.device_id
     );
 
-    // Create LIVE query for this specific device
-    let query = r#"
-        LIVE SELECT * FROM to_device_messages
-        WHERE recipient = $user_id
-        AND recipient_device_id = $device_id
-        ORDER BY created_at ASC
-    "#;
+    // Call the repository's subscription method
+    let stream = self
+        .to_device_repo
+        .subscribe_to_device_messages(&self.user_id, &self.device_id)
+        .await?
+        .map(|result| result.map_err(ClientError::Repository));
 
-    // Execute LIVE query
-    let mut result = self.db
-        .query(query)
-        .bind(("user_id", user_id.clone()))
-        .bind(("device_id", device_id.clone()))
-        .await
-        .map_err(|e| ClientError::DatabaseError(format!("Failed to create LIVE query: {}", e)))?;
-
-    // Get the stream from the query result
-    let stream = result
-        .stream::<ToDeviceMessage>(0)
-        .map_err(|e| ClientError::DatabaseError(format!("Failed to get stream: {}", e)))?;
-
-    // Transform stream to handle errors and filter
-    let filtered_stream = stream.filter_map(move |result| {
-        async move {
-            match result {
-                Ok(notification) => {
-                    // Extract the actual message from the notification
-                    // (LIVE queries return a notification wrapper)
-                    match notification.data {
-                        Some(msg) => Some(Ok(msg)),
-                        None => {
-                            tracing::warn!("LIVE query notification with no data");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Error in to-device message stream: {}", e);
-                    Some(Err(ClientError::StreamError(e.to_string())))
-                }
-            }
-        }
-    });
-
-    Ok(Box::pin(filtered_stream))
+    Ok(Box::pin(stream))
 }
 ```
 
-**Files to Modify**:
-- `packages/client/src/repositories/client_service.rs` (lines 163-175)
-
-**Definition of Done**:
-- TODO comment removed
-- LIVE query properly filters by recipient and device
-- Stream returns actual ToDeviceMessage structs
-- Error handling for database and stream errors
-- Logging for debugging
-- No unwrap() or expect() calls
+**Notes**:
+- Remove the TODO comment
+- The repository method is at [`to_device.rs:412`](../../packages/surrealdb/src/repository/to_device.rs#L412)
+- Error conversion from `RepositoryError` to `ClientError` is handled by `map_err`
+- The repository handles LIVE query setup and stream transformation
 
 ---
 
-## SUBTASK 3: Add Message Acknowledgment Method
+### TASK 3: Add Message Acknowledgment Method (OPTIONAL)
 
-**Objective**: Allow clients to mark messages as delivered so they can be deleted.
+**Objective**: Provide helper for marking messages as delivered
 
-**Location**: `packages/client/src/repositories/client_service.rs`
+**File**: [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
 
-**Implementation**:
-
-Add new method to ClientService:
+**Add After subscribe_to_device_messages**:
 ```rust
-/// Mark a to-device message as delivered and delete it
+/// Mark to-device messages as delivered
 ///
-/// Should be called after successfully processing a to-device message.
-/// The message will be permanently deleted from the server.
+/// Should be called after successfully processing to-device messages.
+/// This allows the server to clean up delivered messages.
 ///
 /// # Arguments
-/// * `message_id` - The ID of the message to acknowledge
+/// * `message_ids` - List of message IDs to acknowledge
 ///
 /// # Errors
-/// - `DatabaseError` if deletion fails
-pub async fn acknowledge_to_device_message(
+/// Returns `ClientError` if the acknowledgment fails
+pub async fn acknowledge_to_device_messages(
     &self,
-    message_id: &str,
+    message_ids: &[String],
 ) -> Result<(), ClientError> {
-    tracing::debug!("Acknowledging to-device message: {}", message_id);
+    tracing::debug!("Acknowledging {} to-device messages", message_ids.len());
 
-    self.db
-        .delete(("to_device_messages", message_id))
-        .await
-        .map_err(|e| ClientError::DatabaseError(format!(
-            "Failed to delete to-device message {}: {}",
-            message_id, e
-        )))?;
-
-    Ok(())
-}
-```
-
-**Files to Modify**:
-- `packages/client/src/repositories/client_service.rs`
-
-**Definition of Done**:
-- Method properly deletes message by ID
-- Error handling with descriptive messages
-- Logging for debugging
-- Documentation explains when to call this method
-
----
-
-## SUBTASK 4: Add Database Table Definition
-
-**Objective**: Ensure the database schema for to_device_messages exists.
-
-**Location**: `packages/surrealdb/migrations/` or schema initialization code
-
-**Schema Definition**:
-```sql
--- To-device messages table for E2EE and device-to-device communication
-DEFINE TABLE to_device_messages SCHEMAFULL;
-
-DEFINE FIELD message_id ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD sender ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD sender_device_id ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD recipient ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD recipient_device_id ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD msg_type ON to_device_messages TYPE string
-    ASSERT $value != NONE AND $value != '';
-
-DEFINE FIELD content ON to_device_messages TYPE object
-    ASSERT $value != NONE;
-
-DEFINE FIELD created_at ON to_device_messages TYPE datetime
-    ASSERT $value != NONE;
-
--- Index for efficient querying by recipient and device
-DEFINE INDEX recipient_device_idx ON to_device_messages
-    FIELDS recipient, recipient_device_id;
-
--- Index for cleanup by timestamp
-DEFINE INDEX created_at_idx ON to_device_messages
-    FIELDS created_at;
-```
-
-**Migration Script** (if using migrations):
-```rust
-// In migration file
-pub async fn up(db: &Surreal<Any>) -> Result<(), Box<dyn std::error::Error>> {
-    db.query(include_str!("create_to_device_messages_table.sql"))
+    self.to_device_repo
+        .mark_to_device_messages_delivered(&self.user_id, &self.device_id, message_ids)
         .await?;
+
     Ok(())
 }
 ```
 
-**Files to Create/Modify**:
-- `packages/surrealdb/migrations/XXX_create_to_device_messages.sql` (create)
-- Or schema initialization code in `packages/surrealdb/src/schema.rs`
-
-**Definition of Done**:
-- Table schema defined with all required fields
-- Indexes created for efficient queries (recipient_device_idx)
-- Field constraints ensure data integrity
-- Schema compatible with SurrealDB LIVE queries
+**Why Optional**: The repository method already exists and works. This is just a convenience wrapper.
 
 ---
 
-## SUBTASK 5: Update ClientService Struct Fields
+### TASK 4: Fix Field Name Mismatch
 
-**Objective**: Ensure ClientService has the required fields (device_id).
+**Objective**: Resolve `event_type` vs `message_type` inconsistency
 
-**Location**: `packages/client/src/repositories/client_service.rs`
+**Option A**: Rename database field (requires migration)
+**Option B**: Add serde rename to struct (simple, no migration)
 
-**Verify/Add Fields**:
+**Recommended: Option B**
+
+**File**: [`packages/surrealdb/src/repository/to_device.rs`](../../packages/surrealdb/src/repository/to_device.rs)
+
+**Change** (line 14):
 ```rust
-pub struct ClientService {
-    db: Surreal<Any>,
-    user_id: Option<String>,
-    device_id: Option<String>,  // ← Verify this exists
-    // ... other fields
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToDeviceMessage {
+    pub message_id: String,
+    pub sender_id: String,
+    pub recipient_id: String,
+    pub device_id: String,
+    #[serde(rename = "message_type")]  // ← ADD THIS to match DB schema
+    pub event_type: String,
+    pub content: Value,
+    pub txn_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub is_delivered: bool,
 }
 ```
 
-If device_id doesn't exist:
-1. Add to struct definition
-2. Update constructor to accept/generate device_id
-3. Update login/authentication methods to set device_id
+**Why**: Database schema uses `message_type`, but Matrix spec uses `event_type`. The serde rename bridges this gap.
 
-**Implementation** (if needed):
-```rust
-impl ClientService {
-    pub fn new(db: Surreal<Any>) -> Self {
-        Self {
-            db,
-            user_id: None,
-            device_id: None,
-        }
-    }
+---
 
-    pub fn set_device_id(&mut self, device_id: String) {
-        self.device_id = Some(device_id);
-    }
+## ARCHITECTURE NOTES
 
-    pub fn device_id(&self) -> Option<&str> {
-        self.device_id.as_deref()
-    }
-}
+### Two ToDeviceMessage Types (This is Correct)
+
+1. **Entity Type**: [`packages/entity/src/types/to_device_message.rs`](../../packages/entity/src/types/to_device_message.rs)
+   - Used for Matrix API requests/responses
+   - Contains `HashMap<String, HashMap<String, EventContent>>`
+   - Represents the `/sendToDevice` API format
+
+2. **Repository Type**: [`packages/surrealdb/src/repository/to_device.rs`](../../packages/surrealdb/src/repository/to_device.rs)
+   - Used for database storage and subscriptions
+   - Represents individual stored messages
+   - Used by LIVE queries and sync operations
+
+**They serve different purposes and both are needed.**
+
+### How LIVE Queries Work
+
+The repository's `subscribe_to_device_messages()` uses SurrealDB's LIVE SELECT:
+```sql
+LIVE SELECT * FROM to_device_messages 
+WHERE recipient_id = $user_id 
+  AND device_id = $device_id 
+  AND is_delivered = false
 ```
 
-**Files to Modify**:
-- `packages/client/src/repositories/client_service.rs`
+This returns a stream that:
+1. Delivers all existing undelivered messages immediately
+2. Pushes new messages as they arrive in real-time
+3. Continues until the client disconnects or cancels
 
-**Definition of Done**:
-- device_id field exists in ClientService struct
-- Getter method for device_id
-- Setter method or constructor parameter for device_id
-- device_id is set during authentication/login
+**Reference**: [`to_device.rs:420-427`](../../packages/surrealdb/src/repository/to_device.rs#L420)
 
----
+### Message Flow
 
-## CONSTRAINTS
-
-⚠️ **NO TESTS**: Do not write unit tests, integration tests, or test fixtures. Test team handles all testing.
-
-⚠️ **NO BENCHMARKS**: Do not write benchmark code. Performance team handles benchmarking.
-
-⚠️ **FOCUS ON FUNCTIONALITY**: Only modify production code in ./src directories.
-
----
-
-## DEPENDENCIES
-
-**SurrealDB**:
-- LIVE SELECT query support (available in SurrealDB 1.0+)
-- Stream API for real-time results
-
-**Matrix Specification**:
-- Clone: https://github.com/matrix-org/matrix-spec
-- Section: Client-Server API - To-Device Messaging
-- Message types: m.room_key, m.room_key_request, m.key.verification.*
-
-**Rust Crates**:
-- futures (for Stream trait)
-- tokio-stream (for stream utilities)
+```
+┌─────────────┐                 ┌──────────────┐                ┌─────────────────┐
+│   Server    │                 │  SurrealDB   │                │     Client      │
+│     API     │                 │   Database   │                │    Service      │
+└──────┬──────┘                 └──────┬───────┘                └────────┬────────┘
+       │                                │                                 │
+       │  INSERT to_device_messages     │                                 │
+       │───────────────────────────────>│                                 │
+       │                                │                                 │
+       │                                │  LIVE query notification        │
+       │                                │────────────────────────────────>│
+       │                                │                                 │
+       │                                │  Client processes message       │
+       │                                │                                 │
+       │                                │  acknowledge_to_device_messages │
+       │                                │<────────────────────────────────│
+       │                                │                                 │
+       │  UPDATE is_delivered = true    │                                 │
+       │───────────────────────────────>│                                 │
+```
 
 ---
 
 ## DEFINITION OF DONE
 
-- [ ] ToDeviceMessage struct defined with all Matrix-required fields
-- [ ] subscribe_to_device_messages() fully implemented with LIVE query
-- [ ] TODO comment removed from client_service.rs
-- [ ] acknowledge_to_device_message() method added
-- [ ] Database schema created for to_device_messages table
-- [ ] Indexes created for efficient querying
-- [ ] ClientService has device_id field
-- [ ] Error handling for all failure cases
-- [ ] Logging for debugging
+- [x] ToDeviceRepository exists with LIVE query support (ALREADY DONE)
+- [x] Database schema created (ALREADY DONE)
+- [ ] `device_id` field added to `ClientRepositoryService`
+- [ ] Constructors updated to accept `device_id`
+- [ ] `subscribe_to_device_messages()` wired to repository
+- [ ] TODO comment removed
+- [ ] Field name mismatch resolved with serde rename
+- [ ] Optional: Acknowledgment helper method added
 - [ ] No compilation errors
-- [ ] No test code written
-- [ ] No benchmark code written
+- [ ] Code compiles and type-checks
 
 ---
 
 ## FILES TO MODIFY
 
-1. `packages/entity/src/types/to_device.rs` (create)
-2. `packages/entity/src/types/mod.rs` (add module)
-3. `packages/client/src/repositories/client_service.rs` (lines 163-175 + new method)
-4. `packages/client/src/error.rs` (add error variants if needed)
-5. `packages/surrealdb/migrations/XXX_create_to_device_messages.sql` (create)
+**Primary Changes**:
+1. [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
+   - Lines 39-64: Add `device_id` field, update constructors
+   - Lines 178-190: Replace empty stream with repository call
+   - Add acknowledgment method after line 190
+
+**Bug Fix**:
+2. [`packages/surrealdb/src/repository/to_device.rs`](../../packages/surrealdb/src/repository/to_device.rs)
+   - Line 14: Add `#[serde(rename = "message_type")]` to `event_type` field
+
+**No New Files Required** - Everything already exists!
+
+---
+
+## REFERENCES
+
+### Existing Code
+- **ToDeviceRepository**: [`packages/surrealdb/src/repository/to_device.rs`](../../packages/surrealdb/src/repository/to_device.rs)
+- **ClientRepositoryService**: [`packages/client/src/repositories/client_service.rs`](../../packages/client/src/repositories/client_service.rs)
+- **Database Schema**: [`packages/surrealdb/migrations/matryx.surql:1655-1673`](../../packages/surrealdb/migrations/matryx.surql)
+- **Entity Type**: [`packages/entity/src/types/to_device_message.rs`](../../packages/entity/src/types/to_device_message.rs)
+
+### Matrix Specification
+- **To-Device Messaging**: Matrix Client-Server API, Section on End-to-End Encryption
+- **Message Types**: `m.room_key`, `m.room_key_request`, `m.key.verification.*`
+- **Delivery**: Messages must be delivered exactly once per device and deleted after acknowledgment
+
+### SurrealDB Documentation
+- **LIVE SELECT**: Real-time query subscriptions
+- **Streams**: Async stream processing with futures
 
 ---
 
 ## NOTES
 
-- To-device messages are ephemeral - delete after delivery
-- LIVE queries provide push-based delivery (better than polling)
-- Messages must be device-specific (not just user-specific)
-- Consider adding message expiration (auto-delete after N hours)
-- This is critical for E2EE functionality
-- Stream must be long-lived - client keeps subscription open
+### Why This Task Looked Bigger Than It Is
+
+The original task specification was written without knowledge that:
+1. ToDeviceRepository was already fully implemented
+2. Database schema was already created
+3. Service integration was 90% complete
+4. Only wiring was needed, not building
+
+### Why 2-4 Hours (Not 1 Week)
+
+The work is:
+- Add 1 field to a struct
+- Update 2 constructors
+- Replace 3 lines in one method
+- Add 1 serde annotation
+- Optional: Add 1 helper method
+
+This is a **small wiring task**, not a feature implementation.
+
+### Critical Success Factor
+
+**Fix the field name mismatch** or the LIVE query will fail to deserialize messages, making the entire subscription non-functional.
+
+---
+
+## EXAMPLE USAGE
+
+After implementation, clients can subscribe like this:
+
+```rust
+let service = ClientRepositoryService::from_db(
+    db, 
+    "@alice:example.com".to_string(),
+    "DEVICEABC123".to_string()  // ← Now required
+);
+
+// Subscribe to messages
+let mut stream = service.subscribe_to_device_messages().await?;
+
+// Process messages as they arrive
+while let Some(result) = stream.next().await {
+    match result {
+        Ok(message) => {
+            println!("Received: {} from {}", message.event_type, message.sender_id);
+            
+            // Process the message (e.g., decrypt, handle key exchange)
+            handle_message(&message).await?;
+            
+            // Acknowledge delivery
+            service.acknowledge_to_device_messages(&[message.message_id]).await?;
+        }
+        Err(e) => eprintln!("Stream error: {}", e),
+    }
+}
+```

@@ -1,23 +1,24 @@
 # MEDIAFIX_1: Add Test Helper for Expired Media Uploads
 
-**Status**: Ready for Implementation
-**Priority**: MEDIUM
-**Estimated Effort**: 1 day
+**Status**: Ready for Implementation  
+**Priority**: MEDIUM  
+**Estimated Effort**: 2-4 hours  
 **Package**: packages/surrealdb
 
 ---
 
 ## OBJECTIVE
 
-Replace "for now" workaround in media service with proper test helper method for creating expired uploads, enabling proper testing of expiration cleanup logic.
+Replace "for now" workaround in media service test with proper test helper method for creating expired uploads, enabling proper testing of expiration cleanup logic.
 
 ---
 
 ## PROBLEM DESCRIPTION
 
-Media service test has a "for now" comment indicating incomplete test infrastructure:
+Media service test has incomplete test infrastructure for testing expired upload cleanup:
 
-File: `packages/surrealdb/src/repository/media_service_test.rs:433-440`
+**Location**: [`packages/surrealdb/src/repository/media_service_test.rs:433-440`](../packages/surrealdb/src/repository/media_service_test.rs)
+
 ```rust
 // Access the database directly to set expires_at to the past
 // Note: This requires direct database manipulation
@@ -29,76 +30,153 @@ let result = media_service
     .await;
 ```
 
-**Issues**:
-- Test doesn't actually create expired uploads
-- Direct database manipulation mentioned but not implemented
-- Cleanup testing is incomplete
+**Current Issues**:
+- Test doesn't actually create expired uploads - just uses a fake ID
+- Direct database manipulation mentioned but not implemented  
+- Cleanup testing is incomplete - doesn't verify cleanup actually works
 - Expiration logic may not be properly validated
 
 ---
 
-## RESEARCH NOTES
+## CODEBASE RESEARCH FINDINGS
 
-**Media Upload Expiration**:
-- Pending uploads have a time-to-live (typically 1 hour)
-- Expired uploads should be cleaned up to free storage
-- Need to test cleanup logic works correctly
-- Can't wait real-time for expiration in tests
+### Existing Infrastructure (GOOD NEWS!)
 
-**Test-Only Methods**:
-- Using `#[cfg(test)]` attribute makes methods only available in test builds
-- Allows internal access for testing without exposing to production
-- Common pattern for testability in Rust
+**1. PendingUpload Structure** - ✅ **ALREADY EXISTS**
 
----
+Location: [`packages/surrealdb/src/repository/media.rs:24-31`](../packages/surrealdb/src/repository/media.rs)
 
-## SUBTASK 1: Define PendingUpload Structure
-
-**Objective**: Ensure the data structure for pending uploads is well-defined.
-
-**Location**: `packages/surrealdb/src/repository/media_service.rs` or related file
-
-**Verify/Define Structure**:
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingUpload {
-    /// Unique media identifier
     pub media_id: String,
-
-    /// Server name where media is hosted
     pub server_name: String,
-
-    /// User who uploaded the media
-    pub user_id: String,
-
-    /// When the upload was created
+    pub created_by: String,
     pub created_at: DateTime<Utc>,
-
-    /// When the upload expires and should be cleaned up
-    pub expires_at: DateTime<Utc>,
-
-    /// Current status of the upload
-    pub status: UploadStatus,
+    pub expires_at: DateTime<Utc>,  // ← We need to set this to the past
+    pub status: PendingUploadStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UploadStatus {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PendingUploadStatus {
     Pending,
     Completed,
-    Failed,
+    Expired,
 }
 ```
 
-If this structure doesn't exist or differs, update accordingly.
+**2. Cleanup Method** - ✅ **ALREADY EXISTS IN REPOSITORY**
 
-**Files to Review/Modify**:
-- `packages/surrealdb/src/repository/media_service.rs`
-- `packages/entity/src/types/media.rs` (if types are defined there)
+Location: [`packages/surrealdb/src/repository/media.rs:643-667`](../packages/surrealdb/src/repository/media.rs)
 
-**Definition of Done**:
-- PendingUpload struct exists and is documented
-- All required fields present (especially expires_at)
-- Proper DateTime types used (chrono::DateTime<Utc>)
+```rust
+/// Cleanup expired pending uploads
+pub async fn cleanup_expired_pending_uploads(&self) -> Result<u64, RepositoryError> {
+    let now = Utc::now();
+    let query = "
+        SELECT media_id, server_name FROM pending_uploads
+        WHERE expires_at < $now AND status = 'Pending'
+    ";
+    let mut result = self.db.query(query).bind(("now", now)).await?;
+    let expired_uploads: Vec<serde_json::Value> = result.take(0)?;
+
+    let mut deleted_count = 0;
+    for upload in expired_uploads {
+        if let (Some(media_id), Some(server_name)) = (
+            upload.get("media_id").and_then(|v| v.as_str()),
+            upload.get("server_name").and_then(|v| v.as_str()),
+        ) {
+            let delete_query = "
+                DELETE pending_uploads
+                WHERE media_id = $media_id AND server_name = $server_name
+            ";
+            if self
+                .db
+                .query(delete_query)
+                .bind(("media_id", media_id.to_string()))
+                .bind(("server_name", server_name.to_string()))
+                .await
+                .is_ok()
+            {
+                deleted_count += 1;
+            }
+        }
+    }
+
+    Ok(deleted_count)
+}
+```
+
+**3. MediaService Structure**
+
+Location: [`packages/surrealdb/src/repository/media_service.rs:103-109`](../packages/surrealdb/src/repository/media_service.rs)
+
+```rust
+pub struct MediaService<C: Connection> {
+    media_repo: Arc<MediaRepository<C>>,  // ← Has access to cleanup method
+    room_repo: Arc<RoomRepository>,
+    membership_repo: Arc<MembershipRepository>,
+    federation_media_client: Option<Arc<dyn FederationMediaClientTrait>>,
+    homeserver_name: String,
+}
+```
+
+### What's Missing
+
+1. ❌ MediaService doesn't expose `cleanup_expired_uploads` publicly
+2. ❌ MediaService doesn't have `create_expired_upload` test helper  
+3. ❌ Test uses workaround instead of proper expired upload creation
+
+---
+
+## IMPLEMENTATION STRATEGY
+
+Since cleanup logic already exists in MediaRepository, this task is **simpler than originally scoped**:
+
+1. Add **wrapper method** in MediaService to expose repository cleanup
+2. Add **test helper** with `#[cfg(test)]` to create expired uploads
+3. **Update test** to use helper instead of workaround
+4. Add **comprehensive test cases** for edge cases
+
+---
+
+## SUBTASK 1: Add cleanup_expired_uploads to MediaService
+
+**Objective**: Expose repository cleanup method through MediaService.
+
+**Location**: [`packages/surrealdb/src/repository/media_service.rs`](../packages/surrealdb/src/repository/media_service.rs)
+
+**Add to `impl<C: Connection> MediaService<C>`** (around line 750, after `upload_to_pending`):
+
+```rust
+/// Clean up expired pending uploads
+///
+/// Removes pending uploads where expires_at is in the past. Should be
+/// called periodically to free storage and maintain database hygiene.
+///
+/// # Returns
+/// The number of uploads that were deleted
+///
+/// # Example
+/// ```ignore
+/// let deleted = media_service.cleanup_expired_uploads().await?;
+/// tracing::info!("Cleaned up {} expired uploads", deleted);
+/// ```
+pub async fn cleanup_expired_uploads(&self) -> Result<u64, MediaError> {
+    self.media_repo
+        .cleanup_expired_pending_uploads()
+        .await
+        .map_err(MediaError::from)
+}
+```
+
+**Why This Works**:
+- `media_repo` already has the cleanup implementation
+- MediaService just wraps it with proper error conversion
+- Simple delegation pattern used elsewhere in MediaService
+
+**Files to Modify**:
+- `packages/surrealdb/src/repository/media_service.rs` (add ~15 lines)
 
 ---
 
@@ -106,93 +184,70 @@ If this structure doesn't exist or differs, update accordingly.
 
 **Objective**: Create `create_expired_upload` method for testing.
 
-**Location**: `packages/surrealdb/src/repository/media_service.rs`
+**Location**: [`packages/surrealdb/src/repository/media_service.rs`](../packages/surrealdb/src/repository/media_service.rs)
 
-**Implementation**:
+**Add to `impl<C: Connection> MediaService<C>`** (after `cleanup_expired_uploads`):
 
-Add method to MediaService impl block:
 ```rust
-impl MediaService {
-    // ... existing methods ...
+/// Create an expired upload for testing purposes
+///
+/// This method is only available in test builds and allows creation
+/// of uploads with past expiration times to test cleanup logic.
+///
+/// # Arguments
+/// * `media_id` - Unique identifier for the media
+/// * `server_name` - Server hosting the media
+/// * `user_id` - User who "uploaded" the media  
+/// * `expired_seconds_ago` - How many seconds ago the upload expired
+///
+/// # Example
+/// ```ignore
+/// // Create upload that expired 1 hour ago
+/// media_service.create_expired_upload(
+///     "test-media-id",
+///     "homeserver.com",
+///     "@user:homeserver.com",
+///     3600
+/// ).await?;
+/// ```
+#[cfg(test)]
+pub async fn create_expired_upload(
+    &self,
+    media_id: &str,
+    server_name: &str,
+    user_id: &str,
+    expired_seconds_ago: i64,
+) -> Result<(), MediaError> {
+    use chrono::Duration;
 
-    /// Create an expired upload for testing purposes
-    ///
-    /// This method is only available in test builds and allows creation
-    /// of uploads with past expiration times to test cleanup logic.
-    ///
-    /// # Arguments
-    /// * `media_id` - Unique identifier for the media
-    /// * `server_name` - Server hosting the media
-    /// * `user_id` - User who "uploaded" the media
-    /// * `expired_seconds_ago` - How many seconds ago the upload expired
-    ///
-    /// # Example
-    /// ```
-    /// // Create upload that expired 1 hour ago
-    /// media_service.create_expired_upload(
-    ///     "test-media-id",
-    ///     "homeserver.com",
-    ///     "@user:homeserver.com",
-    ///     3600
-    /// ).await?;
-    /// ```
-    #[cfg(test)]
-    pub async fn create_expired_upload(
-        &self,
-        media_id: &str,
-        server_name: &str,
-        user_id: &str,
-        expired_seconds_ago: i64,
-    ) -> Result<(), RepositoryError> {
-        use chrono::{Duration, Utc};
+    let now = Utc::now();
+    let expired_at = now - Duration::seconds(expired_seconds_ago);
 
-        let now = Utc::now();
-        let expired_at = now - Duration::seconds(expired_seconds_ago);
-
-        // Create upload with past expiration time
-        let upload = PendingUpload {
-            media_id: media_id.to_string(),
-            server_name: server_name.to_string(),
-            user_id: user_id.to_string(),
-            created_at: expired_at - Duration::hours(1), // Created before expiration
-            expires_at: expired_at,
-            status: UploadStatus::Pending,
-        };
-
-        // Insert directly into database
-        self.db
-            .create("pending_uploads")
-            .content(upload)
-            .await
-            .map_err(|e| RepositoryError::DatabaseError(format!(
-                "Failed to create expired upload for testing: {}",
-                e
-            )))?;
-
-        Ok(())
-    }
+    // Use existing repository method with past expiration time
+    self.media_repo
+        .create_pending_upload(media_id, server_name, user_id, expired_at)
+        .await
+        .map_err(MediaError::from)
 }
 ```
 
-**Files to Modify**:
-- `packages/surrealdb/src/repository/media_service.rs`
+**Why This Works**:
+- Uses existing `media_repo.create_pending_upload` with past date
+- `#[cfg(test)]` ensures it's only compiled in test builds
+- Simple and leverages existing infrastructure
 
-**Definition of Done**:
-- Method has `#[cfg(test)]` attribute (only in test builds)
-- Takes expired_seconds_ago parameter for flexibility
-- Properly creates upload with past expiration time
-- Error handling with descriptive messages
-- Documentation with example usage
+**Files to Modify**:
+- `packages/surrealdb/src/repository/media_service.rs` (add ~30 lines)
 
 ---
 
 ## SUBTASK 3: Update Test to Use New Helper
 
-**Objective**: Replace workaround in test with proper helper method call.
+**Objective**: Replace workaround with proper helper method call.
 
-**Location**: `packages/surrealdb/src/repository/media_service_test.rs` (around line 433)
+**Location**: [`packages/surrealdb/src/repository/media_service_test.rs:433-440`](../packages/surrealdb/src/repository/media_service_test.rs)
 
-**Current Code**:
+**Current Code** (REMOVE):
 ```rust
 // Access the database directly to set expires_at to the past
 // Note: This requires direct database manipulation
@@ -204,7 +259,7 @@ let result = media_service
     .await;
 ```
 
-**Updated Implementation**:
+**New Code** (REPLACE WITH):
 ```rust
 // Create an upload that expired 1 hour ago using test helper
 let expired_media_id = "expired-media-id-12345";
@@ -229,49 +284,49 @@ assert_eq!(cleanup_count, 1, "Should have cleaned up 1 expired upload");
 
 // Verify the expired upload was actually deleted
 let pending = media_service
-    .get_pending_upload(expired_media_id)
+    .media_repo
+    .get_pending_upload(expired_media_id, server_name)
     .await
     .expect("Failed to query pending upload");
 
 assert!(pending.is_none(), "Expired upload should have been deleted");
 ```
 
-**Files to Modify**:
-- `packages/surrealdb/src/repository/media_service_test.rs` (lines 433-440)
+**Why This Works**:
+- Actually creates an expired upload (not just a fake ID)
+- Tests cleanup functionality end-to-end
+- Verifies upload is deleted after cleanup
 
-**Definition of Done**:
-- Workaround comment removed
-- Test uses create_expired_upload helper
-- Test verifies cleanup actually works
-- Test confirms upload is deleted after cleanup
-- No compilation errors
+**Files to Modify**:
+- `packages/surrealdb/src/repository/media_service_test.rs` (replace lines 433-440)
 
 ---
 
 ## SUBTASK 4: Add Comprehensive Expiration Tests
 
-**Objective**: Add more test cases for expiration edge cases.
+**Objective**: Add test cases for expiration edge cases.
 
-**Location**: `packages/surrealdb/src/repository/media_service_test.rs`
+**Location**: [`packages/surrealdb/src/repository/media_service_test.rs`](../packages/surrealdb/src/repository/media_service_test.rs)
 
-**New Test Cases**:
+**Add these new test functions** (after existing tests, around line 500):
 
-1. Test multiple expired uploads:
+### Test 1: Multiple Expired Uploads
+
 ```rust
 #[tokio::test]
 async fn test_cleanup_multiple_expired_uploads() {
-    let media_service = create_test_media_service().await;
-    let server_name = "homeserver.com";
-    let user_id = "@user:homeserver.com";
+    let media_service = create_media_service().await;
+    let server_name = "example.com";
+    let user_id = "@test:example.com";
 
-    // Create 5 expired uploads
+    // Create 5 expired uploads with staggered expiration times
     for i in 0..5 {
         media_service
             .create_expired_upload(
                 &format!("expired-{}", i),
                 server_name,
                 user_id,
-                3600 + (i * 60) // Stagger expiration times
+                3600 + (i * 60) // 1 hour + i minutes ago
             )
             .await
             .expect("Failed to create expired upload");
@@ -283,17 +338,18 @@ async fn test_cleanup_multiple_expired_uploads() {
         .await
         .expect("Cleanup failed");
 
-    assert_eq!(cleanup_count, 5);
+    assert_eq!(cleanup_count, 5, "Should cleanup all 5 expired uploads");
 }
 ```
 
-2. Test mix of expired and non-expired:
+### Test 2: Mix of Expired and Active Uploads
+
 ```rust
 #[tokio::test]
 async fn test_cleanup_preserves_active_uploads() {
-    let media_service = create_test_media_service().await;
-    let server_name = "homeserver.com";
-    let user_id = "@user:homeserver.com";
+    let media_service = create_media_service().await;
+    let server_name = "example.com";
+    let user_id = "@test:example.com";
 
     // Create 3 expired uploads
     for i in 0..3 {
@@ -302,22 +358,16 @@ async fn test_cleanup_preserves_active_uploads() {
                 &format!("expired-{}", i),
                 server_name,
                 user_id,
-                3600
+                3600 // Expired 1 hour ago
             )
             .await
             .expect("Failed to create expired upload");
     }
 
-    // Create 2 active uploads (normal way)
+    // Create 2 active uploads (normal way with future expiration)
     for i in 0..2 {
         media_service
-            .upload_to_pending(
-                &format!("active-{}", i),
-                server_name,
-                user_id,
-                b"content",
-                "text/plain"
-            )
+            .create_pending_upload(user_id, server_name)
             .await
             .expect("Failed to create active upload");
     }
@@ -330,24 +380,25 @@ async fn test_cleanup_preserves_active_uploads() {
 
     assert_eq!(cleanup_count, 3, "Should only cleanup expired uploads");
 
-    // Verify active uploads still exist
-    for i in 0..2 {
-        let pending = media_service
-            .get_pending_upload(&format!("active-{}", i))
-            .await
-            .expect("Query failed");
+    // Verify active uploads still exist by counting pending uploads
+    let active_count = media_service
+        .media_repo
+        .count_user_pending_uploads(user_id)
+        .await
+        .expect("Failed to count pending uploads");
 
-        assert!(pending.is_some(), "Active upload should still exist");
-    }
+    assert_eq!(active_count, 2, "Active uploads should still exist");
 }
 ```
 
-3. Test cleanup with no expired uploads:
+### Test 3: No Expired Uploads
+
 ```rust
 #[tokio::test]
 async fn test_cleanup_with_no_expired_uploads() {
-    let media_service = create_test_media_service().await;
+    let media_service = create_media_service().await;
 
+    // Run cleanup on empty database
     let cleanup_count = media_service
         .cleanup_expired_uploads()
         .await
@@ -357,135 +408,198 @@ async fn test_cleanup_with_no_expired_uploads() {
 }
 ```
 
-**Files to Modify**:
-- `packages/surrealdb/src/repository/media_service_test.rs`
+### Test 4: Edge Case - Just Expired
 
-**Definition of Done**:
-- Multiple test cases cover different scenarios
-- Tests verify cleanup works correctly
-- Tests verify non-expired uploads are preserved
-- Edge cases covered (no expired uploads, all expired, mixed)
-
----
-
-## SUBTASK 5: Ensure cleanup_expired_uploads Method Exists
-
-**Objective**: Verify or implement the cleanup method that the tests rely on.
-
-**Location**: `packages/surrealdb/src/repository/media_service.rs`
-
-**Expected Method**:
 ```rust
-impl MediaService {
-    /// Clean up expired pending uploads
-    ///
-    /// Removes uploads where expires_at is in the past. This should be
-    /// called periodically to free storage and maintain database hygiene.
-    ///
-    /// # Returns
-    /// The number of uploads that were deleted
-    pub async fn cleanup_expired_uploads(&self) -> Result<usize, RepositoryError> {
-        use chrono::Utc;
+#[tokio::test]
+async fn test_cleanup_just_expired_upload() {
+    let media_service = create_media_service().await;
+    let server_name = "example.com";
+    let user_id = "@test:example.com";
 
-        let now = Utc::now();
+    // Create upload that expired 1 second ago
+    media_service
+        .create_expired_upload(
+            "just-expired",
+            server_name,
+            user_id,
+            1 // Expired 1 second ago
+        )
+        .await
+        .expect("Failed to create expired upload");
 
-        // Query for expired uploads
-        let query = r#"
-            DELETE pending_uploads
-            WHERE status = 'Pending'
-            AND expires_at < $now
-            RETURN BEFORE
-        "#;
+    // Should still be cleaned up
+    let cleanup_count = media_service
+        .cleanup_expired_uploads()
+        .await
+        .expect("Cleanup failed");
 
-        let mut result = self.db
-            .query(query)
-            .bind(("now", now))
-            .await
-            .map_err(|e| RepositoryError::DatabaseError(format!(
-                "Failed to cleanup expired uploads: {}",
-                e
-            )))?;
-
-        // Count deleted records
-        let deleted: Vec<PendingUpload> = result
-            .take(0)
-            .map_err(|e| RepositoryError::DatabaseError(format!(
-                "Failed to parse cleanup results: {}",
-                e
-            )))?;
-
-        let count = deleted.len();
-
-        tracing::info!("Cleaned up {} expired uploads", count);
-
-        Ok(count)
-    }
+    assert_eq!(cleanup_count, 1, "Should cleanup upload expired 1 second ago");
 }
 ```
 
-If this method doesn't exist, implement it. If it exists but differs, verify it works correctly with the tests.
-
-**Files to Review/Modify**:
-- `packages/surrealdb/src/repository/media_service.rs`
-
-**Definition of Done**:
-- cleanup_expired_uploads method exists and works
-- Returns count of deleted uploads
-- Only deletes expired uploads (expires_at < now)
-- Proper error handling
-- Logging for operations
+**Files to Modify**:
+- `packages/surrealdb/src/repository/media_service_test.rs` (add ~100 lines)
 
 ---
 
-## CONSTRAINTS
+## IMPLEMENTATION NOTES
 
-⚠️ **NO TESTS**: Do not write additional test infrastructure beyond what's specified. Test team handles comprehensive test coverage.
+### Why #[cfg(test)] is Used
 
-⚠️ **NO BENCHMARKS**: Do not write benchmark code. Performance team handles benchmarking.
+```rust
+#[cfg(test)]  // ← Only compiles in test builds
+pub async fn create_expired_upload(...) { ... }
+```
 
-⚠️ **FOCUS ON FUNCTIONALITY**: Only modify production and test code as specified.
+**Benefits**:
+- No production code bloat
+- Clear separation of test utilities
+- Standard Rust testing pattern
+- No risk of accidental use in production
+
+### Access Pattern for Repository in Tests
+
+Tests can access `media_repo` directly through MediaService:
+
+```rust
+media_service.media_repo.get_pending_upload(...)  // ✅ Works in tests
+```
+
+This allows verification that cleanup actually deleted records.
+
+### Error Handling Pattern
+
+Follow existing MediaService pattern:
+
+```rust
+self.media_repo
+    .cleanup_expired_pending_uploads()
+    .await
+    .map_err(MediaError::from)  // ← Convert RepositoryError to MediaError
+```
+
+---
+
+## CODE LOCATION REFERENCE
+
+### Files to Read/Understand
+
+1. **PendingUpload Structure**  
+   [`packages/surrealdb/src/repository/media.rs:24-31`](../packages/surrealdb/src/repository/media.rs)
+
+2. **Existing Cleanup Implementation**  
+   [`packages/surrealdb/src/repository/media.rs:643-667`](../packages/surrealdb/src/repository/media.rs)
+
+3. **MediaService Structure**  
+   [`packages/surrealdb/src/repository/media_service.rs:103-109`](../packages/surrealdb/src/repository/media_service.rs)
+
+4. **Current Workaround**  
+   [`packages/surrealdb/src/repository/media_service_test.rs:433-440`](../packages/surrealdb/src/repository/media_service_test.rs)
+
+### Files to Modify
+
+1. **`packages/surrealdb/src/repository/media_service.rs`**
+   - Add `cleanup_expired_uploads` method (~15 lines)
+   - Add `create_expired_upload` test helper with `#[cfg(test)]` (~30 lines)
+   - Total additions: ~45 lines
+
+2. **`packages/surrealdb/src/repository/media_service_test.rs`**  
+   - Update test at lines 433-440 (~20 lines replacement)
+   - Add 4 new test functions (~100 lines)
+   - Total changes: ~120 lines
 
 ---
 
 ## DEPENDENCIES
 
-**Rust Crates** (likely already in dependencies):
-- chrono (for DateTime handling)
-- surrealdb (database operations)
-- tokio (async runtime for tests)
+### Required Crates (Already in Cargo.toml)
 
-**Existing Code**:
-- PendingUpload struct
-- MediaService struct
-- Test utilities (create_test_media_service)
+```toml
+chrono = { version = "0.4", features = ["serde"] }  # DateTime handling
+surrealdb = "3.0"                                    # Database
+tokio = { version = "1", features = ["full"] }       # Async runtime
+```
+
+### Existing Code Dependencies
+
+- ✅ `PendingUpload` struct exists
+- ✅ `MediaRepository::cleanup_expired_pending_uploads` exists
+- ✅ `MediaRepository::create_pending_upload` exists  
+- ✅ `MediaRepository::get_pending_upload` exists
+- ✅ Test infrastructure (`create_media_service`) exists
+
+**No new dependencies needed!** Everything required already exists in the codebase.
 
 ---
 
 ## DEFINITION OF DONE
 
-- [ ] create_expired_upload test helper method added with #[cfg(test)]
-- [ ] Original test updated to use new helper
-- [ ] "For now" comment removed
-- [ ] Additional test cases added (multiple expired, mixed, none)
-- [ ] cleanup_expired_uploads method verified/implemented
-- [ ] All tests properly verify cleanup behavior
+### Code Changes Complete
+
+- [ ] `cleanup_expired_uploads` method added to MediaService
+- [ ] `create_expired_upload` test helper added with `#[cfg(test)]`
+- [ ] Test at line 433-440 updated to use helper
+- [ ] "For now" and workaround comments removed
+- [ ] 4 comprehensive test cases added:
+  - Multiple expired uploads
+  - Mix of expired and active uploads  
+  - No expired uploads (empty case)
+  - Just expired (1 second ago edge case)
+
+### Quality Checks
+
+- [ ] All tests pass: `cargo test -p matryx_surrealdb`
 - [ ] No compilation errors
-- [ ] No benchmark code written
+- [ ] No clippy warnings
+- [ ] Code follows existing MediaService patterns
+- [ ] Test helper only available in test builds
 
----
+### Verification
 
-## FILES TO MODIFY
+Run these commands to verify:
 
-1. `packages/surrealdb/src/repository/media_service.rs` (add test helper + verify cleanup method)
-2. `packages/surrealdb/src/repository/media_service_test.rs` (lines 433-440 + new tests)
+```bash
+# Build succeeds
+cargo build -p matryx_surrealdb
+
+# Tests pass
+cargo test -p matryx_surrealdb test_upload_to_pending_expired
+cargo test -p matryx_surrealdb test_cleanup_multiple_expired_uploads
+cargo test -p matryx_surrealdb test_cleanup_preserves_active_uploads
+cargo test -p matryx_surrealdb test_cleanup_with_no_expired_uploads
+cargo test -p matryx_surrealdb test_cleanup_just_expired_upload
+
+# No warnings
+cargo clippy -p matryx_surrealdb
+```
 
 ---
 
 ## NOTES
 
-- Using `#[cfg(test)]` ensures test helpers don't bloat production builds
-- Expired uploads should be cleaned up periodically (cron job, etc.)
-- Test helpers improve test quality without compromising production code
-- DateTime manipulation in tests is common pattern
-- Consider adding a scheduled cleanup task in production code
-- This enables proper testing of time-based logic without waiting real time
+### Production Considerations
+
+After this task, consider adding:
+- Scheduled cleanup job (cron or tokio interval)
+- Monitoring/metrics for expired upload cleanup
+- Admin API to manually trigger cleanup
+
+**But these are OUT OF SCOPE for this task.**
+
+### Why This Matters
+
+- **Better test coverage** - Actually tests expiration logic
+- **No workarounds** - Proper test infrastructure  
+- **Production ready** - Cleanup method exposed for scheduled jobs
+- **Maintainable** - Clear separation of test and production code
+
+### Time Estimate Breakdown
+
+- Subtask 1: 30 minutes (simple wrapper method)
+- Subtask 2: 30 minutes (test helper)  
+- Subtask 3: 30 minutes (update existing test)
+- Subtask 4: 1 hour (4 new test cases)
+- Testing/verification: 30 minutes
+
+**Total: 2-4 hours**
