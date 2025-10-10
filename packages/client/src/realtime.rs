@@ -212,14 +212,16 @@ impl RealtimeMatrixClient {
         self.db = Some(db.clone());
 
         // Initialize repository service
-        let user_id = self
+        let credentials = self
             .credentials
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No credentials available"))?
-            .user_id
-            .clone();
+            .ok_or_else(|| anyhow::anyhow!("No credentials available"))?;
 
-        self.repository_service = Some(ClientRepositoryService::from_db(db, user_id));
+        self.repository_service = Some(ClientRepositoryService::from_db(
+            db,
+            credentials.user_id.clone(),
+            credentials.device_id.clone()
+        ));
 
         debug!("Connected to SurrealDB and initialized repositories");
         Ok(())
@@ -242,7 +244,11 @@ impl RealtimeMatrixClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Database not initialized"))?;
 
-        let sync_manager = LiveQuerySync::new(credentials.user_id.clone(), db.clone());
+        let sync_manager = LiveQuerySync::new(
+            credentials.user_id.clone(),
+            credentials.device_id.clone(),
+            db.clone()
+        );
 
         // Start the sync manager
         sync_manager.start().await?;

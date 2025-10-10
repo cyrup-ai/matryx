@@ -634,7 +634,9 @@ impl<C: Connection> MonitoringService<C> {
             return Ok(cached_value);
         }
 
-        // Cache miss - fetch fresh data
+        // Cache miss - need fresh measurement
+        tracing::debug!("Memory cache miss, spawning blocking task for fresh measurement");
+
         let memory_mb = tokio::task::spawn_blocking(|| {
             let mut system = System::new();
             system.refresh_memory();
@@ -655,7 +657,9 @@ impl<C: Connection> MonitoringService<C> {
             return Ok(cached_value);
         }
 
-        // Cache miss - fetch fresh data
+        // Cache miss - need fresh measurement
+        tracing::debug!("Disk cache miss, spawning blocking task for fresh measurement");
+
         let data_path = std::env::current_dir()
             .map_err(|e| RepositoryError::SystemError(format!("Failed to get current dir: {}", e)))?;
 

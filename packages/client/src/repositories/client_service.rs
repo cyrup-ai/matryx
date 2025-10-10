@@ -1,5 +1,5 @@
 use futures_util::{Stream, StreamExt};
-use matryx_entity::{Device, Event, Membership, UserPresenceUpdate};
+use matryx_entity::{Device, Event, Membership, MembershipState, UserPresenceUpdate};
 use matryx_surrealdb::repository::{
     DeviceRepository,
     EventRepository,
@@ -9,6 +9,7 @@ use matryx_surrealdb::repository::{
     ToDeviceMessage,
     ToDeviceRepository,
 };
+use std::collections::HashSet;
 use std::pin::Pin;
 
 use surrealdb::{Surreal, engine::any::Any};
@@ -258,9 +259,48 @@ impl ClientRepositoryService {
     /// This replaces the subscription-based approach with a simpler polling approach
     pub async fn get_sync_updates(&self) -> Result<SyncUpdate, ClientError> {
         // Get current state from repositories
-        let events = vec![]; // TODO: Implement user events aggregation when needed
         let membership_changes = self.membership_repo.get_user_rooms(&self.user_id).await?;
-        let presence_updates = vec![]; // TODO: Implement when presence repository has the method
+        
+        // Aggregate events from all joined rooms
+        let mut events = Vec::new();
+        for membership in &membership_changes {
+            if membership.membership == MembershipState::Join {
+                match self.event_repo.get_room_timeline(&membership.room_id, Some(20)).await {
+                    Ok(room_events) => events.extend(room_events),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch events for room {}: {}",
+                            membership.room_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        // Extract room IDs from membership_changes
+        let room_ids: Vec<String> = membership_changes.iter()
+            .map(|m| m.room_id.clone())
+            .collect();
+
+        // Collect all user IDs from rooms the user is in
+        let mut user_ids = HashSet::new();
+        for room_id in &room_ids {
+            let members = self.membership_repo.get_room_members(room_id).await?;
+            for member in members {
+                user_ids.insert(member.user_id);
+            }
+        }
+
+        // Remove self from the list
+        user_ids.remove(&self.user_id);
+
+        // Fetch presence for all users in shared rooms
+        let user_ids_vec: Vec<String> = user_ids.into_iter().collect();
+        let presence_updates = if !user_ids_vec.is_empty() {
+            self.presence_repo.get_multiple_user_presence(&user_ids_vec).await?
+        } else {
+            vec![]
+        };
         let device_updates = self.device_repo.get_user_devices(&self.user_id).await?;
         let to_device_messages = self
             .to_device_repo

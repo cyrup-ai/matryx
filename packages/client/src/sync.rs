@@ -10,7 +10,7 @@ use futures_util::{Stream, StreamExt};
 use matryx_entity::EventContent;
 use matryx_entity::{Event, Membership, MembershipState, UserPresenceUpdate};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info, warn};
@@ -161,14 +161,25 @@ pub struct LiveQuerySync {
     update_sender: broadcast::Sender<SyncUpdate>,
     /// Receiver for sync updates
     update_receiver: broadcast::Receiver<SyncUpdate>,
+    /// Track users who have left rooms for device list updates
+    /// This set is populated by membership subscriptions and consumed by device subscriptions
+    left_users: Arc<RwLock<HashSet<String>>>,
 }
 
 impl LiveQuerySync {
     /// Create a new LiveQuery sync manager
-    pub fn new(user_id: String, db: surrealdb::Surreal<surrealdb::engine::any::Any>) -> Self {
+    pub fn new(
+        user_id: String,
+        device_id: String,
+        db: surrealdb::Surreal<surrealdb::engine::any::Any>
+    ) -> Self {
         let (update_sender, update_receiver) = broadcast::channel(1000);
 
-        let repository_service = ClientRepositoryService::from_db(db, user_id.clone());
+        let repository_service = ClientRepositoryService::from_db(
+            db,
+            user_id.clone(),
+            device_id
+        );
 
         Self {
             user_id,
@@ -176,6 +187,7 @@ impl LiveQuerySync {
             repository_service,
             update_sender,
             update_receiver,
+            left_users: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -303,6 +315,7 @@ impl LiveQuerySync {
         let repository_service = self.repository_service.clone();
         let user_id_clone = self.user_id.clone();
         let update_sender_clone = self.update_sender.clone();
+        let left_users_clone = self.left_users.clone();
 
         tokio::spawn(async move {
             match repository_service.subscribe_to_membership_changes().await {
@@ -317,6 +330,13 @@ impl LiveQuerySync {
                                         "Received membership update for user {} in room {}: {}",
                                         user_id_clone, membership.room_id, membership.membership
                                     );
+
+                                    // Track users who left for device list updates
+                                    if membership.membership == MembershipState::Leave {
+                                        let mut left_users = left_users_clone.write().await;
+                                        left_users.insert(membership.user_id.clone());
+                                        debug!("Added user {} to left users tracking", membership.user_id);
+                                    }
 
                                     let room_id_owned = membership.room_id.clone();
                                     let update = SyncUpdate::MembershipUpdate {
@@ -406,6 +426,7 @@ impl LiveQuerySync {
         let repository_service = self.repository_service.clone();
         let user_id_clone = self.user_id.clone();
         let update_sender_clone = self.update_sender.clone();
+        let left_users_clone = self.left_users.clone();
 
         // Subscribe to device key updates
         tokio::spawn(async move {
@@ -420,9 +441,23 @@ impl LiveQuerySync {
                             Ok(notification) => {
                                 // notification is now Device directly, not DeviceKeys
                                 let device = notification;
+                                
+                                // Get and clear left users atomically
+                                // This ensures each user appears in 'left' exactly once after they leave
+                                let left = {
+                                    let mut left_users = left_users_clone.write().await;
+                                    let users: Vec<String> = left_users.iter().cloned().collect();
+                                    left_users.clear();
+                                    users
+                                };
+                                
+                                if !left.is_empty() {
+                                    debug!("Including {} left users in device list update", left.len());
+                                }
+                                
                                 let update = SyncUpdate::DeviceListUpdate {
                                     changed: vec![device.user_id],
-                                    left: vec![], // TODO: Implement proper left user tracking from membership changes
+                                    left,
                                 };
 
                                 if let Err(e) = update_sender_clone.send(update) {
@@ -610,7 +645,11 @@ mod tests {
     async fn test_sync_creation() {
         let db = setup_test_db().await;
 
-        let sync = LiveQuerySync::new("@test:example.com".to_string(), db);
+        let sync = LiveQuerySync::new(
+            "@test:example.com".to_string(),
+            "TESTDEVICE".to_string(),
+            db
+        );
 
         let state = sync.get_sync_state().await;
         assert!(state.joined_rooms.is_empty());
@@ -622,7 +661,11 @@ mod tests {
     async fn test_sync_state_updates() {
         let db = setup_test_db().await;
 
-        let sync = LiveQuerySync::new("@test:example.com".to_string(), db);
+        let sync = LiveQuerySync::new(
+            "@test:example.com".to_string(),
+            "TESTDEVICE".to_string(),
+            db
+        );
 
         let room_id = "!test:example.com";
         let event = Event {

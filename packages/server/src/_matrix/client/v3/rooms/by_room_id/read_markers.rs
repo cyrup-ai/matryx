@@ -1,9 +1,10 @@
 use axum::{Json, extract::{Path, State}, http::{HeaderMap, StatusCode}};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{AppState, auth::{MatrixAuth, extract_matrix_auth}};
+use matryx_surrealdb::repository::ReceiptRepository;
 
 #[derive(Debug, Deserialize)]
 pub struct ReadMarkersRequest {
@@ -67,10 +68,55 @@ pub async fn post(
         }
     }
 
-    // Note: m.read and m.read.private are read receipts, which should be handled
-    // by the receipts endpoint. For now, we acknowledge but don't process them.
-    if payload.read.is_some() || payload.read_private.is_some() {
-        info!("Read receipts provided but will be handled by receipts endpoint");
+    // Process read receipts as required by Matrix 1.4 specification
+    // The server MUST treat m.read and m.read.private in /read_markers the same
+    // as it would for requests to /receipt/{receiptType}/{eventId}
+    let receipt_repo = ReceiptRepository::new(state.db.clone());
+
+    // Process m.read (public read receipt)
+    if let Some(ref event_id) = payload.read {
+        match receipt_repo
+            .store_receipt(
+                &room_id,
+                &user_id,
+                event_id,
+                "m.read",
+                None,  // read_markers payload doesn't include thread_id
+                &state.homeserver_name,
+            )
+            .await
+        {
+            Ok(()) => {
+                debug!("Stored m.read receipt for user {} in room {} at event {}", user_id, room_id, event_id);
+            },
+            Err(e) => {
+                error!("Failed to store m.read receipt: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
+
+    // Process m.read.private (private read receipt)
+    if let Some(ref event_id) = payload.read_private {
+        match receipt_repo
+            .store_receipt(
+                &room_id,
+                &user_id,
+                event_id,
+                "m.read.private",
+                None,  // read_markers payload doesn't include thread_id
+                &state.homeserver_name,
+            )
+            .await
+        {
+            Ok(()) => {
+                debug!("Stored m.read.private receipt for user {} in room {} at event {}", user_id, room_id, event_id);
+            },
+            Err(e) => {
+                error!("Failed to store m.read.private receipt: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
     }
 
     Ok(Json(json!({})))
