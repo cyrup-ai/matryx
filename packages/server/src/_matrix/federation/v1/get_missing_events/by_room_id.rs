@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::state::AppState;
 use matryx_entity::{MissingEventsRequest, MissingEventsResponse, PDU, Room};
-use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository};
+use matryx_surrealdb::repository::{EventRepository, MembershipRepository, RoomRepository, UserRepository};
 
 /// Matrix X-Matrix authentication header parsed structure
 #[derive(Debug, Clone)]
@@ -207,9 +207,9 @@ pub async fn post(
     let limit = payload.limit.unwrap_or(10) as usize;
     let min_depth = payload.min_depth.unwrap_or(0);
 
-    // Validate limit bounds
-    if limit == 0 || limit > 100 {
-        warn!("Invalid missing events limit: {}", limit);
+    // Validate limit bounds (reduced to 20 to match Synapse for conservative data transfer)
+    if limit == 0 || limit > 20 {
+        warn!("Invalid missing events limit: {} (max 20)", limit);
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -326,11 +326,17 @@ pub async fn post(
 
     // Apply event visibility filtering for security
     let filtered_events = filter_events_for_server(
+        &state,
         &room,
         &x_matrix_auth.origin,
         missing_events,
         has_users,
-    );
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to filter events: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let response = MissingEventsResponse::new(filtered_events);
 
@@ -439,30 +445,35 @@ async fn get_missing_events_traversal(
     Ok(result_events)
 }
 
-/// Filter events based on room history visibility settings for security
+/// Filter events based on room history visibility settings and advanced security features
 ///
-/// This function implements server-side event visibility filtering to ensure
-/// requesting servers only receive events they have permission to see based on
-/// room history visibility settings.
+/// This function implements comprehensive server-side event visibility filtering with:
+/// - Basic history visibility filtering (world_readable, shared, invited, joined)
+/// - GDPR compliance: filters events from erased users (right to be forgotten)
+/// - Partial state protection: filters remote events when room is in partial state
+/// - Per-event membership verification: checks server membership at event depth
 ///
 /// # Arguments
+/// * `state` - Application state for database access
 /// * `room` - The room containing the events
 /// * `requesting_server` - The origin server making the request
 /// * `events` - The list of events to filter
-/// * `server_has_users` - Whether the requesting server has users in the room
+/// * `server_has_users` - Whether the requesting server has users in the room currently
 ///
 /// # Returns
 /// Filtered list of events the requesting server is authorized to see
-fn filter_events_for_server(
+async fn filter_events_for_server(
+    state: &AppState,
     room: &Room,
     requesting_server: &str,
     events: Vec<PDU>,
     server_has_users: bool,
-) -> Vec<PDU> {
+) -> Result<Vec<PDU>, Box<dyn std::error::Error + Send + Sync>> {
     // Check room history visibility setting
     let history_visibility = room.history_visibility.as_deref().unwrap_or("shared");
 
-    match history_visibility {
+    // Basic history visibility filtering
+    let events = match history_visibility {
         "world_readable" => {
             // World-readable rooms: all events visible to everyone
             debug!(
@@ -492,7 +503,7 @@ fn filter_events_for_server(
                     room.room_id,
                     history_visibility
                 );
-                Vec::new()
+                return Ok(Vec::new());
             }
         },
         _ => {
@@ -505,8 +516,118 @@ fn filter_events_for_server(
             if server_has_users {
                 events
             } else {
-                Vec::new()
+                return Ok(Vec::new());
             }
         },
+    };
+
+    // FEATURE A: Erased senders filtering (GDPR compliance)
+    // Check if any event senders have been erased and filter those events
+    let user_repo = UserRepository::new(state.db.clone());
+    let sender_list: Vec<String> = events.iter().map(|e| e.sender.clone()).collect();
+    let erased_senders = user_repo.are_users_erased(&sender_list).await?;
+
+    let mut filtered_events = Vec::new();
+    let mut erased_count = 0;
+
+    for event in events {
+        if let Some(&is_erased) = erased_senders.get(&event.sender) {
+            if is_erased {
+                info!(
+                    "Sender {} of event {} has been erased, redacting event for GDPR compliance",
+                    event.sender, event.event_id
+                );
+                erased_count += 1;
+                continue; // Skip this event
+            }
+        }
+        filtered_events.push(event);
     }
+
+    if erased_count > 0 {
+        info!(
+            "Filtered {} events from erased senders in room {} for server {}",
+            erased_count, room.room_id, requesting_server
+        );
+    }
+
+    // FEATURE B: Partial state events filtering
+    // Filter out events from remote servers when room is in partial state
+    let room_repo = RoomRepository::new(state.db.clone());
+    let is_partial_state = room_repo.is_partial_state_room(&room.room_id).await?;
+
+    if is_partial_state {
+        let homeserver_name = &state.homeserver_name;
+        let mut partial_state_filtered_events = Vec::new();
+        let mut partial_state_count = 0;
+
+        for event in filtered_events {
+            // Extract sender domain
+            let sender_domain = if let Some(colon_pos) = event.sender.rfind(':') {
+                &event.sender[colon_pos + 1..]
+            } else {
+                // Invalid sender format, skip for safety
+                warn!(
+                    "Invalid sender format in event {}: {}",
+                    event.event_id, event.sender
+                );
+                partial_state_count += 1;
+                continue;
+            };
+
+            // Filter out non-local events when room is in partial state
+            if sender_domain != homeserver_name {
+                debug!(
+                    "Filtering event {} from remote server {} (room {} is in partial state)",
+                    event.event_id, sender_domain, room.room_id
+                );
+                partial_state_count += 1;
+                continue;
+            }
+
+            partial_state_filtered_events.push(event);
+        }
+
+        if partial_state_count > 0 {
+            info!(
+                "Filtered {} remote events from partial state room {} for server {}",
+                partial_state_count, room.room_id, requesting_server
+            );
+        }
+
+        filtered_events = partial_state_filtered_events;
+    }
+
+    // FEATURE C: Per-event membership verification
+    // Verify server had members at each event's specific depth for more precise access control
+    let membership_repo = MembershipRepository::new(state.db.clone());
+    let mut depth_filtered_events = Vec::new();
+    let mut depth_filtered_count = 0;
+
+    for event in filtered_events {
+        // Check if requesting server had users at this event's depth
+        let had_members_at_depth = membership_repo
+            .get_server_membership_at_depth(&room.room_id, requesting_server, event.depth)
+            .await?;
+
+        if !had_members_at_depth {
+            debug!(
+                "Server {} had no members at depth {} for event {}, filtering",
+                requesting_server, event.depth, event.event_id
+            );
+            depth_filtered_count += 1;
+            continue;
+        }
+
+        depth_filtered_events.push(event);
+    }
+
+    if depth_filtered_count > 0 {
+        info!(
+            "Filtered {} events based on per-depth membership verification in room {} for server {}",
+            depth_filtered_count, room.room_id, requesting_server
+        );
+    }
+
+    Ok(depth_filtered_events)
 }

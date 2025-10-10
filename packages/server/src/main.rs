@@ -400,6 +400,7 @@ fn create_client_routes() -> Router<AppState> {
         .route("/v3/account/whoami", get(_matrix::client::v3::account::whoami::get))
         .route("/v3/admin/whois/{user_id}", get(_matrix::client::v3::admin::whois::by_user_id::get))
         .route("/v3/admin/health", get(_matrix::client::v3::admin::health::get).post(_matrix::client::v3::admin::health::post))
+        .route("/v1/admin/media/mark_idp_icon", post(_matrix::client::v1::admin::media_idp_icons::mark_idp_icon))
         .route("/v3/capabilities", get(_matrix::client::v3::capabilities::get))
         .route("/v3/devices", get(_matrix::client::v3::devices::get))
         .route("/v3/devices/{device_id}", get(_matrix::client::v3::devices::by_device_id::get))

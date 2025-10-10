@@ -2904,4 +2904,53 @@ impl MembershipRepository {
 
         Ok(servers.into_iter().collect())
     }
+
+    /// Check if a server had users in the room at a specific event depth
+    /// 
+    /// This provides more precise access control than checking current membership,
+    /// ensuring servers only see events from when they actually had members present.
+    /// 
+    /// # Arguments
+    /// * `room_id` - The room to check
+    /// * `server_name` - The server to check membership for
+    /// * `depth` - The event depth to check membership at
+    /// 
+    /// # Returns
+    /// True if the server had joined or invited users at the specified depth
+    pub async fn get_server_membership_at_depth(
+        &self,
+        room_id: &str,
+        server_name: &str,
+        depth: i64,
+    ) -> Result<bool, RepositoryError> {
+        // Query for membership events from this server up to the specified depth
+        let query = "
+            SELECT COUNT() as count
+            FROM membership m
+            JOIN event e ON e.room_id = m.room_id 
+                AND e.event_type = 'm.room.member' 
+                AND e.state_key = m.user_id
+            WHERE m.room_id = $room_id
+            AND m.user_id CONTAINS $server_suffix
+            AND m.membership IN ['join', 'invite']
+            AND e.depth <= $depth
+            LIMIT 1
+        ";
+
+        let server_suffix = format!(":{}", server_name);
+
+        let mut response = self.db.query(query)
+            .bind(("room_id", room_id.to_string()))
+            .bind(("server_suffix", server_suffix))
+            .bind(("depth", depth))
+            .await?;
+
+        #[derive(serde::Deserialize)]
+        struct CountResult {
+            count: i64,
+        }
+
+        let count_result: Option<CountResult> = response.take(0)?;
+        Ok(count_result.map(|c| c.count > 0).unwrap_or(false))
+    }
 }

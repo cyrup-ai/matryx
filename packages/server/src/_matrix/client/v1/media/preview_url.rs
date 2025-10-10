@@ -47,8 +47,12 @@ async fn validate_url_safety(url: &str) -> Result<(), Box<dyn std::error::Error 
     // Get host
     let host = parsed.host_str().ok_or("No host")?;
     
-    // Resolve hostname to IP addresses
-    let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{}:80", host))
+    // Resolve hostname to IP addresses with correct port
+    let port = parsed.port().unwrap_or_else(|| {
+        if parsed.scheme() == "https" { 443 } else { 80 }
+    });
+
+    let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
         .await?
         .map(|addr| addr.ip())
         .collect();
@@ -219,6 +223,9 @@ async fn fetch_url_preview(
     if let Some(img_url) = image_url {
         // Resolve relative URLs to absolute
         let absolute_img_url = resolve_url(url, &img_url)?;
+
+        // Validate image URL is safe before downloading
+        validate_url_safety(&absolute_img_url).await?;
 
         // Download preview image (with size limits)
         match client.get(&absolute_img_url).send().await {

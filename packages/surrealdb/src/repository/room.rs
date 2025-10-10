@@ -2758,4 +2758,29 @@ impl RoomRepository {
         let messages: Vec<serde_json::Value> = response.take(0)?;
         Ok(messages)
     }
+
+    /// Check if room is in partial state (during initial federation sync)
+    /// 
+    /// Partial state rooms are those that are being initially synchronized from
+    /// a remote server and don't yet have complete state. Events from remote
+    /// servers should not be exposed during partial state to prevent information
+    /// leaks to servers no longer in the room.
+    pub async fn is_partial_state_room(&self, room_id: &str) -> Result<bool, RepositoryError> {
+        let query = "
+            SELECT partial_state
+            FROM room
+            WHERE room_id = $room_id
+            LIMIT 1
+        ";
+
+        let mut response = self.db.query(query).bind(("room_id", room_id.to_string())).await?;
+
+        #[derive(serde::Deserialize)]
+        struct PartialStateResult {
+            partial_state: Option<bool>,
+        }
+
+        let result: Option<PartialStateResult> = response.take(0)?;
+        Ok(result.and_then(|r| r.partial_state).unwrap_or(false))
+    }
 }

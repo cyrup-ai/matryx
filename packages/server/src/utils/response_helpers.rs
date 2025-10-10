@@ -4,6 +4,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
+use matryx_surrealdb::repository::media_service::MediaError;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -161,9 +162,11 @@ pub fn build_multipart_media_response(
             let mut part_header = format!("--{}\r\nContent-Type: {}\r\n", boundary, content_type);
 
             if let Some(name) = filename {
+                // Use calculate_content_disposition for proper sanitization and disposition
+                let content_disposition = calculate_content_disposition(&content_type, Some(&name));
                 part_header.push_str(&format!(
-                    "Content-Disposition: attachment; filename=\"{}\"\r\n",
-                    name
+                    "Content-Disposition: {}\r\n",
+                    content_disposition
                 ));
             }
 
@@ -190,4 +193,25 @@ pub fn build_multipart_media_response(
         .header("Cross-Origin-Resource-Policy", "cross-origin")
         .header("Access-Control-Allow-Origin", "*")
         .body(Body::from(body_bytes)) // ✅ BINARY-SAFE BODY
+}
+
+/// Convert MediaError to appropriate HTTP status code
+///
+/// Maps MediaError variants to their corresponding HTTP status codes:
+/// - NotFound/NotYetUploaded → 404 NOT_FOUND
+/// - AccessDenied → 403 FORBIDDEN
+/// - TooLarge → 413 PAYLOAD_TOO_LARGE
+/// - InvalidOperation → 400 BAD_REQUEST
+/// - UnsupportedFormat → 415 UNSUPPORTED_MEDIA_TYPE
+/// - Database/Validation → 500 INTERNAL_SERVER_ERROR
+pub fn media_error_to_status(error: MediaError) -> StatusCode {
+    match error {
+        MediaError::NotFound => StatusCode::NOT_FOUND,
+        MediaError::NotYetUploaded => StatusCode::NOT_FOUND,
+        MediaError::AccessDenied(_) => StatusCode::FORBIDDEN,
+        MediaError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        MediaError::InvalidOperation(_) => StatusCode::BAD_REQUEST,
+        MediaError::UnsupportedFormat => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        MediaError::Database(_) | MediaError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }

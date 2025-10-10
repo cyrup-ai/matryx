@@ -829,8 +829,10 @@ async fn process_receipt_edu(
         // Process each receipt type per Matrix 1.4 specification
         for (receipt_type, receipt_data) in room_receipts_obj {
             // Only process supported receipt types
-            let is_private = match receipt_type.as_str() {
-                "m.read" => false,
+            match receipt_type.as_str() {
+                "m.read" => {
+                    // Valid federated receipt type - continue processing below
+                },
                 "m.read.private" => {
                     // Matrix 1.4 spec: m.read.private MUST NEVER be sent via federation
                     // If we receive one, the remote server is violating the spec
@@ -844,7 +846,7 @@ async fn process_receipt_edu(
                     debug!("Unknown receipt type '{}' - skipping per Matrix specification", receipt_type);
                     continue;
                 },
-            };
+            }
 
             let receipt_data_obj =
                 receipt_data.as_object().ok_or("Receipt data must be an object")?;
@@ -889,18 +891,11 @@ async fn process_receipt_edu(
                         .await
                         .map_err(|e| format!("Failed to store receipt EDU: {}", e))?;
 
-                    if is_private {
-                        info!(
-                            "Processed m.read.private receipt: user={}, room={}, event={}, thread={:?}",
-                            user_id, room_id, event_id, &thread_id
-                        );
-                        // CRITICAL: Private receipts are NEVER federated per Matrix specification
-                    } else {
-                        info!(
-                            "Processed m.read receipt: user={}, room={}, event={}, thread={:?}",
-                            user_id, room_id, event_id, &thread_id
-                        );
-                    }
+                    // is_private is always false here (m.read.private rejected at line 840)
+                    info!(
+                        "Processed m.read receipt: user={}, room={}, event={}, thread={:?}",
+                        user_id, room_id, event_id, &thread_id
+                    );
                 }
             }
         }

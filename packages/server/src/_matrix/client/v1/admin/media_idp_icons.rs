@@ -26,14 +26,16 @@ pub async fn mark_idp_icon(
 
     let mut media_info = media_repo
         .get_media_info(&req.media_id, &req.server_name)
-        .await?
+        .await
+        .map_err(|_| MatrixError::Unknown)?
         .ok_or(MatrixError::NotFound)?;
 
     media_info.is_idp_icon = Some(req.is_idp_icon);
 
     media_repo
         .store_media_info(&req.media_id, &req.server_name, &media_info)
-        .await?;
+        .await
+        .map_err(|_| MatrixError::Unknown)?;
 
     Ok(Json(MarkIdpIconResponse { success: true }))
 }

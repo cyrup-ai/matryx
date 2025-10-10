@@ -519,6 +519,52 @@ impl UserRepository {
 
         Ok(users)
     }
+
+    /// Check if multiple users have been erased (GDPR right to be forgotten)
+    /// Returns a HashMap mapping user_id to whether they have been erased
+    pub async fn are_users_erased(
+        &self,
+        user_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, bool>, RepositoryError> {
+        if user_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let query = "
+            SELECT user_id, is_active, display_name, avatar_url
+            FROM user
+            WHERE user_id IN $user_ids
+        ";
+
+        let mut response = self.db.query(query).bind(("user_ids", user_ids.to_vec())).await?;
+
+        #[derive(serde::Deserialize)]
+        struct UserErasedStatus {
+            user_id: String,
+            is_active: Option<bool>,
+            display_name: Option<String>,
+            avatar_url: Option<String>,
+        }
+
+        let users: Vec<UserErasedStatus> = response.take(0)?;
+
+        let mut erased_map = std::collections::HashMap::new();
+
+        // A user is considered "erased" if they are deactivated AND their profile data has been cleared
+        for user in users {
+            let is_erased = user.is_active == Some(false) 
+                && user.display_name.is_none() 
+                && user.avatar_url.is_none();
+            erased_map.insert(user.user_id, is_erased);
+        }
+
+        // For users not found in the database, consider them not erased (they might not exist)
+        for user_id in user_ids {
+            erased_map.entry(user_id.clone()).or_insert(false);
+        }
+
+        Ok(erased_map)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

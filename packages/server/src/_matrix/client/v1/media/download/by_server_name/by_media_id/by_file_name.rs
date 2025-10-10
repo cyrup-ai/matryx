@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 
 use crate::auth::authenticated_user::AuthenticatedUser;
-use crate::utils::response_helpers::calculate_content_disposition;
+use crate::utils::response_helpers::{calculate_content_disposition, media_error_to_status};
 use crate::AppState;
 use matryx_surrealdb::repository::{
     media::MediaRepository, media_service::MediaService, membership::MembershipRepository,
@@ -50,7 +50,7 @@ pub async fn get(
     )
     .await
     .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .map_err(media_error_to_status)?;
 
     // Generate Content-Disposition header using the provided filename parameter
     let disposition = calculate_content_disposition(&download_result.content_type, Some(&file_name));

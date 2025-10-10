@@ -352,6 +352,25 @@ impl<C: Connection> InfrastructureService<C> {
         self.key_server_repo.mark_old_keys_inactive(server_name).await
     }
 
+    /// Get server keys directly from repository (for caching logic)
+    pub async fn get_server_keys_raw(
+        &self,
+        server_name: &str,
+        key_ids: Option<&[String]>,
+    ) -> Result<crate::repository::key_server::ServerKeys, RepositoryError> {
+        self.key_server_repo.get_server_keys(server_name, key_ids).await
+    }
+
+    /// Store server keys in cache
+    pub async fn store_server_keys(
+        &self,
+        server_name: &str,
+        keys: &crate::repository::key_server::ServerKeys,
+        valid_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), RepositoryError> {
+        self.key_server_repo.store_server_keys(server_name, keys, valid_until).await
+    }
+
     /// Register a new user with device
     pub async fn register_new_user(
         &self,

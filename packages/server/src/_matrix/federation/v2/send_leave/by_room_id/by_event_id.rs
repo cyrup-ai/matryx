@@ -318,7 +318,7 @@ pub async fn put(
         join_authorised_via_users_server: None,
     };
 
-    membership_repo.create(&updated_membership).await.map_err(|e| {
+    membership_repo.update(&updated_membership).await.map_err(|e| {
         error!("Failed to update membership record: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

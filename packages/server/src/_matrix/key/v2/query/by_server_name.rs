@@ -5,6 +5,7 @@ use axum::{
 };
 use reqwest::Client;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -12,6 +13,8 @@ use crate::AppState;
 use crate::federation::server_discovery::ServerDiscoveryOrchestrator;
 use matryx_entity::utils::canonical_json;
 use matryx_surrealdb::repository::InfrastructureService;
+
+use super::super::common::{create_infrastructure_service, sign_canonical_json};
 
 /// GET /_matrix/key/v2/query/{serverName}
 ///
@@ -64,30 +67,6 @@ pub async fn get(
     }
 }
 
-async fn create_infrastructure_service(
-    state: &AppState,
-) -> InfrastructureService<surrealdb::engine::any::Any> {
-    let websocket_repo = matryx_surrealdb::repository::WebSocketRepository::new(state.db.clone());
-    let transaction_repo =
-        matryx_surrealdb::repository::TransactionRepository::new(state.db.clone());
-    let key_server_repo = matryx_surrealdb::repository::KeyServerRepository::new(state.db.clone());
-    let registration_repo =
-        matryx_surrealdb::repository::RegistrationRepository::new(state.db.clone());
-    let directory_repo = matryx_surrealdb::repository::DirectoryRepository::new(state.db.clone());
-    let device_repo = matryx_surrealdb::repository::DeviceRepository::new(state.db.clone());
-    let auth_repo = matryx_surrealdb::repository::AuthRepository::new(state.db.clone());
-
-    InfrastructureService::new(
-        websocket_repo,
-        transaction_repo,
-        key_server_repo,
-        registration_repo,
-        directory_repo,
-        device_repo,
-        auth_repo,
-    )
-}
-
 /// Fetch server keys from a specific server and sign them as a notary using repository
 async fn fetch_server_keys(
     infrastructure_service: &InfrastructureService<surrealdb::engine::any::Any>,
@@ -96,6 +75,55 @@ async fn fetch_server_keys(
     server_name: &str,
     homeserver_name: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    // Check cache first using get_server_keys which returns full ServerKeys struct
+    if let Ok(cached_keys) = infrastructure_service
+        .get_server_keys_raw(server_name, None)
+        .await
+    {
+        debug!("Found cached keys for server: {}", server_name);
+        
+        // Per Matrix spec: "cache a response for half of its lifetime"
+        // Calculate if cache is still fresh (within half of its lifetime)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        
+        // Assume keys were fetched when they became valid (conservative estimate)
+        let cache_lifetime_half = (cached_keys.valid_until_ts - now_ms) / 2;
+        
+        // If we're still within the valid period and have at least half the lifetime remaining
+        if cached_keys.valid_until_ts > now_ms && cache_lifetime_half > 0 {
+            debug!("Serving cached keys for server: {}", server_name);
+            
+            // Convert cached ServerKeys to JSON response format
+            let mut verify_keys_map = serde_json::Map::new();
+            for (key_id, verify_key) in &cached_keys.verify_keys {
+                verify_keys_map.insert(
+                    key_id.clone(),
+                    json!({"key": verify_key.key}),
+                );
+            }
+            
+            let mut old_verify_keys_map = serde_json::Map::new();
+            for (key_id, old_key) in &cached_keys.old_verify_keys {
+                old_verify_keys_map.insert(
+                    key_id.clone(),
+                    json!({"key": old_key.key, "expired_ts": old_key.expired_ts}),
+                );
+            }
+            
+            let cached_response = json!({
+                "server_name": cached_keys.server_name,
+                "valid_until_ts": cached_keys.valid_until_ts,
+                "verify_keys": verify_keys_map,
+                "old_verify_keys": old_verify_keys_map,
+                "signatures": cached_keys.signatures,
+            });
+            
+            return Ok(vec![cached_response]);
+        }
+        
+        debug!("Cached key expired or stale, fetching fresh keys");
+    }
+
     // Resolve server using Matrix DNS resolution
     let connection = server_discovery.discover_server(server_name).await?;
     let url = format!("{}/_matrix/key/v2/server", connection.base_url);
@@ -137,11 +165,92 @@ async fn fetch_server_keys(
     let valid_until_ts = server_key_response
         .get("valid_until_ts")
         .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+        .ok_or("Server key response missing valid_until_ts")?;
 
     let current_time_ms = chrono::Utc::now().timestamp_millis();
     if valid_until_ts > 0 && current_time_ms > valid_until_ts {
         return Err(format!("Server key response has expired for {}", server_name).into());
+    }
+
+    // Cache the fetched keys for future requests
+    // Convert the JSON response to ServerKeys struct for caching
+    let verify_keys_value = server_key_response
+        .get("verify_keys")
+        .and_then(|v| v.as_object())
+        .ok_or("Server key response missing verify_keys")?;
+    
+    let mut verify_keys = HashMap::new();
+    for (key_id, key_data) in verify_keys_value {
+        if let Some(key_str) = key_data.get("key").and_then(|v| v.as_str()) {
+            verify_keys.insert(
+                key_id.clone(),
+                matryx_surrealdb::repository::VerifyKey {
+                    key: key_str.to_string(),
+                },
+            );
+        }
+    }
+
+    let empty_map = serde_json::Map::new();
+    let old_verify_keys_value = server_key_response
+        .get("old_verify_keys")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty_map);
+    
+    let mut old_verify_keys = HashMap::new();
+    for (key_id, key_data) in old_verify_keys_value {
+        if let (Some(key_str), Some(expired_ts)) = (
+            key_data.get("key").and_then(|v| v.as_str()),
+            key_data.get("expired_ts").and_then(|v| v.as_i64()),
+        ) {
+            old_verify_keys.insert(
+                key_id.clone(),
+                matryx_surrealdb::repository::OldVerifyKey {
+                    key: key_str.to_string(),
+                    expired_ts,
+                },
+            );
+        }
+    }
+
+    let signatures_value = server_key_response
+        .get("signatures")
+        .and_then(|v| v.as_object())
+        .ok_or("Server key response missing signatures")?;
+    
+    let mut signatures = HashMap::new();
+    for (server, sigs) in signatures_value {
+        if let Some(sig_obj) = sigs.as_object() {
+            let mut server_sigs = HashMap::new();
+            for (key_id, sig) in sig_obj {
+                if let Some(sig_str) = sig.as_str() {
+                    server_sigs.insert(key_id.clone(), sig_str.to_string());
+                }
+            }
+            signatures.insert(server.clone(), server_sigs);
+        }
+    }
+
+    let server_keys = matryx_surrealdb::repository::ServerKeys {
+        server_name: server_name.to_string(),
+        valid_until_ts,
+        verify_keys,
+        old_verify_keys,
+        signatures,
+    };
+
+    let valid_until = chrono::DateTime::from_timestamp_millis(valid_until_ts)
+        .ok_or("Invalid valid_until_ts timestamp")?;
+
+    // Store in cache
+    if let Err(e) = infrastructure_service
+        .store_server_keys(server_name, &server_keys, valid_until)
+        .await
+    {
+        warn!("Failed to cache server keys for {}: {:?}", server_name, e);
+        // Continue even if caching fails - not a critical error
+    } else {
+        debug!("Cached server keys for {} until {}", server_name, valid_until);
     }
 
     // Sign the server key response as a notary using repository
@@ -203,33 +312,4 @@ async fn create_notary_signature(
     Ok(json!(notary_signatures))
 }
 
-/// Sign canonical JSON with Ed25519 private key
-fn sign_canonical_json(
-    canonical_json: &str,
-    private_key_b64: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    use base64::{Engine, engine::general_purpose};
-    use ed25519_dalek::{Signer, SigningKey};
 
-    // Decode the base64 private key
-    let private_key_bytes = general_purpose::STANDARD.decode(private_key_b64)?;
-
-    // Validate private key length
-    if private_key_bytes.len() != 32 {
-        return Err("Invalid private key length".into());
-    }
-
-    // Convert to array and create SigningKey
-    let private_key_array: [u8; 32] = private_key_bytes
-        .try_into()
-        .map_err(|_| "Failed to convert private key bytes to array")?;
-    let signing_key = SigningKey::from_bytes(&private_key_array);
-
-    // Sign the canonical JSON
-    let signature = signing_key.sign(canonical_json.as_bytes());
-
-    // Encode signature as base64
-    let signature_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
-
-    Ok(signature_b64)
-}

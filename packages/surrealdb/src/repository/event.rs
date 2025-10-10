@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose};
 use chrono::Utc;
 use ed25519_dalek::{SigningKey, Signature, VerifyingKey, Signer, Verifier};
 use futures::{Stream, StreamExt};
-use matryx_entity::types::{Event, EventContent, MembershipState};
+use matryx_entity::types::{Event, EventContent, MembershipState, KnockStrippedStateEvent};
 use matryx_entity::utils::canonical_json::canonical_json_for_signing;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2986,10 +2986,18 @@ impl EventRepository {
 
         let events: Vec<Event> = response.take(0)?;
 
-        // Convert events to JSON format for response
+        // Convert events to StrippedStateEvent format for spec compliance
         let state_events: Vec<serde_json::Value> = events
             .into_iter()
-            .map(|event| serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({})))
+            .map(|event| {
+                let stripped = KnockStrippedStateEvent::new(
+                    event.content,
+                    event.sender,
+                    event.state_key.unwrap_or_default(),
+                    event.event_type,
+                );
+                serde_json::to_value(stripped).unwrap_or_else(|_| serde_json::json!({}))
+            })
             .collect();
 
         Ok(state_events)

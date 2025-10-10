@@ -1677,8 +1677,15 @@ impl FederationRepository {
         alias: &str,
     ) -> Result<Option<(String, Option<Vec<String>>)>, RepositoryError> {
         let query = "
-            SELECT room_id, servers
-            FROM room_alias
+            SELECT 
+                room_id,
+                array::distinct(
+                    SELECT VALUE string::split(user_id, ':')[1]
+                    FROM room_memberships
+                    WHERE room_id = $parent.room_id
+                    AND membership = 'join'
+                ) AS servers
+            FROM room_aliases
             WHERE alias = $alias
             LIMIT 1
         ";
