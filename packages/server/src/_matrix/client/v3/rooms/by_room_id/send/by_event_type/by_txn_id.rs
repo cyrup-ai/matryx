@@ -92,6 +92,15 @@ pub async fn put(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // Check guest access: guests must join rooms before sending messages
+    if auth.is_guest {
+        // Guests can only send if they're joined members
+        if membership.membership != MembershipState::Join {
+            error!("Guest user {} attempted to send message without joining room {}", auth.user_id, room_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
     // Validate event type
     if !is_valid_event_type(&event_type) {
         return Err(StatusCode::BAD_REQUEST);
@@ -281,6 +290,18 @@ pub async fn put(
             );
         }
     }
+
+    // Process push notifications asynchronously (don't block event creation)
+    let push_service = state.push_service.clone();
+    let final_event = updated_event.clone();
+    let final_room_id = room_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = push_service.process_event_for_push(&final_event, &final_room_id).await {
+            tracing::error!("Failed to process push notifications for event {}: {}", final_event.event_id, e);
+        } else {
+            tracing::debug!("Processed push notifications for event {} in room {}", final_event.event_id, final_room_id);
+        }
+    });
 
     Ok(Json(SendEventResponse { event_id: updated_event.event_id }))
 }

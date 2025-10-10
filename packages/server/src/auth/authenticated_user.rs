@@ -15,6 +15,7 @@ pub struct AuthenticatedUser {
     pub device_id: String,
     pub access_token: String,
     pub homeserver_name: String,
+    pub is_guest: bool,
 }
 
 impl AuthenticatedUser {
@@ -24,7 +25,17 @@ impl AuthenticatedUser {
         access_token: String,
         homeserver_name: String,
     ) -> Self {
-        Self { user_id, device_id, access_token, homeserver_name }
+        Self { user_id, device_id, access_token, homeserver_name, is_guest: false }
+    }
+
+    pub fn new_with_guest(
+        user_id: String,
+        device_id: String,
+        access_token: String,
+        homeserver_name: String,
+        is_guest: bool,
+    ) -> Self {
+        Self { user_id, device_id, access_token, homeserver_name, is_guest }
     }
 
     /// Check if this user can access a specific room
@@ -181,11 +192,21 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
 
-                Ok(AuthenticatedUser::new(
+                // Get session to check if user is a guest
+                let session_repo = matryx_surrealdb::repository::SessionRepository::new(state.db.clone());
+                let session = session_repo
+                    .get_by_access_token(&access_token)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                
+                let is_guest = session.map(|s| s.is_guest).unwrap_or(false);
+
+                Ok(AuthenticatedUser::new_with_guest(
                     user_id,
                     device_id,
                     access_token,
                     state.homeserver_name.clone(),
+                    is_guest,
                 ))
             },
             Err(MatrixAuthError::SessionExpired) => Err(StatusCode::UNAUTHORIZED),

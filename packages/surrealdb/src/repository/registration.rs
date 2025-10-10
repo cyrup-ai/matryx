@@ -197,6 +197,7 @@ impl<C: Connection> RegistrationRepository<C> {
             is_active: true,
             valid: true,
             puppets_user_id: None,
+            is_guest: false,
         };
 
         // Store the session

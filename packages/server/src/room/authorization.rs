@@ -817,6 +817,51 @@ impl MembershipAction {
     }
 }
 
+/// Check if user has access to room content based on guest access rules
+///
+/// This helper function checks if a user (including guests) can access room content
+/// based on the room's guest access configuration. It enforces Matrix guest access rules:
+/// - `can_join`: Guests can access room content
+/// - `forbidden`: Only members can access (default)
+///
+/// # Arguments
+/// * `room_repo` - Repository for room operations
+/// * `room_id` - The room ID being accessed
+/// * `user_id` - The user attempting to access the room
+/// * `is_guest` - Whether the user is a guest user
+///
+/// # Returns
+/// * `Result<(), StatusCode>` - Ok if access is allowed
+///
+/// # Errors
+/// * `StatusCode::FORBIDDEN` - Guest access not allowed in this room
+/// * `StatusCode::INTERNAL_SERVER_ERROR` - Failed to check room access
+pub async fn require_room_access(
+    room_repo: &RoomRepository,
+    room_id: &str,
+    user_id: &str,
+    is_guest: bool,
+) -> Result<(), StatusCode> {
+    let access_result = room_repo
+        .check_guest_access(room_id, Some(user_id), is_guest)
+        .await
+        .map_err(|e| {
+            error!("Failed to check room access for user {} in room {}: {}", user_id, room_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    
+    match access_result {
+        matryx_surrealdb::repository::room::GuestAccessResult::Allowed => {
+            debug!("Room access allowed for user {} in room {}", user_id, room_id);
+            Ok(())
+        },
+        _ => {
+            warn!("Room access denied for user {} in room {} (guest access forbidden)", user_id, room_id);
+            Err(StatusCode::FORBIDDEN)
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Tests would be implemented here following Rust testing best practices

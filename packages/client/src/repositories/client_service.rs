@@ -328,4 +328,10 @@ impl ClientRepositoryService {
     pub fn get_user_id(&self) -> &str {
         &self.user_id
     }
+
+    /// Get all members of a room
+    pub async fn get_room_members(&self, room_id: &str) -> Result<Vec<Membership>, ClientError> {
+        let members = self.membership_repo.get_room_members(room_id).await?;
+        Ok(members)
+    }
 }

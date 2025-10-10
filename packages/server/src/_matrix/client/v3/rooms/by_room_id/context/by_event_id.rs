@@ -38,10 +38,28 @@ pub async fn get(
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             })?;
 
-    let user_id = match matrix_auth {
-        crate::auth::MatrixAuth::User(user_auth) => user_auth.user_id,
+    let (user_id, is_guest) = match matrix_auth {
+        crate::auth::MatrixAuth::User(user_auth) => {
+            // Get session to check if user is a guest
+            let session_repo = matryx_surrealdb::repository::SessionRepository::new(state.db.clone());
+            let session = session_repo
+                .get_by_access_token(&user_auth.token)
+                .await
+                .map_err(|e| {
+                    error!("Failed to get session: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            
+            let is_guest = session.map(|s| s.is_guest).unwrap_or(false);
+            (user_auth.user_id, is_guest)
+        },
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
+
+    // Check guest access before retrieving context
+    let room_repo = matryx_surrealdb::repository::RoomRepository::new(state.db.clone());
+    crate::room::authorization::require_room_access(&room_repo, &room_id, &user_id, is_guest)
+        .await?;
 
     // Use RoomOperationsService to get event context with permission validation
     let limit = params.limit.unwrap_or(10).min(100); // Cap at 100 events

@@ -331,11 +331,16 @@ impl LiveQuerySync {
                                         user_id_clone, membership.room_id, membership.membership
                                     );
 
-                                    // Track users who left for device list updates
-                                    if membership.membership == MembershipState::Leave {
+                                    // Track users who left or were banned for device list updates
+                                    if membership.membership == MembershipState::Leave || 
+                                       membership.membership == MembershipState::Ban {
                                         let mut left_users = left_users_clone.write().await;
                                         left_users.insert(membership.user_id.clone());
-                                        debug!("Added user {} to left users tracking", membership.user_id);
+                                        debug!(
+                                            "Added user {} to left users tracking (state: {})", 
+                                            membership.user_id, 
+                                            membership.membership
+                                        );
                                     }
 
                                     let room_id_owned = membership.room_id.clone();
@@ -444,16 +449,43 @@ impl LiveQuerySync {
                                 
                                 // Get and clear left users atomically
                                 // This ensures each user appears in 'left' exactly once after they leave
-                                let left = {
+                                let preliminary_left_users = {
                                     let mut left_users = left_users_clone.write().await;
                                     let users: Vec<String> = left_users.iter().cloned().collect();
                                     left_users.clear();
                                     users
                                 };
                                 
-                                if !left.is_empty() {
-                                    debug!("Including {} left users in device list update", left.len());
-                                }
+                                // Filter left users to only include those who don't share ANY rooms
+                                // with the current user (shared rooms edge case)
+                                let left = if !preliminary_left_users.is_empty() {
+                                    match Self::filter_truly_left_users(
+                                        &repository_service,
+                                        &user_id_clone,
+                                        preliminary_left_users
+                                    ).await {
+                                        Ok(filtered_users) => {
+                                            if !filtered_users.is_empty() {
+                                                debug!(
+                                                    "Including {} truly left users in device list update",
+                                                    filtered_users.len()
+                                                );
+                                            }
+                                            filtered_users
+                                        },
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to filter left users (shared rooms check): {}. \
+                                                Falling back to unfiltered list.",
+                                                e
+                                            );
+                                            // Gracefully degrade: send unfiltered list rather than nothing
+                                            preliminary_left_users
+                                        }
+                                    }
+                                } else {
+                                    Vec::new()
+                                };
                                 
                                 let update = SyncUpdate::DeviceListUpdate {
                                     changed: vec![device.user_id],
@@ -624,6 +656,75 @@ impl LiveQuerySync {
     /// This allows consumers to subscribe to sync updates broadcast by the sync manager
     pub fn subscribe_to_updates(&self) -> broadcast::Receiver<SyncUpdate> {
         self.update_receiver.resubscribe()
+    }
+
+    /// Filter left users to only include those who don't share ANY rooms with the current user
+    /// 
+    /// This implements the shared rooms edge case: if User A and User B are both in Room 1 
+    /// and Room 2, and User B leaves Room 1, they should NOT be in the "left" list because 
+    /// they still share Room 2 with User A.
+    /// 
+    /// # Arguments
+    /// * `repository_service` - Repository service for querying memberships
+    /// * `current_user_id` - The current user's ID
+    /// * `candidate_left_users` - Users who have left or been banned from at least one room
+    /// 
+    /// # Returns
+    /// A filtered list containing only users who share NO rooms with the current user
+    async fn filter_truly_left_users(
+        repository_service: &ClientRepositoryService,
+        current_user_id: &str,
+        candidate_left_users: Vec<String>,
+    ) -> Result<Vec<String>> {
+        // Get all rooms the current user is still in
+        let current_user_rooms = repository_service
+            .get_user_memberships()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get current user rooms: {}", e))?;
+        
+        // Build a set of all users who share at least one room with the current user
+        let mut users_in_shared_rooms = HashSet::new();
+        
+        for membership in &current_user_rooms {
+            // Only check joined rooms
+            if membership.membership == MembershipState::Join {
+                // Get all members of this room
+                match repository_service.get_room_members(&membership.room_id).await {
+                    Ok(room_members) => {
+                        for member in room_members {
+                            // Only track joined members (not invited, left, or banned)
+                            if member.membership == MembershipState::Join {
+                                users_in_shared_rooms.insert(member.user_id);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Failed to get members for room {} during left user filtering: {}",
+                            membership.room_id, e
+                        );
+                        // Continue processing other rooms even if one fails
+                    }
+                }
+            }
+        }
+        
+        // Filter candidate left users: only include those NOT in shared rooms
+        let truly_left_users: Vec<String> = candidate_left_users
+            .into_iter()
+            .filter(|user_id| {
+                let is_in_shared_room = users_in_shared_rooms.contains(user_id);
+                if is_in_shared_room {
+                    debug!(
+                        "User {} removed from left list: still shares rooms with {}",
+                        user_id, current_user_id
+                    );
+                }
+                !is_in_shared_room
+            })
+            .collect();
+        
+        Ok(truly_left_users)
     }
 }
 

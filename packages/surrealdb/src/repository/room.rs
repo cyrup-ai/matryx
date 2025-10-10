@@ -4,6 +4,7 @@ use crate::repository::EventRepository;
 use matryx_entity::filter::EventFilter;
 use matryx_entity::types::{
     Event,
+    EventContent,
     MembershipState,
     NotificationPowerLevels,
     PowerLevels,
@@ -101,6 +102,14 @@ impl GuestAccess {
     }
 }
 
+/// Result of guest access check
+#[derive(Debug, Clone, PartialEq)]
+pub enum GuestAccessResult {
+    Allowed,
+    Forbidden,
+    RequiresMembership,
+}
+
 // Response types for advanced room operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextResponse {
@@ -157,11 +166,17 @@ pub struct EventReport {
 #[derive(Clone)]
 pub struct RoomRepository {
     db: Surreal<Any>,
+    event_repo: EventRepository,
+    membership_repo: crate::repository::MembershipRepository,
 }
 
 impl RoomRepository {
     pub fn new(db: Surreal<Any>) -> Self {
-        Self { db }
+        Self { 
+            db: db.clone(),
+            event_repo: EventRepository::new(db.clone()),
+            membership_repo: crate::repository::MembershipRepository::new(db.clone()),
+        }
     }
 
     pub async fn create(&self, room: &Room) -> Result<Room, RepositoryError> {
@@ -2969,6 +2984,63 @@ impl RoomRepository {
 
         let result: Option<PartialStateResult> = response.take(0)?;
         Ok(result.and_then(|r| r.partial_state).unwrap_or(false))
+    }
+
+    /// Check if a user can access a room based on guest access rules
+    pub async fn check_guest_access(
+        &self,
+        room_id: &str,
+        user_id: Option<&str>,
+        _is_guest: bool,
+    ) -> Result<GuestAccessResult, RepositoryError> {
+        // Get room's guest access state event
+        let state_events = self.event_repo
+            .get_state_events(room_id)
+            .await?;
+        
+        let guest_access_event = state_events
+            .into_iter()
+            .find(|e| e.event_type == "m.room.guest_access" && e.state_key == Some("".to_string()));
+        
+        // Extract guest_access value from event content
+        let guest_access = if let Some(event) = guest_access_event {
+            match &event.content {
+                EventContent::Unknown(content) => {
+                    content.get("guest_access")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("forbidden")
+                        .to_string()
+                }
+                _ => "forbidden".to_string()
+            }
+        } else {
+            "forbidden".to_string()  // Default per Matrix spec
+        };
+        
+        match guest_access.as_str() {
+            "can_join" => {
+                // Guests can access this room
+                Ok(GuestAccessResult::Allowed)
+            }
+            "forbidden" | _ => {
+                // Check if user is a member
+                if let Some(uid) = user_id {
+                    let membership = self.membership_repo
+                        .get_by_room_user(room_id, uid)
+                        .await?;
+                    
+                    match membership {
+                        Some(m) if m.membership == MembershipState::Join => {
+                            Ok(GuestAccessResult::Allowed)
+                        }
+                        _ => Ok(GuestAccessResult::RequiresMembership)
+                    }
+                } else {
+                    // No user_id and guest access forbidden
+                    Ok(GuestAccessResult::Forbidden)
+                }
+            }
+        }
     }
 }
 

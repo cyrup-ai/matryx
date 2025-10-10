@@ -386,6 +386,7 @@ async fn create_user_session(
         is_active: true,
         valid: true,
         puppets_user_id: None, // Not an application service session
+        is_guest: false, // Regular user login, not a guest
     };
 
     let created_session = session_repo.create(&session).await.map_err(|db_error| {

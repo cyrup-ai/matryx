@@ -21,8 +21,9 @@ use crate::monitoring::lazy_loading_alerts::{
 };
 use crate::monitoring::memory_tracker::LazyLoadingMemoryTracker;
 use matryx_surrealdb::repository::push::PushRepository;
+use matryx_surrealdb::repository::push_service::PushService;
 use matryx_surrealdb::repository::{
-    AuthRepository, MentionRepository, ServerNoticeRepository, ThreadRepository,
+    AuthRepository, MentionRepository, ReceiptRepository, ServerNoticeRepository, ThreadRepository,
     database_health::DatabaseHealthRepository, device::DeviceRepository, edu::EDURepository,
     event::EventRepository, membership::MembershipRepository, metrics::HealthStatus,
     monitoring::MonitoringRepository, oauth2::OAuth2Repository, performance::PerformanceRepository,
@@ -51,6 +52,8 @@ pub struct AppState {
     pub federation_media_client: Arc<FederationMediaClient>,
     #[allow(dead_code)]
     pub push_engine: Arc<PushRepository<Any>>,
+    /// Push service for evaluating push rules and triggering notifications
+    pub push_service: Arc<PushService>,
     #[allow(dead_code)]
     pub thread_repository: Arc<ThreadRepository<Any>>,
     pub mention_repository: Arc<MentionRepository>,
@@ -58,6 +61,8 @@ pub struct AppState {
     pub server_notice_repository: Arc<ServerNoticeRepository<Any>>,
     /// Presence repository for managing user presence state
     pub presence_repo: Arc<PresenceRepository>,
+    /// Receipt repository for managing read receipts
+    pub receipt_repo: Arc<ReceiptRepository>,
     /// Room operations service that coordinates between room-related repositories
     pub room_operations: Arc<RoomOperationsService<Any>>,
     /// Enhanced lazy loading cache with SurrealDB LiveQuery integration
@@ -117,6 +122,9 @@ impl AppState {
         // Initialize presence repository
         let presence_repo = Arc::new(PresenceRepository::new(db.clone()));
 
+        // Initialize receipt repository
+        let receipt_repo = Arc::new(ReceiptRepository::new(db.clone()));
+
         // Initialize repositories for room operations service
         let room_repo = RoomRepository::new(db.clone());
         let event_repo = EventRepository::new(db.clone());
@@ -168,6 +176,9 @@ impl AppState {
         // Initialize push engine
         let push_engine = Arc::new(PushRepository::new(db.clone()));
 
+        // Initialize push service for push rule evaluation
+        let push_service = Arc::new(PushService::new(db.clone()));
+
         // Initialize database health repository
         let database_health_repo = Arc::new(DatabaseHealthRepository::new(db.clone()));
 
@@ -208,10 +219,12 @@ impl AppState {
             device_edu_handler,
             federation_media_client,
             push_engine,
+            push_service,
             thread_repository,
             mention_repository,
             server_notice_repository,
             presence_repo,
+            receipt_repo,
             room_operations,
             lazy_loading_cache: None,
             lazy_loading_metrics: None,
@@ -287,6 +300,9 @@ impl AppState {
         // Initialize presence repository
         let presence_repo = Arc::new(PresenceRepository::new(db.clone()));
 
+        // Initialize receipt repository
+        let receipt_repo = Arc::new(ReceiptRepository::new(db.clone()));
+
         // Initialize repositories for room operations service
         let room_repo = RoomRepository::new(db.clone());
         let event_repo = EventRepository::new(db.clone());
@@ -338,6 +354,9 @@ impl AppState {
         // Initialize push engine
         let push_engine = Arc::new(PushRepository::new(db.clone()));
 
+        // Initialize push service for push rule evaluation
+        let push_service = Arc::new(PushService::new(db.clone()));
+
         // Initialize database health repository
         let database_health_repo = Arc::new(DatabaseHealthRepository::new(db.clone()));
 
@@ -375,10 +394,12 @@ impl AppState {
             device_edu_handler,
             federation_media_client,
             push_engine,
+            push_service,
             thread_repository,
             mention_repository,
             server_notice_repository,
             presence_repo,
+            receipt_repo,
             room_operations,
             lazy_loading_cache: Some(lazy_cache),
             lazy_loading_metrics: Some(metrics),

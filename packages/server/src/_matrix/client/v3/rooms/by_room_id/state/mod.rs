@@ -36,6 +36,10 @@ pub async fn get(
             StatusCode::NOT_FOUND
         })?;
 
+    // Check guest access
+    crate::room::authorization::require_room_access(&room_repo, &room_id, &auth.user_id, auth.is_guest)
+        .await?;
+
     // Check if user has permission to view room state
     let membership_repo = Arc::new(MembershipRepository::new(state.db.clone()));
     let membership_status = membership_repo

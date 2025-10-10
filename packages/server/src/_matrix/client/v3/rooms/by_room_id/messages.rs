@@ -5,6 +5,7 @@ use tracing::{error, info, warn};
 
 use crate::{AppState, auth::{MatrixAuth, extract_matrix_auth}};
 use matryx_entity::types::RoomEventFilter;
+use matryx_surrealdb::repository::RoomRepository;
 
 #[derive(Debug, Deserialize)]
 pub struct MessagesQueryParams {
@@ -84,13 +85,25 @@ pub async fn get(
         StatusCode::UNAUTHORIZED
     })?;
 
-    let user_id = match auth {
+    let (user_id, is_guest) = match auth {
         MatrixAuth::User(token_info) => {
             if token_info.is_expired() {
                 warn!("Room messages request failed - access token expired");
                 return Err(StatusCode::UNAUTHORIZED);
             }
-            token_info.user_id.clone()
+            
+            // Get session to check if user is a guest
+            let session_repo = matryx_surrealdb::repository::SessionRepository::new(state.db.clone());
+            let session = session_repo
+                .get_by_access_token(&token_info.token)
+                .await
+                .map_err(|e| {
+                    error!("Failed to get session: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            
+            let is_guest = session.map(|s| s.is_guest).unwrap_or(false);
+            (token_info.user_id.clone(), is_guest)
         },
         MatrixAuth::Server(_) => {
             warn!("Room messages request failed - server authentication not typically used");
@@ -131,6 +144,11 @@ pub async fn get(
     } else {
         None
     };
+
+    // Check guest access before membership
+    let room_repo = RoomRepository::new(state.db.clone());
+    crate::room::authorization::require_room_access(&room_repo, &room_id, &user_id, is_guest)
+        .await?;
 
     // Validate user has access to room
     let is_member = state

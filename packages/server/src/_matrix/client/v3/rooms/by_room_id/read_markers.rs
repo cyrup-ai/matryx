@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 use tracing::{debug, error, info, warn};
 
 use crate::{AppState, auth::{MatrixAuth, extract_matrix_auth}};
-use matryx_surrealdb::repository::ReceiptRepository;
 
 #[derive(Debug, Deserialize)]
 pub struct ReadMarkersRequest {
@@ -71,11 +70,10 @@ pub async fn post(
     // Process read receipts as required by Matrix 1.4 specification
     // The server MUST treat m.read and m.read.private in /read_markers the same
     // as it would for requests to /receipt/{receiptType}/{eventId}
-    let receipt_repo = ReceiptRepository::new(state.db.clone());
 
     // Process m.read (public read receipt)
     if let Some(ref event_id) = payload.read {
-        match receipt_repo
+        match state.receipt_repo
             .store_receipt(
                 &room_id,
                 &user_id,
@@ -98,7 +96,7 @@ pub async fn post(
 
     // Process m.read.private (private read receipt)
     if let Some(ref event_id) = payload.read_private {
-        match receipt_repo
+        match state.receipt_repo
             .store_receipt(
                 &room_id,
                 &user_id,

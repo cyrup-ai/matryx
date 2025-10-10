@@ -17,6 +17,7 @@ pub struct Session {
     pub is_active: bool,
     pub valid: bool,
     pub puppets_user_id: Option<String>,
+    pub is_guest: bool,
 }
 
 impl Session {
@@ -41,6 +42,7 @@ impl Session {
             is_active: true,
             valid: true,
             puppets_user_id: None,
+            is_guest: false,
         }
     }
 }
